@@ -1,0 +1,41 @@
+services:
+  api:
+    ports:
+      - "127.0.0.1:${YUXI_API_DEBUG_PORT:-5678}:5678"
+    command:
+      - uv
+      - run
+      - --no-sync
+      - --no-dev
+      - python
+      - -m
+      - debugpy
+      - --listen
+      - 0.0.0.0:5678
+      - --wait-for-client
+      - -m
+      - uvicorn
+      - server.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5050"
+      - --timeout-graceful-shutdown
+      - "5"
+
+  worker:
+    ports:
+      - "127.0.0.1:${YUXI_WORKER_DEBUG_PORT:-5679}:5679"
+    command:
+      - uv
+      - run
+      - --no-sync
+      - --no-dev
+      - python
+      - -m
+      - debugpy
+      - --listen
+      - 0.0.0.0:5679
+      - --wait-for-client
+      - -m
+      - server.worker_main

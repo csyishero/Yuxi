@@ -25,9 +25,11 @@ Yuxi 会把本地运行信息映射到 Langfuse：
 LANGFUSE_PUBLIC_KEY=<your-public-key>
 LANGFUSE_SECRET_KEY=<your-secret-key>
 LANGFUSE_BASE_URL=https://cloud.langfuse.com
+LANGFUSE_TRACING_ENVIRONMENT=development
+# LANGFUSE_RELEASE=v0.7.3
 ```
 
-`LANGFUSE_BASE_URL` 用于自托管或指定区域；留空时使用 SDK 默认地址。需要显式关闭时设置：
+`LANGFUSE_BASE_URL` 用于自托管或指定区域；留空时使用 SDK 默认地址。Docker 中的 Yuxi 访问宿主机 Langfuse 时，应使用 `http://host.docker.internal:<端口>`，不能填写容器自身的 `127.0.0.1`。`LANGFUSE_TRACING_ENVIRONMENT` 用于区分开发、测试和生产数据，`LANGFUSE_RELEASE` 可选用于标识发布版本。需要显式关闭时设置：
 
 ```bash
 LANGFUSE_ENABLED=false
@@ -40,6 +42,8 @@ docker compose up -d --force-recreate api worker
 ```
 
 密钥只放在受保护的运行环境中，不要写入仓库、Agent 环境或公开日志。
+
+每个 AgentRun 形成一条 trace，普通执行使用 `execute-agent-run`，恢复执行使用 `resume-agent-run`；同一 `thread_id` 映射为 session。LangGraph 回调自动记录模型、工具和检索子调用，并携带 Agent、operation、Run 与请求标识。Yuxi 不向 Langfuse metadata 发送用户名和部门字段，并在 SDK 出站前遮蔽常见密码、Token、Cookie 与 API Key 字段；业务问题排查仍应遵守部署方的数据留存和访问控制策略。
 
 ## 验证是否生效
 

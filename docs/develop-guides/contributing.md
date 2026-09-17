@@ -51,6 +51,35 @@ docker compose logs --tail=100 api
 
 `api` 和 `web` 服务默认支持热重载。容器名由 Compose project 生成；使用 `docker compose logs api web` 查看当前槽位日志。修改本地代码后通常不需要手动重启。
 
+### 使用 PyCharm 调试容器
+
+需要在容器内命中后端断点时，叠加调试配置并重新构建 API 镜像：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.debug.yml build api
+docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d api worker
+```
+
+调试配置默认让 API 在宿主机 `127.0.0.1:5678`、worker 在 `127.0.0.1:5679` 等待 DAP 客户端；并行工作区可以通过 `YUXI_API_DEBUG_PORT` 和 `YUXI_WORKER_DEBUG_PORT` 改用其他宿主机端口。PyCharm 分别创建两个 `Attach to DAP` 配置，并将本地 `backend` 目录映射到容器 `/app`：
+
+| 目标 | Host | Port | 本地路径 | 容器路径 |
+| --- | --- | --- | --- | --- |
+| API 路由与服务 | `localhost` | `5678` | `<仓库>/backend` | `/app` |
+| AgentRun 与工具执行 | `localhost` | `5679` | `<仓库>/backend` | `/app` |
+
+API 和 worker 在调试器附加前不会继续启动，因此这段时间健康检查失败属于预期行为。调试配置有意关闭 Uvicorn reload 和 watchfiles，保证 DAP 连接的进程就是执行断点代码的进程；源码修改后重启对应服务：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.debug.yml restart api
+docker compose -f docker-compose.yml -f docker-compose.debug.yml restart worker
+```
+
+结束调试后恢复普通开发环境：
+
+```bash
+docker compose up -d --force-recreate api worker
+```
+
 ## 3. 实现原则
 
 - 用满足验收标准的最小实现，保持主路径线性可读。

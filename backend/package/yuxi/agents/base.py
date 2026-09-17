@@ -171,6 +171,9 @@ class BaseAgent:
             input_config["callbacks"] = list(callbacks)
         if metadata:
             input_config["metadata"] = dict(metadata)
+            trace_name = metadata.get("langfuse_trace_name")
+            if isinstance(trace_name, str) and trace_name:
+                input_config["run_name"] = trace_name
         if tags:
             input_config["tags"] = list(tags)
 
@@ -197,6 +200,9 @@ class BaseAgent:
             input_config["callbacks"] = list(callbacks)
         if metadata:
             input_config["metadata"] = dict(metadata)
+            trace_name = metadata.get("langfuse_trace_name")
+            if isinstance(trace_name, str) and trace_name:
+                input_config["run_name"] = trace_name
         if tags:
             input_config["tags"] = list(tags)
 
@@ -294,6 +300,9 @@ class BaseAgent:
             input_config["callbacks"] = list(callbacks)
         if metadata:
             input_config["metadata"] = dict(metadata)
+            trace_name = metadata.get("langfuse_trace_name")
+            if isinstance(trace_name, str) and trace_name:
+                input_config["run_name"] = trace_name
         if tags:
             input_config["tags"] = list(tags)
 

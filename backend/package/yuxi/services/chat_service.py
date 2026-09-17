@@ -94,16 +94,13 @@ def _build_langfuse_run_context(
     message_type: str | None = None,
     meta: dict | None = None,
 ) -> LangfuseRunContext:
-    extra_metadata = None
+    extra_metadata = {key: str(value) for key in ("run_id", "run_type") if (value := (meta or {}).get(key)) is not None}
     extra_tags = None
     invocation_meta = (meta or {}).get("agent_invocation_meta") if isinstance(meta, dict) else None
     evaluation = invocation_meta.get("evaluation") if isinstance(invocation_meta, dict) else None
     # 如果请求来自智能体评测，添加评测相关的 metadata 和 tags，方便在 Langfuse 中进行过滤和分析
     if (meta or {}).get("source") == "agent_evaluation" or (isinstance(evaluation, dict) and evaluation):
-        extra_metadata = {
-            "source": "agent_evaluation",
-            "feature": "agent_evaluation",
-        }
+        extra_metadata.update({"source": "agent_evaluation", "feature": "agent_evaluation"})
         extra_tags = ["agent_evaluation"]
         if isinstance(evaluation, dict):
             dataset_name = evaluation.get("dataset_name")
@@ -125,10 +122,7 @@ def _build_langfuse_run_context(
         operation=operation,
         backend_id=backend_id,
         message_type=message_type,
-        username=getattr(current_user, "username", None),
-        login_user_id=getattr(current_user, "uid", None),
-        department_id=getattr(current_user, "department_id", None),
-        extra_metadata=extra_metadata,
+        extra_metadata=extra_metadata or None,
         extra_tags=extra_tags,
     )
 

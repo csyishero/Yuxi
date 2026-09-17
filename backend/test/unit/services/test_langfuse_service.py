@@ -65,6 +65,8 @@ def test_build_run_context_includes_trace_metadata(monkeypatch):
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
     monkeypatch.setenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.example")
+    monkeypatch.setenv("LANGFUSE_TRACING_ENVIRONMENT", "test")
+    monkeypatch.setenv("LANGFUSE_RELEASE", "test-release")
     monkeypatch.delenv("LANGFUSE_ENABLED", raising=False)
     monkeypatch.setattr(svc, "Langfuse", _FakeLangfuseClient)
     monkeypatch.setattr(svc, "CallbackHandler", _FakeCallbackHandler)
@@ -78,18 +80,19 @@ def test_build_run_context_includes_trace_metadata(monkeypatch):
         operation="agent_chat_stream",
         backend_id="ChatbotAgent",
         message_type="text",
-        username="alice",
-        login_user_id="alice-login",
-        department_id=7,
+        extra_metadata={"run_id": "run-1", "run_type": "main"},
     )
 
     assert run_context.trace_id == "trace-req-1"
     assert len(run_context.callbacks) == 1
+    assert run_context.callbacks[0].public_key == "pk-test"
     assert run_context.callbacks[0].trace_context == {"trace_id": "trace-req-1"}
     assert run_context.metadata["langfuse_user_id"] == "user-1"
     assert run_context.metadata["langfuse_session_id"] == "thread-1"
     assert run_context.metadata["backend_id"] == "ChatbotAgent"
-    assert run_context.metadata["department_id"] == "7"
+    assert run_context.metadata["run_id"] == "run-1"
+    assert run_context.metadata["run_type"] == "main"
+    assert run_context.metadata["langfuse_trace_name"] == "execute-agent-run"
     assert run_context.tags == [
         "yuxi",
         "chat",
@@ -97,6 +100,76 @@ def test_build_run_context_includes_trace_metadata(monkeypatch):
         "agent:agent-a",
         "message_type:text",
     ]
+    assert run_context.metadata["langfuse_tags"] == run_context.tags
+    client_kwargs = _FakeLangfuseClient.instances[-1].kwargs
+    assert client_kwargs["environment"] == "test"
+    assert client_kwargs["release"] == "test-release"
+    assert client_kwargs["mask"] is svc._mask_langfuse_data
+
+
+def test_mask_langfuse_data_redacts_credentials_without_hiding_usage():
+    masked = svc._mask_langfuse_data(
+        data={
+            "authorization": "Bearer abc",
+            "authorization_header": "Bearer header-secret",
+            "provider_api_key": "secret-value",
+            "secret_key": "secret-key-value",
+            "aws_secret_access_key": "aws-secret-value",
+            "private_key": "private-key-value",
+            "access_tokens": ["access-a", "access-b"],
+            "refresh_tokens": ["refresh-a", "refresh-b"],
+            "nested": [
+                {
+                    "access_token": "token-value",
+                    "input_tokens": 42,
+                    "output_tokens": 7,
+                    "total_tokens": 49,
+                }
+            ],
+            "prompt": "正常诊断内容",
+        }
+    )
+
+    assert masked == {
+        "authorization": "[REDACTED]",
+        "authorization_header": "[REDACTED]",
+        "provider_api_key": "[REDACTED]",
+        "secret_key": "[REDACTED]",
+        "aws_secret_access_key": "[REDACTED]",
+        "private_key": "[REDACTED]",
+        "access_tokens": "[REDACTED]",
+        "refresh_tokens": "[REDACTED]",
+        "nested": [
+            {
+                "access_token": "[REDACTED]",
+                "input_tokens": 42,
+                "output_tokens": 7,
+                "total_tokens": 49,
+            }
+        ],
+        "prompt": "正常诊断内容",
+    }
+    assert svc._mask_langfuse_data(data='{"credential":{"api_key":"secret"},"input_tokens":42}') == (
+        '{"credential": "[REDACTED]", "input_tokens": 42}'
+    )
+
+
+def test_build_run_context_uses_resume_trace_name_without_personal_metadata(monkeypatch):
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    svc.get_langfuse_client.cache_clear()
+
+    run_context = svc.build_run_context(
+        user_id="opaque-user-id",
+        thread_id="thread-1",
+        agent_id="agent-a",
+        request_id="req-1",
+        operation="agent_chat_resume",
+    )
+
+    assert run_context.metadata["langfuse_trace_name"] == "resume-agent-run"
+    assert "username" not in run_context.metadata
+    assert "department_id" not in run_context.metadata
 
 
 def test_build_run_context_merges_evaluation_metadata_and_tags(monkeypatch):

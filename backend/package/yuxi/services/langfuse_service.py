@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -19,6 +20,11 @@ except Exception:  # pragma: no cover - optional dependency during local test co
 
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _DEFAULT_LANGFUSE_BASE_URL = "https://cloud.langfuse.com"
+_TRACE_NAMES = {
+    "agent_chat_stream": "execute-agent-run",
+    "agent_chat_resume": "resume-agent-run",
+}
+_REDACTED_VALUE = "[REDACTED]"
 
 
 @dataclass(slots=True)
@@ -40,6 +46,68 @@ def is_langfuse_enabled() -> bool:
     return bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
 
 
+def _is_sensitive_key(key: object) -> bool:
+    normalized = str(key).strip().lower().replace("-", "_")
+    if normalized in {
+        "accepted_prediction_tokens",
+        "audio_input_tokens",
+        "audio_output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
+        "rejected_prediction_tokens",
+    }:
+        return False
+
+    sensitive_markers = (
+        "api_key",
+        "apikey",
+        "authorization",
+        "cookie",
+        "credential",
+        "password",
+        "passwd",
+        "private_key",
+        "secret",
+    )
+    return (
+        any(marker in normalized for marker in sensitive_markers)
+        or normalized == "token"
+        or normalized.endswith(("_token", "_tokens"))
+    )
+
+
+def _mask_langfuse_data(data: Any) -> Any:
+    """递归遮蔽发送到 Langfuse 的凭证字段，同时保留可诊断结构。"""
+    if isinstance(data, dict):
+        return {
+            key: _REDACTED_VALUE if _is_sensitive_key(key) else _mask_langfuse_data(item) for key, item in data.items()
+        }
+    if isinstance(data, list):
+        return [_mask_langfuse_data(item) for item in data]
+    if isinstance(data, tuple):
+        return tuple(_mask_langfuse_data(item) for item in data)
+    if isinstance(data, str):
+        stripped = data.strip()
+        if stripped.lower().startswith("bearer "):
+            return _REDACTED_VALUE
+        if stripped.startswith(("{", "[")):
+            try:
+                parsed = json.loads(data)
+            except (TypeError, ValueError):
+                pass
+            else:
+                return json.dumps(_mask_langfuse_data(parsed), ensure_ascii=False)
+    return data
+
+
 @lru_cache(maxsize=1)
 def get_langfuse_client() -> Langfuse | None:
     if not is_langfuse_enabled():
@@ -48,10 +116,17 @@ def get_langfuse_client() -> Langfuse | None:
     kwargs: dict[str, Any] = {
         "public_key": os.getenv("LANGFUSE_PUBLIC_KEY"),
         "secret_key": os.getenv("LANGFUSE_SECRET_KEY"),
+        "mask": _mask_langfuse_data,
     }
     host = os.getenv("LANGFUSE_BASE_URL")
     if host:
         kwargs["host"] = host
+    environment = os.getenv("LANGFUSE_TRACING_ENVIRONMENT")
+    if environment:
+        kwargs["environment"] = environment
+    release = os.getenv("LANGFUSE_RELEASE")
+    if release:
+        kwargs["release"] = release
 
     try:
         return Langfuse(**kwargs)
@@ -69,9 +144,6 @@ def build_trace_metadata(
     operation: str,
     backend_id: str | None = None,
     message_type: str | None = None,
-    username: str | None = None,
-    login_user_id: str | None = None,
-    department_id: int | str | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {
@@ -89,12 +161,6 @@ def build_trace_metadata(
         metadata["backend_id"] = backend_id
     if message_type:
         metadata["message_type"] = message_type
-    if username:
-        metadata["username"] = username
-    if login_user_id:
-        metadata["login_user_id"] = login_user_id
-    if department_id is not None:
-        metadata["department_id"] = str(department_id)
     if extra_metadata:
         metadata.update(extra_metadata)
 
@@ -126,9 +192,6 @@ def build_run_context(
     operation: str,
     backend_id: str | None = None,
     message_type: str | None = None,
-    username: str | None = None,
-    login_user_id: str | None = None,
-    department_id: int | str | None = None,
     extra_metadata: dict[str, Any] | None = None,
     extra_tags: list[str] | None = None,
 ) -> LangfuseRunContext:
@@ -140,9 +203,6 @@ def build_run_context(
         operation=operation,
         backend_id=backend_id,
         message_type=message_type,
-        username=username,
-        login_user_id=login_user_id,
-        department_id=department_id,
         extra_metadata=extra_metadata,
     )
     tags = build_trace_tags(
@@ -151,13 +211,18 @@ def build_run_context(
         message_type=message_type,
         extra_tags=extra_tags,
     )
+    metadata["langfuse_trace_name"] = _TRACE_NAMES.get(operation, "execute-agent-run")
+    metadata["langfuse_tags"] = list(tags)
 
     client = get_langfuse_client()
     if client is None or CallbackHandler is None:
         return LangfuseRunContext(metadata=metadata, tags=tags)
 
     trace_id = client.create_trace_id(seed=request_id)
-    handler = CallbackHandler(trace_context={"trace_id": trace_id})
+    handler = CallbackHandler(
+        public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+        trace_context={"trace_id": trace_id},
+    )
     return LangfuseRunContext(callbacks=[handler], metadata=metadata, tags=tags, trace_id=trace_id)
 
 
