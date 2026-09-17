@@ -294,7 +294,8 @@ class Workspace:
             raise ValueError("directory name must be one path component")
         self._require_within(parent_path, root)
         base, parts = self._resolve_path(parent_path)
-        parent_fd = self._open_directory(base, parts)
+        # parent_fd = self._open_directory(base, parts)
+        parent_fd = self._open_directory(base, parts, create=True)
         try:
             os.mkdir(name, 0o700, dir_fd=parent_fd)
             item_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)

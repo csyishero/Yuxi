@@ -52,6 +52,7 @@ services:
       - ${YUXI_STATE_DIR:-./docker/volumes}/yuxi/threads:/app/user-data
       - ${YUXI_STATE_DIR:-./docker/volumes}/yuxi/skill-sources:/app/skill-sources
       - ${YUXI_STATE_DIR:-./docker/volumes}/yuxi/skill-projections:/app/skill-projections
+      - ./backend/package:/app/package
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
@@ -101,6 +102,7 @@ services:
       - ${YUXI_STATE_DIR:-./docker/volumes}/yuxi/threads:/app/user-data
       - ${YUXI_STATE_DIR:-./docker/volumes}/yuxi/skill-sources:/app/skill-sources
       - ${YUXI_STATE_DIR:-./docker/volumes}/yuxi/skill-projections:/app/skill-projections
+      - ./backend/package:/app/package
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
