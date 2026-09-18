@@ -567,6 +567,77 @@ async def test_terminal_event_is_published_after_runtime_cleanup(monkeypatch: py
 
 
 @pytest.mark.asyncio
+async def test_runtime_cleanup_persists_sandbox_timing_with_cleanup_fence(monkeypatch: pytest.MonkeyPatch):
+    """释放耗时与 cleanup fence 必须在同一 PostgreSQL 事务中落库。"""
+    current = SimpleNamespace(
+        id="run-1",
+        uid="user-1",
+        conversation_id=7,
+        runtime_cleanup_pending=True,
+        sandbox_timing={"sandbox_execute_request_ms": 8000.0},
+    )
+    conversation = SimpleNamespace(id=7, uid="user-1")
+
+    class Result:
+        @staticmethod
+        def scalar_one_or_none():
+            return None
+
+    class DB:
+        def __init__(self):
+            self.scalar_calls = 0
+            self.flushed = False
+
+        async def execute(self, *_args, **_kwargs):
+            return Result()
+
+        async def scalar(self, _statement):
+            self.scalar_calls += 1
+            return current if self.scalar_calls == 1 else conversation
+
+        async def flush(self):
+            self.flushed = True
+
+    db = DB()
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield db
+
+    async def resolve_workdir(**kwargs):
+        assert kwargs["conversation"] is conversation
+        return "projects/project-1"
+
+    provider = SimpleNamespace(
+        release=lambda *_args, **_kwargs: {
+            "sandbox_delete_container_ms": 250.0,
+            "sandbox_release_ms": 300.0,
+        }
+    )
+    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", fake_session_context)
+    monkeypatch.setattr(run_worker, "resolve_conversation_workdir_path", resolve_workdir)
+    monkeypatch.setattr(run_worker, "get_sandbox_provider", lambda: provider)
+    run = SimpleNamespace(
+        id="run-1",
+        uid="user-1",
+        run_type="chat",
+        conversation_thread_id="thread-1",
+        runtime_scope_id="thread-1",
+    )
+
+    cleaned = await run_worker._release_runtime_if_idle(run)
+
+    assert cleaned is True
+    assert current.sandbox_timing == {
+        "sandbox_execute_request_ms": 8000.0,
+        "sandbox_delete_container_ms": 250.0,
+        "sandbox_release_ms": 300.0,
+    }
+    assert current.runtime_cleanup_pending is False
+    assert db.flushed is True
+
+
+@pytest.mark.asyncio
 async def test_terminal_cleanup_failure_keeps_end_event_unpublished(monkeypatch: pytest.MonkeyPatch):
     """cleanup 失败必须保留 durable fence，不能先向客户端宣告 execution tree 已结束。"""
     run_obj = _build_run()

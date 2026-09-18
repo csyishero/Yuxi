@@ -23,7 +23,7 @@ from yuxi.utils import logger
 from yuxi.utils.singleton import SingletonMeta
 
 AGENT_RUN_TERMINAL_STATUS_SQL = ", ".join(f"'{status}'" for status in AGENT_RUN_TERMINAL_STATUSES)
-BUSINESS_SCHEMA_VERSION = 7
+BUSINESS_SCHEMA_VERSION = 8
 KNOWLEDGE_SCHEMA_VERSION = 2
 SCHEMA_VERSION_TABLE = "yuxi_schema_migrations"
 AGENT_RUN_LEASE_SCHEMA_STATEMENTS = (
@@ -99,6 +99,9 @@ AGENT_RUN_TIMING_SCHEMA_STATEMENTS = (
     "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS prepared_at TIMESTAMP WITHOUT TIME ZONE",
     "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS first_output_at TIMESTAMP WITHOUT TIME ZONE",
     "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS first_model_request_at TIMESTAMP WITHOUT TIME ZONE",
+)
+AGENT_RUN_SANDBOX_TIMING_SCHEMA_STATEMENTS = (
+    ("ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS sandbox_timing JSONB NOT NULL DEFAULT '{}'::jsonb"),
 )
 WORKDIR_PATH_SCHEMA_STATEMENTS = (
     f"""
@@ -1159,6 +1162,7 @@ class PostgresManager(metaclass=SingletonMeta):
             *MESSAGE_AUDIT_SCHEMA_STATEMENTS,
             *AGENT_RUN_FACT_SCHEMA_STATEMENTS,
             *AGENT_RUN_TIMING_SCHEMA_STATEMENTS,
+            *AGENT_RUN_SANDBOX_TIMING_SCHEMA_STATEMENTS,
             (
                 "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS "
                 "origin_metadata JSONB NOT NULL DEFAULT '{}'::jsonb"

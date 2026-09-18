@@ -15,6 +15,7 @@ from arq.worker import RetryJob, func
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError
 from yuxi.agents.backends.sandbox.provider import get_sandbox_provider
+from yuxi.agents.backends.sandbox.provisioner_client import merge_sandbox_timing
 from yuxi.agents.callbacks.model_request_timing import FirstModelRequestRecorder
 from yuxi.agents.mcp.service import ensure_builtin_mcp_servers_in_db
 from yuxi.agents.skills.service import init_builtin_skills
@@ -319,12 +320,16 @@ async def _release_runtime_if_idle(run: AgentRun) -> bool:
             uid=str(current.uid),
             db=db,
         )
-        await asyncio.to_thread(
+        sandbox_timing = await asyncio.to_thread(
             get_sandbox_provider().release,
             runtime_scope_id,
             uid=str(current.uid),
             clear_cache_on_delete_failure=True,
             workdir_path=workdir_path,
+        )
+        current.sandbox_timing = merge_sandbox_timing(
+            getattr(current, "sandbox_timing", None),
+            sandbox_timing,
         )
         current.runtime_cleanup_pending = False
         await db.flush()

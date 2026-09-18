@@ -1,8 +1,50 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 import httpx
+
+
+SANDBOX_TIMING_FIELDS = frozenset(
+    {
+        "sandbox_discover_ms",
+        "sandbox_create_container_ms",
+        "sandbox_create_network_ms",
+        "sandbox_wait_ready_ms",
+        "sandbox_execute_request_ms",
+        "sandbox_release_ms",
+        "sandbox_delete_container_ms",
+        "sandbox_delete_network_ms",
+    }
+)
+
+
+def normalize_sandbox_timing(value: object) -> dict[str, float]:
+    """只接受协议约定的非负数值 Sandbox 耗时。"""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: round(float(raw_value), 2)
+        for key, raw_value in value.items()
+        if key in SANDBOX_TIMING_FIELDS
+        and isinstance(raw_value, (int, float))
+        and not isinstance(raw_value, bool)
+        and raw_value >= 0
+    }
+
+
+def merge_sandbox_timing(*values: object) -> dict[str, float]:
+    """按 Run 累计多个 Sandbox 阶段耗时。"""
+    merged: dict[str, float] = {}
+    for value in values:
+        for key, duration in normalize_sandbox_timing(value).items():
+            merged[key] = round(merged.get(key, 0.0) + duration, 2)
+    return merged
+
+
+def _elapsed_ms(started_ns: int) -> float:
+    return round((time.perf_counter_ns() - started_ns) / 1_000_000, 2)
 
 
 @dataclass(slots=True)
@@ -12,6 +54,7 @@ class SandboxRecord:
     status: str | None = None
     generation: str | None = None
     workdir_path: str | None = None
+    timing: dict[str, float] = field(default_factory=dict)
 
 
 class ProvisionerClient:
@@ -72,12 +115,18 @@ class ProvisionerClient:
         return self._record_from_payload(response.json())
 
     def discover(self, sandbox_id: str) -> SandboxRecord | None:
+        started_ns = time.perf_counter_ns()
         response = self._request("GET", f"/api/sandboxes/{sandbox_id}")
         if response.status_code == 404:
             return None
         if response.status_code >= 400:
             raise RuntimeError(f"failed to discover sandbox {sandbox_id}: {response.status_code} {response.text}")
-        return self._record_from_payload(response.json())
+        record = self._record_from_payload(response.json())
+        record.timing = merge_sandbox_timing(
+            record.timing,
+            {"sandbox_discover_ms": _elapsed_ms(started_ns)},
+        )
+        return record
 
     @staticmethod
     def _record_from_payload(payload: dict) -> SandboxRecord:
@@ -88,6 +137,7 @@ class ProvisionerClient:
             status=payload.get("status"),
             generation=payload.get("generation"),
             workdir_path=payload.get("workdir_path"),
+            timing=normalize_sandbox_timing(payload.get("timing")),
         )
 
     def touch(self, sandbox_id: str) -> bool:
@@ -98,7 +148,7 @@ class ProvisionerClient:
             raise RuntimeError(f"failed to touch sandbox {sandbox_id}: {response.status_code} {response.text}")
         return True
 
-    def delete(self, sandbox_id: str, *, expected_generation: str | None = None) -> None:
+    def delete(self, sandbox_id: str, *, expected_generation: str | None = None) -> dict[str, float]:
         params = {"expected_generation": expected_generation} if expected_generation else None
         response = self._request(
             "DELETE",
@@ -106,6 +156,10 @@ class ProvisionerClient:
             timeout=self._delete_timeout,
             params=params,
         )
-        if response.status_code in {200, 404}:
-            return
+        if response.status_code == 404:
+            return {}
+        if response.status_code == 200:
+            response_json = getattr(response, "json", None)
+            payload = response_json() if callable(response_json) else {}
+            return normalize_sandbox_timing(payload.get("timing") if isinstance(payload, dict) else None)
         raise RuntimeError(f"failed to delete sandbox {sandbox_id}: {response.status_code} {response.text}")

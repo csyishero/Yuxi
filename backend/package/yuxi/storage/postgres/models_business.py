@@ -33,6 +33,16 @@ JSON_VALUE = JSON().with_variant(JSONB, "postgresql")
 MAX_LOGIN_FAILED_ATTEMPTS = 5
 LOGIN_LOCK_DURATION_SECONDS = 300
 AGENT_RUN_TERMINAL_STATUSES = ("completed", "failed", "cancelled", "interrupted")
+SANDBOX_TIMING_FIELDS = (
+    "sandbox_discover_ms",
+    "sandbox_create_container_ms",
+    "sandbox_create_network_ms",
+    "sandbox_wait_ready_ms",
+    "sandbox_execute_request_ms",
+    "sandbox_release_ms",
+    "sandbox_delete_container_ms",
+    "sandbox_delete_network_ms",
+)
 MODEL_AUDIT_MESSAGE_TYPE = "model_audit"
 TOOL_AUDIT_MESSAGE_TYPE = "tool_audit"
 AUDIT_MESSAGE_TYPES = (MODEL_AUDIT_MESSAGE_TYPE, TOOL_AUDIT_MESSAGE_TYPE)
@@ -72,9 +82,10 @@ def build_agent_run_timing(
     first_output_at: datetime | None,
     finished_at: datetime | None,
     first_model_request_at: datetime | None = None,
+    sandbox_timing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """从 AgentRun 权威时间点生成统一的阶段时延投影。"""
-    return {
+    timing = {
         "created_at": format_utc_datetime(created_at),
         "started_at": format_utc_datetime(started_at),
         "prepared_at": format_utc_datetime(prepared_at),
@@ -88,6 +99,17 @@ def build_agent_run_timing(
         "first_output_latency_ms": duration_ms(created_at, first_output_at),
         "total_latency_ms": duration_ms(created_at, finished_at),
     }
+    if isinstance(sandbox_timing, dict):
+        timing.update(
+            {
+                field_name: round(float(value), 2)
+                for field_name in SANDBOX_TIMING_FIELDS
+                if isinstance((value := sandbox_timing.get(field_name)), (int, float))
+                and not isinstance(value, bool)
+                and value >= 0
+            }
+        )
+    return timing
 
 
 class Project(Base):
@@ -1181,6 +1203,7 @@ class AgentRun(Base):
     output_message_id = Column(Integer, nullable=True, comment="Output message ID")
     input_payload = Column(JSON, nullable=False, default=dict, comment="Original input payload")
     token_usage = Column(JSON_VALUE, nullable=False, default=dict, comment="Run token usage grouped by model")
+    sandbox_timing = Column(JSON_VALUE, nullable=False, default=dict, comment="Run Sandbox lifecycle timing in ms")
     langfuse_trace_id = Column(String(64), nullable=True, comment="Langfuse trace ID")
     error_type = Column(String(64), nullable=True, comment="Error type")
     error_message = Column(Text, nullable=True, comment="Error message")
@@ -1231,6 +1254,7 @@ class AgentRun(Base):
             "output_message_id": self.output_message_id,
             "input_payload": self.input_payload or {},
             "token_usage": self.token_usage or {},
+            "sandbox_timing": self.sandbox_timing or {},
             "langfuse_trace_id": self.langfuse_trace_id,
             "error_type": self.error_type,
             "error_message": self.error_message,
@@ -1250,6 +1274,7 @@ class AgentRun(Base):
                 first_output_at=self.first_output_at,
                 finished_at=self.finished_at,
                 first_model_request_at=self.first_model_request_at,
+                sandbox_timing=self.sandbox_timing,
             ),
         }
 

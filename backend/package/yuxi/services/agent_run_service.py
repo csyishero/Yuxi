@@ -790,6 +790,7 @@ async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSessio
             first_output_at=getattr(run, "first_output_at", None),
             finished_at=getattr(run, "finished_at", None),
             first_model_request_at=getattr(run, "first_model_request_at", None),
+            sandbox_timing=getattr(run, "sandbox_timing", None),
         ),
     }
     if run.error_type or run.error_message:

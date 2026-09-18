@@ -377,7 +377,16 @@ def _remove_skill_from_user_projection(uid: str, slug: str) -> None:
 
 async def apply_skill_projection_policy_change(db: AsyncSession, slug: str) -> None:
     """提交 Skill 授权变更，并同步所有已存在的 uid 投影。"""
+    await apply_skill_projection_policy_changes(db, [slug])
+
+
+async def apply_skill_projection_policy_changes(db: AsyncSession, slugs: list[str]) -> None:
+    """批量提交 Skill 授权变更，并以单次事务刷新用户投影。"""
     from yuxi.workspace.paths import workspace_uid_dirname
+
+    normalized_slugs = list(dict.fromkeys(slug for slug in slugs if is_valid_skill_slug(slug)))
+    if not normalized_slugs:
+        return
 
     result = await db.execute(select(User.uid).where(User.is_deleted == 0).order_by(User.id))
     projection_root = get_skill_projection_dir()
@@ -388,7 +397,8 @@ async def apply_skill_projection_policy_change(db: AsyncSession, slug: str) -> N
             {"lock_scope": f"{_USER_SKILL_PROJECTION_LOCK_SCOPE}{uid}"},
         )
     for uid in uids:
-        await asyncio.to_thread(_remove_skill_from_user_projection, uid, slug)
+        for slug in normalized_slugs:
+            await asyncio.to_thread(_remove_skill_from_user_projection, uid, slug)
     await db.commit()
     for uid in uids:
         await refresh_user_skill_projection_async(uid)
@@ -1763,8 +1773,9 @@ async def init_builtin_skills(db: AsyncSession, *, created_by: str = "system") -
 
     repo = SkillRepository(db)
     synced_items: list[Skill] = []
+    specs = list_builtin_skill_specs()
 
-    for spec in list_builtin_skill_specs():
+    for spec in specs:
         slug = spec["slug"]
         existing = await repo.get_by_slug(slug)
         if existing and not is_builtin_skill(existing):
@@ -1823,5 +1834,37 @@ async def init_builtin_skills(db: AsyncSession, *, created_by: str = "system") -
         )
 
     if db is not None:
+        await _retire_unregistered_builtin_skills(
+            db,
+            repo,
+            active_slugs={spec["slug"] for spec in specs},
+        )
         await db.commit()
     return synced_items
+
+
+async def _retire_unregistered_builtin_skills(
+    db: AsyncSession,
+    repo: SkillRepository,
+    *,
+    active_slugs: set[str],
+) -> list[str]:
+    """移除已退出产品注册表的内置 Skill 及其用户投影。"""
+    retired = [item for item in await repo.list_all() if is_builtin_skill(item) and item.slug not in active_slugs]
+    if not retired:
+        return []
+    invalid_slugs = [item.slug for item in retired if not is_valid_skill_slug(item.slug)]
+    if invalid_slugs:
+        raise ValueError(f"数据库包含非法的内置 skill slug: {invalid_slugs[0]}")
+
+    for item in retired:
+        await repo.delete(item)
+
+    retired_slugs = [item.slug for item in retired]
+    await apply_skill_projection_policy_changes(db, retired_slugs)
+    for slug in retired_slugs:
+        await asyncio.to_thread(
+            _remove_skill_projection_entry,
+            get_skills_root_dir() / slug,
+        )
+    return retired_slugs

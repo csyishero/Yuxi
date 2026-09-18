@@ -37,8 +37,6 @@ def example_tool(text: str) -> str:
 
 文件读写和命令执行由 Agent 的 Sandbox backend 提供。`present_artifacts` 推荐展示当前 Project 的 `outputs/` 文件；`large_tool_results` 和会话摘要等内部文件不会作为交付物展示。
 
-图片生成能力由内置 `image-gen` Skill 提供，不再作为独立的 Python 工具注册。具体依赖和文件位置由该 Skill 说明。
-
 ## 知识库工具
 
 知识库工具以 `@tool(category="knowledge")` 注册，但不默认出现在模型工具列表。Agent 激活内置 `knowledge-base` Skill 后，Skills middleware 才会向模型开放：

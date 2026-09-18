@@ -13,10 +13,10 @@ from urllib.parse import parse_qs, urlparse
 EXPECTED_OUTPUT = "DETERMINISTIC_AGENT_E2E_OK"
 EXPECTED_AUTHORIZATION = "Bearer ci-replay-key"
 EXPECTED_MODEL = "deterministic-chat"
-EXPECTED_PRELOADED_SKILL_MARKER = "# 图片生成技能"
-EXPECTED_PRELOADED_TOOL = "present_artifacts"
+EXPECTED_PRELOADED_SKILL_MARKER = "# 知识库技能"
+EXPECTED_PRELOADED_TOOL = "list_kbs"
 EXPECTED_TOOL_CALL_ID = "call-preloaded-tool"
-EXPECTED_TOOL_RESULT_MARKER = "已将交付物展示给用户"
+EXPECTED_TOOL_RESULT_MARKER = "当前没有可访问的知识库"
 BLOCK_BEFORE_RESPONSE_MARKER = "DETERMINISTIC_BLOCK_BEFORE_RESPONSE"
 TOOL_ERROR_MARKER = "DETERMINISTIC_TOOL_ERROR"
 LARGE_TOOL_RESULT_MARKER = "DETERMINISTIC_LARGE_TOOL_RESULT"
@@ -129,7 +129,7 @@ def _stream_payloads(model: str, messages: list[dict]) -> list[dict]:
     elif TOOL_ERROR_MARKER in serialized_messages:
         tool_arguments = "{}"
     else:
-        tool_arguments = '{"filepaths": []}'
+        tool_arguments = '{"dummy": ""}'
 
     return [
         {

@@ -187,17 +187,27 @@ class AgentLoadTestScriptTest(unittest.IsolatedAsyncioTestCase):
             "created_at": "2026-09-05T10:00:00.250000Z",
             "first_model_request_at": "2026-09-05T10:00:01.250000Z",
             "first_model_request_latency_ms": 1000.0,
+            "sandbox_create_container_ms": 3210.5,
+            "sandbox_wait_ready_ms": 4800.25,
+            "sandbox_execute_request_ms": 14270.75,
         }
         result = TaskResult(level=10, task_index=1, request_id="timing-test")
         record_run_timing(result, started_at, {"timing": timing})
         self.assertEqual(result.first_model_request_ms, 1250.0)
         self.assertEqual(result.created_to_first_model_request_ms, 1000.0)
         self.assertEqual(result.run_timing, timing)
+        self.assertEqual(result.sandbox_create_container_ms, 3210.5)
+        self.assertEqual(result.sandbox_wait_ready_ms, 4800.25)
+        self.assertEqual(result.sandbox_execute_request_ms, 14270.75)
         missing = TaskResult(level=10, task_index=2, request_id="missing-timing")
         record_run_timing(missing, started_at, {"timing": {}})
         summary = summarize([result, missing])[0]
         self.assertEqual(summary["created_to_first_model_request_p95_ms"], 1000.0)
         self.assertEqual(summary["missing_model_request_timing"], 1)
+        self.assertEqual(summary["sandbox_create_container_p95_ms"], 3210.5)
+        self.assertEqual(summary["sandbox_wait_ready_p95_ms"], 4800.25)
+        self.assertEqual(summary["sandbox_execute_request_p95_ms"], 14270.75)
+        self.assertIsNone(summary["sandbox_release_p95_ms"])
 
     def test_sandbox_result_accepts_same_run_with_tool_evidence(self) -> None:
         success, error, output_chars = evaluate_result(
@@ -293,6 +303,7 @@ class AgentLoadTestScriptTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("request_queue_p95_ms", summary)
         self.assertIn("first_run_event_p95_ms", summary)
         self.assertIn("first_token_p95_ms", summary)
+        self.assertIsNone(summary["sandbox_execute_request_p95_ms"])
 
     def test_write_results_omits_credentials_and_full_output(self) -> None:
         result = TaskResult(

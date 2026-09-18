@@ -23,6 +23,16 @@
   --main-color: #4a9fb8;
   --main-bright: #5faec2;
 
+  /* 联合智擎门户品牌色：暗色界面保持可读对比度 */
+  --portal-brand-blue: #5aa6f6;
+  --portal-brand-cyan: #52bddd;
+  --portal-brand-green: #5bd0aa;
+  --portal-heading: #eef6ff;
+  --portal-muted: #a8bacb;
+  --portal-line: #334452;
+  --portal-surface: rgba(12, 20, 27, 0.94);
+  --portal-splash-backdrop: #0d1720;
+
   /* 辅助色：暖金色系，深色模式反转刻度，与 --main-* 对齐 */
   --second-1000: #faf3e2;
   --second-900: #f4e8cc;

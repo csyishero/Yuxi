@@ -19,13 +19,6 @@ _SKILLS_ROOT = Path(__file__).resolve().parent
 
 BUILTIN_SKILLS: list[BuiltinSkillSpec] = [
     BuiltinSkillSpec(
-        slug="image-gen",
-        source_dir=_SKILLS_ROOT / "image-gen",
-        description="在 Agent 沙盒中生成图片并保存到 outputs，默认支持 Qwen-Image，也可接入其它图片生成接口。",
-        version="2026.06.02",
-        tool_dependencies=("present_artifacts",),
-    ),
-    BuiltinSkillSpec(
         slug="html-preview",
         source_dir=_SKILLS_ROOT / "html-preview",
         description=(
@@ -56,12 +49,5 @@ BUILTIN_SKILLS: list[BuiltinSkillSpec] = [
             "search_file",
             "download_kb_file",
         ),
-    ),
-    BuiltinSkillSpec(
-        slug="mysql-reporter",
-        source_dir=_SKILLS_ROOT / "mysql-reporter",
-        description="基于 MySQL 数据库生成查询报表和可视化图表，适合分析业务指标、统计趋势，并用 Charts MCP 展示结果。",
-        version="2026.06.05",
-        mcp_dependencies=("mcp-server-chart",),
     ),
 ]

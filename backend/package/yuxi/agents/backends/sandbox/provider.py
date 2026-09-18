@@ -6,13 +6,17 @@ import os
 import threading
 import time
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from yuxi.config import get_int_env
 from yuxi.utils.logging_config import logger
 from yuxi.workspace.paths import normalize_workdir_path, workspace_uid_dirname
 
-from .provisioner_client import ProvisionerClient, SandboxRecord
+from .provisioner_client import (
+    ProvisionerClient,
+    SandboxRecord,
+    merge_sandbox_timing,
+)
 
 
 def sandbox_provisioner_token() -> str:
@@ -88,6 +92,7 @@ class SandboxConnection:
     sandbox_url: str
     generation: str | None = None
     workdir_path: str | None = None
+    timing: dict[str, float] = field(default_factory=dict)
 
 
 class SandboxIdentityMismatchError(RuntimeError):
@@ -128,6 +133,7 @@ class ProvisionerSandboxProvider:
         thread_id: str,
         uid: str,
         record: SandboxRecord,
+        prior_timing: dict[str, float] | None = None,
     ) -> SandboxConnection:
         connection = SandboxConnection(
             cache_key=cache_key,
@@ -137,6 +143,7 @@ class ProvisionerSandboxProvider:
             sandbox_url=record.sandbox_url,
             generation=record.generation,
             workdir_path=record.workdir_path,
+            timing=merge_sandbox_timing(prior_timing, getattr(record, "timing", None)),
         )
         self._connections[cache_key] = connection
         self._last_touch_at[cache_key] = time.time()
@@ -163,6 +170,10 @@ class ProvisionerSandboxProvider:
             raise SandboxIdentityMismatchError("sandbox Workdir changed within one runtime scope")
         connection.sandbox_url = record.sandbox_url
         connection.generation = record.generation
+        connection.timing = merge_sandbox_timing(
+            getattr(connection, "timing", None),
+            getattr(record, "timing", None),
+        )
         return True
 
     def get(
@@ -178,6 +189,7 @@ class ProvisionerSandboxProvider:
         cache_key = _sandbox_key(uid, thread_id)
         lock = self._thread_lock(cache_key)
         with lock:
+            prior_timing: dict[str, float] = {}
             current = self._connections.get(cache_key)
             if current:
                 if current.uid != uid:
@@ -187,6 +199,7 @@ class ProvisionerSandboxProvider:
                 try:
                     if self._touch_if_needed(current):
                         return current
+                    prior_timing = dict(getattr(current, "timing", {}) or {})
                     self._connections.pop(cache_key, None)
                     self._last_touch_at.pop(cache_key, None)
                 except SandboxIdentityMismatchError:
@@ -219,6 +232,7 @@ class ProvisionerSandboxProvider:
                 thread_id=thread_id,
                 uid=uid,
                 record=record,
+                prior_timing=prior_timing,
             )
 
     def release(
@@ -228,8 +242,9 @@ class ProvisionerSandboxProvider:
         uid: str,
         clear_cache_on_delete_failure: bool = False,
         workdir_path: str | None = None,
-    ) -> None:
+    ) -> dict[str, float]:
         """释放一个指定作用域的 Sandbox，并清理本地连接缓存。"""
+        release_started_ns = time.perf_counter_ns()
         normalized_workdir_path = normalize_workdir_path(workdir_path) if workdir_path else None
         cache_key = _sandbox_key(uid, thread_id)
         lock = self._thread_lock(cache_key)
@@ -241,15 +256,20 @@ class ProvisionerSandboxProvider:
                 sandbox_id = sandbox_id_for_thread(thread_id, uid=uid)
                 record = self._client.discover(sandbox_id)
                 if record is None:
-                    return
+                    return {}
                 if record.workdir_path != normalized_workdir_path:
                     raise SandboxIdentityMismatchError("sandbox Workdir does not match the requested release scope")
                 generation = record.generation
+                timing = getattr(record, "timing", None)
             else:
                 sandbox_id = connection.sandbox_id
                 generation = connection.generation
+                timing = getattr(connection, "timing", None)
             try:
-                self._client.delete(sandbox_id, expected_generation=generation)
+                delete_timing = self._client.delete(
+                    sandbox_id,
+                    expected_generation=generation,
+                )
             except Exception:
                 if clear_cache_on_delete_failure:
                     self._connections.pop(cache_key, None)
@@ -257,6 +277,16 @@ class ProvisionerSandboxProvider:
                 raise
             self._connections.pop(cache_key, None)
             self._last_touch_at.pop(cache_key, None)
+            return merge_sandbox_timing(
+                timing,
+                delete_timing,
+                {
+                    "sandbox_release_ms": round(
+                        (time.perf_counter_ns() - release_started_ns) / 1_000_000,
+                        2,
+                    )
+                },
+            )
 
     def shutdown(self) -> None:
         with self._lock:

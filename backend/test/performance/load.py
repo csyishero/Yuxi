@@ -25,6 +25,16 @@ FINAL_MARKER = "LOAD_TEST_OK"
 TOOL_MARKER = "LOAD_TEST_TOOL_OK"
 CHAT_MIN_OUTPUT_CHARS = 500
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
+SANDBOX_TIMING_FIELDS = (
+    "sandbox_discover_ms",
+    "sandbox_create_container_ms",
+    "sandbox_create_network_ms",
+    "sandbox_wait_ready_ms",
+    "sandbox_execute_request_ms",
+    "sandbox_release_ms",
+    "sandbox_delete_container_ms",
+    "sandbox_delete_network_ms",
+)
 
 
 class LoadTestError(RuntimeError):
@@ -67,6 +77,14 @@ class TaskResult:
     first_model_request_ms: float | None = None
     created_to_first_model_request_ms: float | None = None
     run_timing: dict[str, Any] | None = None
+    sandbox_discover_ms: float | None = None
+    sandbox_create_container_ms: float | None = None
+    sandbox_create_network_ms: float | None = None
+    sandbox_wait_ready_ms: float | None = None
+    sandbox_execute_request_ms: float | None = None
+    sandbox_release_ms: float | None = None
+    sandbox_delete_container_ms: float | None = None
+    sandbox_delete_network_ms: float | None = None
     first_run_event_ms: float | None = None
     first_token_ms: float | None = None
     run_sse_ms: float | None = None
@@ -534,6 +552,10 @@ def record_run_timing(result: TaskResult, submit_started_at: datetime, payload: 
     result.run_timing = dict(timing)
     result.created_to_first_model_request_ms = timing.get("first_model_request_latency_ms")
     result.first_model_request_ms = first_model_request_latency_ms(submit_started_at, payload)
+    for field_name in SANDBOX_TIMING_FIELDS:
+        value = timing.get(field_name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            setattr(result, field_name, float(value))
 
 
 class AgentLoadClient:
@@ -800,6 +822,12 @@ def summarize(
             "total_p95_ms": _percentile([item.total_ms for item in items], 0.95),
             "total_max_ms": _percentile([item.total_ms for item in items], 1.0),
         }
+        for field_name in SANDBOX_TIMING_FIELDS:
+            metric_name = f"{field_name.removesuffix('_ms')}_p95_ms"
+            summary[metric_name] = _percentile(
+                [getattr(item, field_name) for item in items],
+                0.95,
+            )
         level_samples = [sample for sample in resource_samples if sample.level == level]
         if level_samples:
             summary.update(_summarize_resources(level_samples))
@@ -941,6 +969,18 @@ def print_summary(summaries: Sequence[dict[str, Any]]) -> None:
             f"{item['missing_model_request_timing']:>8}  "
             f"{_format_ms(item['first_token_p95_ms']):>11}  {_format_ms(item['total_p95_ms']):>11}"
         )
+    if not any(
+        item.get(f"{field_name.removesuffix('_ms')}_p95_ms") is not None
+        for item in summaries
+        for field_name in SANDBOX_TIMING_FIELDS
+    ):
+        return
+
+    print("Sandbox 阶段 P95")
+    print("并发  发现  建容器  建网络  待就绪  执行请求  释放  删容器  删网络")
+    for item in summaries:
+        values = [item.get(f"{field_name.removesuffix('_ms')}_p95_ms") for field_name in SANDBOX_TIMING_FIELDS]
+        print(f"{item['concurrency']:>4}  " + "  ".join(f"{_format_ms(value):>6}" for value in values))
 
 
 def _format_ms(value: float | None) -> str:

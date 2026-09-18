@@ -765,6 +765,7 @@ def test_authenticated_management_api_returns_proxied_sandbox_url(monkeypatch):
     expected_url = f"http://sandbox-provisioner:8002/api/sandboxes/{sandbox_id}/proxy"
     assert create_response.status_code == 200
     assert create_response.json()["sandbox_url"] == expected_url
+    assert create_response.json()["timing"] == {}
     assert list_response.status_code == 200
     sandboxes = list_response.json()["sandboxes"]
     assert len(sandboxes) == 1
@@ -775,6 +776,7 @@ def test_authenticated_management_api_returns_proxied_sandbox_url(monkeypatch):
     assert sandboxes[0]["workdir_path"] is None
     assert stale_delete_response.status_code == 409
     assert delete_response.status_code == 200
+    assert delete_response.json()["timing"] == {}
 
 
 def test_create_sandbox_forwards_environment_policy(monkeypatch):
@@ -1598,7 +1600,7 @@ def test_docker_backend_serializes_create_and_delete_for_same_sandbox(monkeypatc
 
     def delete_sandbox():
         caller.role = "delete"
-        backend.delete("sandbox-1", expected_generation="generation-1")
+        return backend.delete("sandbox-1", expected_generation="generation-1")
 
     backend._get_container = get_container
     backend._ensure_network = lambda _sandbox_id: "yuxi-know-sandbox-sandbox-1"
@@ -1618,9 +1620,16 @@ def test_docker_backend_serializes_create_and_delete_for_same_sandbox(monkeypatc
             release_create_lookup.set()
 
         record = create_future.result(timeout=2)
-        delete_future.result(timeout=2)
+        delete_timing = delete_future.result(timeout=2)
 
     assert record.generation == "generation-1"
+    assert "sandbox_create_network_ms" in record.timing
+    assert "sandbox_wait_ready_ms" in record.timing
+    assert "sandbox_create_container_ms" not in record.timing
+    assert set(delete_timing) == {
+        "sandbox_delete_container_ms",
+        "sandbox_delete_network_ms",
+    }
     assert delete_lookup_entered.is_set()
     assert container.removed is True
 
