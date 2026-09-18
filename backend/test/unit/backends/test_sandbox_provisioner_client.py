@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import yuxi.agents.backends.sandbox.provider as provider_module
+import yuxi.agents.backends.sandbox.provisioner_client as client_module
 
 from yuxi.agents.backends.sandbox.provider import sandbox_provisioner_token
 from yuxi.agents.backends.sandbox.provisioner_client import ProvisionerClient
@@ -109,6 +110,49 @@ def test_provisioner_client_delete_sends_expected_generation(monkeypatch):
     assert calls[0]["params"] == {"expected_generation": "generation-1"}
     assert calls[0]["timeout"] is client._delete_timeout
     assert client._delete_timeout.read == 120
+
+
+def test_provisioner_client_keeps_only_supported_numeric_timing(monkeypatch):
+    responses = {
+        "GET": {
+            "sandbox_id": "sandbox-1",
+            "sandbox_url": "http://sandbox",
+            "timing": {
+                "sandbox_create_container_ms": 12.345,
+                "unknown_ms": 99,
+                "sandbox_wait_ready_ms": True,
+                "sandbox_delete_network_ms": -1,
+            },
+        },
+        "DELETE": {
+            "timing": {
+                "sandbox_delete_container_ms": 4.567,
+                "unknown_ms": 101,
+            }
+        },
+    }
+
+    def fake_request(**kwargs):
+        payload = responses[kwargs["method"]]
+        return SimpleNamespace(status_code=200, json=lambda: payload)
+
+    clock = iter((1_000_000, 3_500_000))
+    monkeypatch.setattr(client_module.httpx, "request", fake_request)
+    monkeypatch.setattr(client_module.time, "perf_counter_ns", lambda: next(clock))
+    client = ProvisionerClient(
+        "http://sandbox-provisioner:8002",
+        token="test-provisioner-token-that-is-long-enough",
+    )
+
+    record = client.discover("sandbox-1")
+    delete_timing = client.delete("sandbox-1")
+
+    assert record is not None
+    assert record.timing == {
+        "sandbox_create_container_ms": 12.35,
+        "sandbox_discover_ms": 2.5,
+    }
+    assert delete_timing == {"sandbox_delete_container_ms": 4.57}
 
 
 def test_sandbox_provider_uses_configured_delete_timeout(monkeypatch):

@@ -252,6 +252,7 @@
               批量入库
             </a-button>
             <a-button
+              v-if="canDelete"
               type="link"
               danger
               @click="handleBatchDelete"
@@ -306,7 +307,7 @@
         <div class="file-status-cell">
           <template v-if="!row.is_folder">
             <button
-              v-if="!readonly && hasStatusAction(row)"
+                    v-if="!readonly && hasAllowedStatusAction(row)"
               type="button"
               class="file-status-pill file-status-action"
               :disabled="lock"
@@ -381,7 +382,7 @@
                     重命名
                   </a-button>
                   <a-button
-                    v-if="!readonly"
+                    v-if="canMetadata"
                     type="text"
                     block
                     @click="showCreateFolderModal(row.file_id)"
@@ -390,7 +391,7 @@
                     新建子文件夹
                   </a-button>
                   <a-button
-                    v-if="!readonly"
+                    v-if="!readonly && canDelete"
                     type="text"
                     block
                     danger
@@ -402,6 +403,7 @@
                 </template>
                 <template v-else>
                   <a-button
+                    v-if="canDownload"
                     type="text"
                     block
                     @click="handleDownloadFile(row)"
@@ -413,7 +415,7 @@
 
                   <!-- Parse Action -->
                   <a-button
-                    v-if="!readonly && canParseFile(row)"
+                    v-if="canParse && canParseFile(row)"
                     type="text"
                     block
                     @click="handleParseFile(row)"
@@ -425,7 +427,7 @@
 
                   <!-- Index Action -->
                   <a-button
-                    v-if="!readonly && getFilePrimaryAction(row)?.type === FILE_ACTIONS.INDEX"
+                    v-if="canIndex && getFilePrimaryAction(row)?.type === FILE_ACTIONS.INDEX"
                     type="text"
                     block
                     @click="handleIndexFile(row)"
@@ -437,7 +439,7 @@
 
                   <!-- Reindex Action -->
                   <a-button
-                    v-if="!readonly && canReindexFile(row)"
+                    v-if="canIndex && canReindexFile(row)"
                     type="text"
                     block
                     @click="handleReindexFile(row)"
@@ -448,7 +450,7 @@
                   </a-button>
 
                   <a-button
-                    v-if="!readonly"
+                    v-if="!readonly && canDelete"
                     type="text"
                     block
                     danger
@@ -525,10 +527,20 @@ const store = useDatabaseStore()
 const emit = defineEmits(['mindmap', 'search'])
 
 const props = defineProps({
-  readonly: { type: Boolean, default: false }
+  readonly: { type: Boolean, default: false },
+  canDelete: { type: Boolean, default: false },
+  canDownload: { type: Boolean, default: true },
+  canMetadata: { type: Boolean, default: false },
+  canParse: { type: Boolean, default: false },
+  canIndex: { type: Boolean, default: false }
 })
 
 const readonly = computed(() => props.readonly)
+const canDelete = computed(() => props.canDelete)
+const canDownload = computed(() => props.canDownload)
+const canMetadata = computed(() => props.canMetadata)
+const canParse = computed(() => props.canParse)
+const canIndex = computed(() => props.canIndex)
 
 const applyFilters = async (overrides = {}) => {
   const nextStatus = overrides.status ?? statusFilter.value
@@ -570,8 +582,11 @@ const getStatusIcon = (status) => {
   return statusIconMap[icon] || null
 }
 
-const hasStatusAction = (record) => {
-  return Boolean(getFilePrimaryAction(record))
+const hasAllowedStatusAction = (record) => {
+  const action = getFilePrimaryAction(record)
+  if (action?.type === FILE_ACTIONS.PARSE) return canParse.value
+  if (action?.type === FILE_ACTIONS.INDEX) return canIndex.value
+  return false
 }
 
 const getStatusActionTitle = (record) => {
@@ -649,6 +664,7 @@ const createFolderLoading = ref(false)
 const currentParentId = ref(null)
 
 const showCreateFolderModal = (parentId = null) => {
+  if (!canMetadata.value) return
   if (typeof parentId === 'string') {
     closePopover(parentId)
   }
@@ -754,7 +770,7 @@ const dragOverFolderId = ref(null)
 
 const canUseFileMutations = computed(() =>
   canMutateKnowledgeFiles({
-    readonly: readonly.value,
+    readonly: readonly.value || !canMetadata.value,
     locked: lock.value,
     filtered: isFilteredView.value,
     virtualPath: isVirtualPathView.value
@@ -971,6 +987,7 @@ const emptyText = computed(() => {
 
 // 计算是否可以批量删除
 const canBatchDelete = computed(() => {
+  if (!canDelete.value) return false
   return selectedRowKeys.value.some((key) => {
     const file = files.value.find((f) => f.file_id === key)
     return canSelectFile(file, lock.value)
@@ -979,6 +996,7 @@ const canBatchDelete = computed(() => {
 
 // 计算是否可以批量解析
 const canBatchParse = computed(() => {
+  if (!canParse.value) return false
   return selectedRowKeys.value.some((key) => {
     const file = files.value.find((f) => f.file_id === key)
     return !lock.value && canParseFile(file)
@@ -987,6 +1005,7 @@ const canBatchParse = computed(() => {
 
 // 计算是否可以批量入库
 const canBatchIndex = computed(() => {
+  if (!canIndex.value) return false
   return selectedRowKeys.value.some((key) => {
     const file = files.value.find((f) => f.file_id === key)
     return !lock.value && canIndexFile(file)
@@ -1038,13 +1057,13 @@ const tableSelection = computed(() => {
 })
 
 const handleDeleteFile = (fileId) => {
-  if (readonly.value) return
+  if (readonly.value || !canDelete.value) return
   store.handleDeleteFile(fileId)
   closePopover(fileId)
 }
 
 const handleDeleteFolder = (record) => {
-  if (readonly.value) return
+  if (readonly.value || !canDelete.value) return
   closePopover(record.file_id)
   Modal.confirm({
     title: '删除文件夹',
@@ -1063,12 +1082,12 @@ const handleDeleteFolder = (record) => {
 }
 
 const handleBatchDelete = () => {
-  if (readonly.value) return
+  if (readonly.value || !canDelete.value) return
   store.handleBatchDelete()
 }
 
 const handleBatchParse = async () => {
-  if (readonly.value) return
+  if (readonly.value || !canParse.value) return
   const validKeys = selectedRowKeys.value.filter((key) => {
     const file = files.value.find((f) => f.file_id === key)
     return canParseFile(file)
@@ -1089,6 +1108,7 @@ const handleBatchParse = async () => {
 }
 
 const startPendingParse = (count = 0) => {
+  if (!canParse.value) return false
   if (lock.value) {
     message.warning('当前有文件处理中，请稍后再试')
     return false
@@ -1111,6 +1131,7 @@ const startPendingParse = (count = 0) => {
 }
 
 const handleBatchIndex = async () => {
+  if (!canIndex.value) return
   const validKeys = selectedRowKeys.value.filter((key) => {
     const file = files.value.find((f) => f.file_id === key)
     return canIndexFile(file)
@@ -1130,6 +1151,7 @@ const handleBatchIndex = async () => {
 }
 
 const startPendingIndex = (count = 0) => {
+  if (!canIndex.value) return false
   if (lock.value) {
     message.warning('当前有文件处理中，请稍后再试')
     return false
@@ -1242,7 +1264,7 @@ const handleParseConfigCancel = () => {
 }
 
 const handleStatusAction = async (record) => {
-  if (lock.value || !hasStatusAction(record)) return
+  if (lock.value || !hasAllowedStatusAction(record)) return
 
   const action = getFilePrimaryAction(record)
   if (action?.type === FILE_ACTIONS.PARSE) {

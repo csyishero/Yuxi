@@ -250,6 +250,12 @@ async def test_get_databases_by_user_sets_permission_and_redacts_readonly_secret
             record = await self.get_by_kb_id("kb_1")
             record.additional_params = {"dify_token": "secret", "chunk_preset_id": "general"}
             record.created_by = "user_1"
+            record.share_config = {
+                "version": 2,
+                "read_scope": {"access_level": "global"},
+                "manage_scope": None,
+                "owner_department_id": 3,
+            }
             return [record]
 
     monkeypatch.setattr(
@@ -258,15 +264,17 @@ async def test_get_databases_by_user_sets_permission_and_redacts_readonly_secret
     )
     manager = KnowledgeBaseManager("/tmp/yuxi-test")
 
-    readonly = await manager.get_databases_by_user({"uid": "user_2", "role": "admin", "department_id": None})
-    owner = await manager.get_databases_by_user({"uid": "user_1", "role": "admin", "department_id": None})
+    readonly = await manager.get_databases_by_user({"uid": "user_2", "role": "admin", "department_id": 2})
+    manager_user = await manager.get_databases_by_user(
+        {"uid": "department-admin", "role": "admin", "department_id": 3}
+    )
 
     assert readonly[0].effective_permission == ResourcePermission.READ
     assert readonly[0].can_manage is False
     assert "dify_token" not in readonly[0].additional_params
-    assert owner[0].effective_permission == ResourcePermission.MANAGE
-    assert owner[0].can_manage is True
-    assert owner[0].additional_params["dify_token"] == "secret"
+    assert manager_user[0].effective_permission == ResourcePermission.MANAGE
+    assert manager_user[0].can_manage is True
+    assert manager_user[0].additional_params["dify_token"] == "secret"
 
 
 @pytest.mark.parametrize(

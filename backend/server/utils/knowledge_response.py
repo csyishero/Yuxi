@@ -6,7 +6,7 @@ from typing import Any
 
 from yuxi.knowledge.read_models import KnowledgeBaseDetail, KnowledgeBaseSummary
 from yuxi.knowledge.utils.security import redact_sensitive_params
-from yuxi.permissions import ResourcePermission
+from yuxi.permissions import KnowledgeBaseCapability, ResourcePermission
 from yuxi.utils.datetime_utils import utc_isoformat
 
 
@@ -29,6 +29,7 @@ def serialize_knowledge_base(
     database: KnowledgeBaseSummary,
     *,
     permission: ResourcePermission | None = None,
+    capabilities: frozenset[KnowledgeBaseCapability] | None = None,
     redact_secrets: bool = False,
     row_count_fallback: bool = False,
 ) -> dict[str, Any]:
@@ -49,6 +50,7 @@ def serialize_knowledge_base(
         "query_params": dict(database.query_params),
         "metadata": dict(additional_params),
         "created_by": database.created_by,
+        "owner_department_id": database.owner_department_id,
         "created_at": utc_isoformat(database.created_at) if database.created_at else None,
         "status": "已连接",
         "stats": stats,
@@ -60,7 +62,10 @@ def serialize_knowledge_base(
     effective_permission = permission or database.effective_permission
     if effective_permission is not None:
         response["effective_permission"] = effective_permission.value
+        response["can_edit"] = effective_permission in {ResourcePermission.EDIT, ResourcePermission.MANAGE}
         response["can_manage"] = effective_permission == ResourcePermission.MANAGE
+        effective_capabilities = capabilities if capabilities is not None else database.effective_capabilities
+        response["effective_capabilities"] = sorted(capability.value for capability in effective_capabilities)
 
     if isinstance(database, KnowledgeBaseDetail):
         response["mindmap"] = database.mindmap

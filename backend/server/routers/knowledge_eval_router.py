@@ -6,16 +6,16 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from server.utils.auth_middleware import get_admin_user
 from server.utils.knowledge_permissions import (
-    ensure_knowledge_base_permission,
-    require_knowledge_base_manage,
-    require_knowledge_base_read,
+    ensure_knowledge_base_capability,
+    require_knowledge_base_configure,
+    require_knowledge_base_view,
 )
 from yuxi.knowledge.eval.benchmark_generation import (
     DEFAULT_BENCHMARK_GENERATION_CONCURRENCY,
     MAX_BENCHMARK_GENERATION_CONCURRENCY,
 )
 from yuxi.knowledge.eval.service import EvaluationService
-from yuxi.permissions import ResourcePermission
+from yuxi.permissions import KnowledgeBaseCapability
 from yuxi.repositories.evaluation_repository import EvaluationRepository
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
@@ -61,7 +61,7 @@ async def require_evaluation_dataset_read(
     """校验管理员对评估数据集所属知识库的读取权限。"""
 
     dataset = await _get_evaluation_dataset_or_raise(dataset_id)
-    await ensure_knowledge_base_permission(str(dataset.kb_id), current_user, ResourcePermission.READ)
+    await ensure_knowledge_base_capability(str(dataset.kb_id), current_user, KnowledgeBaseCapability.VIEW)
     return current_user
 
 
@@ -72,7 +72,7 @@ async def require_evaluation_dataset_manage(
     """校验管理员对评估数据集所属知识库的管理权限。"""
 
     dataset = await _get_evaluation_dataset_or_raise(dataset_id)
-    await ensure_knowledge_base_permission(str(dataset.kb_id), current_user, ResourcePermission.MANAGE)
+    await ensure_knowledge_base_capability(str(dataset.kb_id), current_user, KnowledgeBaseCapability.CONFIGURE)
     return current_user
 
 
@@ -82,7 +82,7 @@ async def upload_evaluation_dataset(
     file: UploadFile = File(...),
     name: str = Form(...),
     description: str = Form(""),
-    current_user: User = Depends(require_knowledge_base_manage),
+    current_user: User = Depends(require_knowledge_base_configure),
 ):
     """上传评估数据集"""
     try:
@@ -109,7 +109,7 @@ async def upload_evaluation_dataset(
 @evaluation.get("/databases/{kb_id}/datasets")
 async def list_evaluation_datasets(
     kb_id: str,
-    current_user: User = Depends(require_knowledge_base_read),
+    current_user: User = Depends(require_knowledge_base_view),
 ):
     """获取知识库的评估数据集列表"""
     try:
@@ -129,7 +129,7 @@ async def get_evaluation_dataset(
     dataset_id: str,
     page: int = 1,
     page_size: int = 10,
-    current_user: User = Depends(require_knowledge_base_read),
+    current_user: User = Depends(require_knowledge_base_view),
 ):
     """获取评估数据集详情"""
     try:
@@ -203,7 +203,7 @@ async def delete_evaluation_dataset(
 async def generate_evaluation_dataset(
     kb_id: str,
     request: GenerateDatasetRequest,
-    current_user: User = Depends(require_knowledge_base_manage),
+    current_user: User = Depends(require_knowledge_base_configure),
 ):
     """自动生成评估数据集"""
     try:
@@ -234,7 +234,7 @@ async def generate_evaluation_dataset(
 async def resume_evaluation_dataset(
     kb_id: str,
     dataset_id: str,
-    current_user: User = Depends(require_knowledge_base_manage),
+    current_user: User = Depends(require_knowledge_base_configure),
 ):
     """恢复自动生成评估数据集"""
     try:
@@ -256,7 +256,7 @@ async def resume_evaluation_dataset(
 async def run_evaluation(
     kb_id: str,
     request: RunEvaluationRequest,
-    current_user: User = Depends(require_knowledge_base_manage),
+    current_user: User = Depends(require_knowledge_base_configure),
 ):
     """运行RAG评估"""
     try:
@@ -283,7 +283,7 @@ async def run_evaluation(
 @evaluation.get("/databases/{kb_id}/runs")
 async def list_evaluation_runs(
     kb_id: str,
-    current_user: User = Depends(require_knowledge_base_read),
+    current_user: User = Depends(require_knowledge_base_view),
 ):
     """获取知识库评估运行历史"""
     try:
@@ -305,7 +305,7 @@ async def get_evaluation_run_results(
     page_size: int = 20,
     result_filter: str | None = None,
     error_only: bool = False,
-    current_user: User = Depends(require_knowledge_base_read),
+    current_user: User = Depends(require_knowledge_base_view),
 ):
     """获取评估运行结果"""
     try:
@@ -340,7 +340,7 @@ async def get_evaluation_run_results(
 async def delete_evaluation_run(
     kb_id: str,
     run_id: str,
-    current_user: User = Depends(require_knowledge_base_manage),
+    current_user: User = Depends(require_knowledge_base_configure),
 ):
     """删除评估运行"""
     try:

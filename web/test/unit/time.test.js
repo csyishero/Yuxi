@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { formatChatTime } from '../../src/utils/time.js'
+import { formatChatTime, formatFullDateTime } from '../../src/utils/time.js'
 
 // 固定"当前时间"避免跨日边界导致用例不稳定：2026-08-15 12:00（周六）
 const NOW = '2026-08-15T12:00:00+08:00'
@@ -30,4 +30,8 @@ test('跨年显示年月日', () => {
 test('无效输入返回空字符串', () => {
   assert.equal(formatChatTime(null, NOW), '')
   assert.equal(formatChatTime('', NOW), '')
+})
+
+test('后端 UTC 时间会转换为上海时区展示', () => {
+  assert.equal(formatFullDateTime('2026-09-18T01:35:55Z'), '2026-09-18 09:35:55')
 })

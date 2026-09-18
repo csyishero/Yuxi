@@ -432,6 +432,8 @@ async def test_dashboard_service_list_conversations_search(dashboard_db):
     missing_agent_item = next(item for item in all_convs["items"] if item["thread_id"] == "thread-missing-agent")
     assert deleted_item["user_deleted"] is True
     assert missing_agent_item["agent_deleted"] is True
+    assert all(item["created_at"].endswith("Z") for item in all_convs["items"])
+    assert all(item["updated_at"].endswith("Z") for item in all_convs["items"])
 
     search_result = await service.list_conversations(search="Python")
     assert search_result["total"] == 1
@@ -457,7 +459,10 @@ async def test_dashboard_service_conversation_detail(dashboard_db):
     assert detail["total_tokens"] == 3500
     assert detail["user_deleted"] is False
     assert detail["agent_deleted"] is False
+    assert detail["created_at"].endswith("Z")
+    assert detail["updated_at"].endswith("Z")
     assert len(detail["messages"]) == 2
+    assert all(message["created_at"].endswith("Z") for message in detail["messages"])
     assistant_msg = next(m for m in detail["messages"] if m["role"] == "assistant")
     assert "tool_calls" in assistant_msg
     assert assistant_msg["tool_calls"][0]["tool_name"] == "bash"

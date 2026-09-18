@@ -60,6 +60,8 @@ MCP 配置从 PostgreSQL 读取，工具对象按配置哈希缓存。修改连�
 
 `stdio` MCP 等价于在 API/worker 容器内启动一个进程，只适合经过代码审查且必须本地运行的系统能力。远程服务可以承载时，优先使用 SSE 或 Streamable HTTP。
 
+当前发行版本不预置内置 MCP Server；原 `mcp-server-chart` 已退役。管理员仍可按需添加远程 SSE 或 Streamable HTTP MCP，图表生成也可以由受控 Skill 提供。
+
 开发者在 [`service.py`](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/agents/mcp/service.py) 的 `_DEFAULT_MCP_SERVERS` 中添加固定定义：
 
 ```python

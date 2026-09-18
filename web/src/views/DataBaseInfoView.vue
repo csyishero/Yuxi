@@ -24,6 +24,7 @@
       <template #actions>
         <div class="extension-detail-actions">
           <a-space :size="8">
+            <a-tag v-if="!canEditDatabase" color="orange">只读</a-tag>
             <button
               type="button"
               aria-label="复制知识库 ID"
@@ -34,7 +35,7 @@
               <span>复制 ID</span>
             </button>
             <button
-              v-if="canManageDatabase"
+              v-if="canOpenConfiguration"
               type="button"
               aria-label="配置知识库"
               class="lucide-icon-btn extension-panel-action extension-panel-action-primary"
@@ -53,7 +54,7 @@
             <div class="file-info-title">
               <div class="file-info-title-row">
                 <div
-                  v-if="canManageDatabase"
+                  v-if="canUploadFiles || canEditMetadata"
                   ref="uploadActionMenuRef"
                   class="file-action-dropdown"
                 >
@@ -72,11 +73,17 @@
                   </button>
                   <Transition name="file-action-menu">
                     <div v-if="uploadActionMenuOpen" class="file-action-menu">
-                      <button type="button" class="file-action-menu-item" @click="onUploadAction">
+                      <button
+                        v-if="canUploadFiles"
+                        type="button"
+                        class="file-action-menu-item"
+                        @click="onUploadAction"
+                      >
                         <Upload :size="14" />
                         <span>上传文件</span>
                       </button>
                       <button
+                        v-if="canUploadFiles"
                         type="button"
                         class="file-action-menu-item"
                         @click="onUploadFolderAction"
@@ -85,6 +92,7 @@
                         <span>上传文件夹</span>
                       </button>
                       <button
+                        v-if="canEditMetadata"
                         type="button"
                         class="file-action-menu-item"
                         @click="onCreateFolderAction"
@@ -99,7 +107,7 @@
             </div>
             <div class="file-panel-status">
               <button
-                v-if="canManageDatabase && pendingParseCount > 0"
+                v-if="canParseFiles && pendingParseCount > 0"
                 type="button"
                 class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-warning file-stat-summary"
                 :disabled="store.state.chunkLoading"
@@ -112,7 +120,7 @@
                 </div>
               </button>
               <button
-                v-if="canManageDatabase && pendingIndexCount > 0"
+                v-if="canIndexFiles && pendingIndexCount > 0"
                 type="button"
                 class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-warning file-stat-summary"
                 :disabled="store.state.chunkLoading"
@@ -128,7 +136,7 @@
                 type="button"
                 class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-summary"
                 :class="{ 'file-stat-warning': virtualFolderStatus.has_virtual_folders }"
-                :disabled="!virtualFolderStatus.has_virtual_folders || !canManageDatabase"
+                :disabled="!virtualFolderStatus.has_virtual_folders || !canConfigureDatabase"
                 :title="
                   virtualFolderStatus.has_virtual_folders ? '存在历史虚拟文件夹，点击转换' : ''
                 "
@@ -152,7 +160,7 @@
                 </div>
               </div>
               <button
-                v-if="canManageDatabase"
+                v-if="canConfigureDatabase"
                 type="button"
                 class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-summary file-stat-repair"
                 :disabled="statsRepairing"
@@ -169,7 +177,7 @@
                 </div>
               </button>
               <button
-                v-if="canManageDatabase"
+                v-if="canConfigureDatabase"
                 type="button"
                 class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-summary file-stat-repair"
                 :disabled="statsRepairing"
@@ -189,7 +197,12 @@
           </div>
           <FileTable
             ref="fileTableRef"
-            :readonly="!canManageDatabase"
+            :readonly="!canMaintainFiles"
+            :can-delete="canDeleteDocuments"
+            :can-download="canDownloadFiles"
+            :can-metadata="canEditMetadata"
+            :can-parse="canParseFiles"
+            :can-index="canIndexFiles"
             @mindmap="mindmapModalVisible = true"
             @search="fileSearchModalVisible = true"
           />
@@ -211,7 +224,7 @@
           <KnowledgeGraphSection
             :visible="true"
             :active="activeTab === 'graph'"
-            :readonly="!canManageDatabase"
+            :readonly="!canConfigureDatabase"
             @toggle-visible="() => {}"
           />
         </div>
@@ -219,7 +232,11 @@
 
       <template #panel-evaluation>
         <div v-if="isMilvus && activeTab === 'evaluation'" class="tab-panel evaluation-panel">
-          <KnowledgeEvaluationWorkspace v-if="kbId" :kb-id="kbId" :can-manage="canManageDatabase" />
+          <KnowledgeEvaluationWorkspace
+            v-if="kbId"
+            :kb-id="kbId"
+            :can-manage="canConfigureDatabase"
+          />
         </div>
       </template>
     </ExtensionDetailLayout>
@@ -287,7 +304,7 @@
       wrap-class-name="knowledge-mindmap-modal"
     >
       <div class="knowledge-mindmap-modal-content">
-        <MindMapSection v-if="kbId" :kb-id="kbId" :readonly="!canManageDatabase" />
+        <MindMapSection v-if="kbId" :kb-id="kbId" :readonly="!canConfigureDatabase" />
       </div>
     </a-modal>
 
@@ -395,8 +412,12 @@
                   <ShareConfigForm
                     ref="shareConfigFormRef"
                     v-model="editShareConfig"
-                    :auto-select-user-dept="true"
                     :require-read-scope="true"
+                    :show-edit-scope="true"
+                    :resource-department-id="database.owner_department_id"
+                    :show-knowledge-base-inheritance="true"
+                    :available-departments="departments"
+                    :available-users="users"
                   />
                 </a-form-item-rest>
               </a-form-item>
@@ -455,8 +476,6 @@ import SearchConfigPanel from '@/components/SearchConfigPanel.vue'
 import AiTextarea from '@/components/AiTextarea.vue'
 import ShareConfigForm from '@/components/ShareConfigForm.vue'
 import { databaseApi } from '@/apis/knowledge_api'
-import { departmentApi } from '@/apis/department_api'
-import { authApi } from '@/apis/auth_api'
 import { useChunkPresetOptions } from '@/composables/useChunkPresetOptions'
 import { DEFAULT_CHUNK_PRESET_ID } from '@/utils/chunkUtils'
 import { kbUtils } from '@/utils/kb_utils'
@@ -483,7 +502,28 @@ const {
 
 const kbId = computed(() => store.kbId)
 const database = computed(() => store.database)
-const canManageDatabase = computed(() => database.value?.can_manage === true)
+const canEditDatabase = computed(() => database.value?.can_edit === true)
+const effectiveCapabilities = computed(
+  () => new Set(database.value?.effective_capabilities || [])
+)
+const hasCapability = (capability) => effectiveCapabilities.value.has(capability)
+const canUploadFiles = computed(() => hasCapability('upload'))
+const canEditMetadata = computed(() => hasCapability('metadata'))
+const canParseFiles = computed(() => hasCapability('parse'))
+const canIndexFiles = computed(() => hasCapability('index'))
+const canDownloadFiles = computed(() => hasCapability('download'))
+const canDeleteDocuments = computed(() => hasCapability('delete-document'))
+const canConfigureDatabase = computed(() => hasCapability('configure'))
+const canOpenConfiguration = computed(
+  () => canConfigureDatabase.value || hasCapability('share') || hasCapability('grant')
+)
+const canMaintainFiles = computed(
+  () =>
+    canEditMetadata.value ||
+    canParseFiles.value ||
+    canIndexFiles.value ||
+    canDeleteDocuments.value
+)
 const isCurrentDatabaseLoaded = computed(() => database.value?.kb_id === kbId.value)
 const kbType = computed(() =>
   isCurrentDatabaseLoaded.value ? database.value.kb_type?.toLowerCase() || 'milvus' : ''
@@ -508,7 +548,7 @@ const tabs = computed(() => {
 })
 
 const visibleTabs = computed(() =>
-  canManageDatabase.value
+  canConfigureDatabase.value
     ? tabs.value
     : tabs.value.filter((tab) => ['filetable', 'query', 'graph'].includes(tab.key))
 )
@@ -596,7 +636,7 @@ const fileStats = computed(() => {
 })
 
 const detectVirtualFolders = async () => {
-  if (!kbId.value || !canManageDatabase.value) return
+  if (!kbId.value || !canConfigureDatabase.value) return
   try {
     virtualFolderStatus.value = await databaseApi.detectVirtualFolders(kbId.value)
   } catch (error) {
@@ -808,8 +848,9 @@ watch(
     store.stopAutoRefresh()
     try {
       await store.getDatabaseInfo(nextKbId, false)
+      await loadPermissionOptions(nextKbId)
       if (store.database?.kb_id === nextKbId && kbUtils.isReadOnlyDatabase(store.database)) {
-        if (route.query.action === 'edit' && canManageDatabase.value) {
+        if (route.query.action === 'edit' && canOpenConfiguration.value) {
           showEditModal()
           return
         }
@@ -840,7 +881,7 @@ watch(
     }
 
     if (newFileCount !== oldFileCount) {
-      if (newFileCount > 0 && canManageDatabase.value) {
+      if (newFileCount > 0 && canConfigureDatabase.value) {
         setTimeout(async () => {
           if (querySectionRef.value) {
             if (database.value.additional_params?.auto_generate_questions) {
@@ -903,6 +944,7 @@ const shareConfigFormRef = ref(null)
 const editShareConfig = ref({
   version: 2,
   read_scope: { access_level: 'global', department_ids: [], user_uids: [] },
+  edit_scope: null,
   manage_scope: null
 })
 const editForm = reactive({
@@ -926,11 +968,12 @@ const fileList = computed(() => {
   return (store.documentFiles || []).map((f) => f.filename).filter(Boolean)
 })
 
-const canEditShareConfig = computed(() => canManageDatabase.value)
+const canEditShareConfig = computed(() => hasCapability('share') || hasCapability('grant'))
 
 const shareConfigDisplay = computed(() => {
   const shareConfig = database.value?.share_config || {}
   const readScope = shareConfig.version === 2 ? shareConfig.read_scope : shareConfig
+  const editScope = shareConfig.edit_scope
   const manageScope = shareConfig.manage_scope
   const describeScope = (scope) => {
     if (!scope) return '无'
@@ -943,11 +986,11 @@ const shareConfigDisplay = computed(() => {
     const names = (scope.user_uids || []).map((uid) => getUserName(uid)).join('、') || '无'
     return `${scope.user_uids?.length || 0} 个用户：${names}`
   }
-  if (manageScope) {
+  if (editScope || manageScope) {
     return {
       color: 'blue',
       label: '分级共享',
-      detail: `读取：${describeScope(readScope)}；管理：${describeScope(manageScope)}`
+      detail: `读取：${describeScope(readScope)}；编辑：${describeScope(editScope)}；管理：${describeScope(manageScope)}`
     }
   }
   return {
@@ -967,19 +1010,18 @@ const getUserName = (uid) => {
   return user?.username || uid
 }
 
-const loadDepartments = async () => {
+const loadPermissionOptions = async (targetKbId = kbId.value) => {
+  if (!targetKbId || !canEditShareConfig.value) {
+    departments.value = []
+    users.value = []
+    return
+  }
   try {
-    const res = await departmentApi.getDepartments()
-    departments.value = res.departments || res || []
+    const result = await databaseApi.getPermissionOptions(targetKbId)
+    departments.value = result.departments || []
+    users.value = result.users || []
   } catch {
     departments.value = []
-  }
-}
-
-const loadUsers = async () => {
-  try {
-    users.value = await authApi.getUserAccessOptions()
-  } catch {
     users.value = []
   }
 }
@@ -1003,6 +1045,7 @@ const showEditModal = () => {
   editShareConfig.value = database.value.share_config || {
     version: 2,
     read_scope: { access_level: 'global', department_ids: [], user_uids: [] },
+    edit_scope: null,
     manage_scope: null
   }
   editModalVisible.value = true
@@ -1011,7 +1054,7 @@ const showEditModal = () => {
 watch(
   () => [route.query.action, detailLoading.value, isCurrentDatabaseLoaded.value],
   ([action, loading, loaded]) => {
-    if (action !== 'edit' || loading || !loaded || !canManageDatabase.value) return
+    if (action !== 'edit' || loading || !loaded || !canOpenConfiguration.value) return
     showEditModal()
     router.replace({ path: route.path, query: { ...route.query, action: undefined } })
   },
@@ -1097,8 +1140,6 @@ const handleEditSubmit = async () => {
 
 onMounted(() => {
   loadChunkPresetOptions()
-  loadDepartments()
-  loadUsers()
   document.addEventListener('click', onUploadMenuOutsideClick)
 })
 

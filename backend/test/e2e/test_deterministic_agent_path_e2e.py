@@ -23,10 +23,10 @@ from test.live_api_cleanup import make_test_conversation_metadata, make_test_con
 pytestmark = [pytest.mark.asyncio, pytest.mark.e2e, pytest.mark.slow]
 
 EXPECTED_OUTPUT = "DETERMINISTIC_AGENT_E2E_OK"
-EXPECTED_PRELOADED_SKILL_MARKER = "# 图片生成技能"
-EXPECTED_PRELOADED_TOOL = "present_artifacts"
+EXPECTED_PRELOADED_SKILL_MARKER = "# 知识库技能"
+EXPECTED_PRELOADED_TOOL = "list_kbs"
 EXPECTED_TOOL_CALL_ID = "call-preloaded-tool"
-EXPECTED_TOOL_RESULT_MARKER = "已将交付物展示给用户"
+EXPECTED_TOOL_RESULT_MARKER = "当前没有可访问的知识库"
 BLOCK_BEFORE_RESPONSE_MARKER = "DETERMINISTIC_BLOCK_BEFORE_RESPONSE"
 TOOL_ERROR_MARKER = "DETERMINISTIC_TOOL_ERROR"
 LARGE_TOOL_RESULT_MARKER = "DETERMINISTIC_LARGE_TOOL_RESULT"
@@ -236,8 +236,8 @@ async def _create_agent(
                     "tools": [],
                     "knowledges": [],
                     "mcps": [],
-                    "skills": ["image-gen"],
-                    "preload_skills": ["image-gen"],
+                    "skills": ["knowledge-base"],
+                    "preload_skills": ["knowledge-base"],
                     "subagents": subagents or [],
                 }
             },
@@ -600,7 +600,7 @@ async def _assert_persisted_execution_facts(run_id: str, agent_slug: str) -> Non
         assert manifest["agent"] == {"slug": agent_slug, "backend_id": "ChatbotAgent"}
         assert manifest["model"] == {"spec": MODEL_SPEC}
         assert len(manifest["resources"]["skills"]) == 1
-        assert manifest["resources"]["skills"][0]["slug"] == "image-gen"
+        assert manifest["resources"]["skills"][0]["slug"] == "knowledge-base"
         assert manifest["resources"]["skills"][0]["content_hash"]
         assert row["manifest_recorded_at"] is not None
         assert row["manifest_recorded_at"] >= row["started_at"]

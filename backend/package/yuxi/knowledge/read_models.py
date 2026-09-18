@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from yuxi.permissions import ResourcePermission
+from yuxi.permissions import KnowledgeBaseCapability, ResourcePermission
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +41,7 @@ class KnowledgeBaseSummary:
     share_config: dict[str, Any]
     created_by: str | None
     created_at: datetime | None
+    owner_department_id: int | None = None
     file_count: int = 0
     folder_count: int = 0
     row_count: int = 0
@@ -51,11 +52,17 @@ class KnowledgeBaseSummary:
     pending_index_count: int = 0
     processing_count: int = 0
     effective_permission: ResourcePermission | None = None
+    effective_capabilities: frozenset[KnowledgeBaseCapability] = frozenset()
 
     @property
     def can_manage(self) -> bool:
         """返回当前调用者是否拥有管理权限。"""
         return self.effective_permission == ResourcePermission.MANAGE
+
+    @property
+    def can_edit(self) -> bool:
+        """返回当前调用者是否拥有文档编辑或管理权限。"""
+        return self.effective_permission in {ResourcePermission.EDIT, ResourcePermission.MANAGE}
 
 
 @dataclass(frozen=True, slots=True)

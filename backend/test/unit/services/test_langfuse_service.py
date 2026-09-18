@@ -11,6 +11,7 @@ class _FakeLangfuseClient:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.scores = []
+        self.span_updates = []
         self.flush_count = 0
         self.raise_on_score = False
         self.__class__.instances.append(self)
@@ -22,6 +23,9 @@ class _FakeLangfuseClient:
         if self.raise_on_score:
             raise RuntimeError("score failed")
         self.scores.append(kwargs)
+
+    def update_current_span(self, **kwargs) -> None:
+        self.span_updates.append(kwargs)
 
     def get_trace_url(self, *, trace_id: str | None = None) -> str | None:
         if trace_id is None:
@@ -212,6 +216,28 @@ def test_get_trace_info_keeps_precreated_trace_id_when_handler_differs(run_conte
         "langfuse_user_id": "user-1",
         "langfuse_session_id": "thread-1",
     }
+
+
+def test_update_current_sandbox_timing_uses_metadata_only(run_context_with_last_trace):
+    updated = svc.update_current_sandbox_timing(
+        {
+            "sandbox_discover_ms": 2.5,
+            "sandbox_execute_request_ms": 8001.2,
+        }
+    )
+
+    client = svc.get_langfuse_client()
+    assert updated is True
+    assert client.span_updates == [
+        {
+            "metadata": {
+                "sandbox_timing": {
+                    "sandbox_discover_ms": 2.5,
+                    "sandbox_execute_request_ms": 8001.2,
+                }
+            }
+        }
+    ]
 
 
 async def test_get_trace_url_by_id_async_uses_precreated_trace_id(run_context_with_last_trace):

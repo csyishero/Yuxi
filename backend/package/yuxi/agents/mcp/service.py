@@ -37,19 +37,10 @@ _mcp_tools_stats: dict[str, dict[str, int]] = {}
 _USER_CONFIGURABLE_TRANSPORTS = ("sse", "streamable_http")
 
 # Default MCP Server configurations (Imported to DB on first run)
-_DEFAULT_MCP_SERVERS = {
-    "mcp-server-chart": {
-        "command": "npx",
-        "args": ["-y", "@antv/mcp-server-chart"],
-        "transport": "stdio",
-        "description": "图表生成工具，支持生成各类图表（柱状图、折线图、饼图等）",
-        "icon": "📊",
-        "tags": ["内置", "图表"],
-    },
-}
+_DEFAULT_MCP_SERVERS: dict[str, dict[str, Any]] = {}
 _BUILTIN_MCP_SERVER_SLUGS = tuple(_DEFAULT_MCP_SERVERS)
 
-_RETIRED_BUILTIN_MCP_SERVER_SLUGS = ("sequentialthinking",)
+_RETIRED_BUILTIN_MCP_SERVER_SLUGS = ("sequentialthinking", "mcp-server-chart")
 
 _SYNCED_MCP_FIELDS = (
     "description",

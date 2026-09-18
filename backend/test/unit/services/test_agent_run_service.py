@@ -1555,6 +1555,10 @@ async def test_get_agent_run_result_uses_output_message_id(monkeypatch: pytest.M
         conversation_id=10,
         request_id="req-1",
         output_message_id=2,
+        sandbox_timing={
+            "sandbox_create_container_ms": 123.4,
+            "sandbox_release_ms": 45.6,
+        },
         error_type=None,
         error_message=None,
     )
@@ -1598,6 +1602,8 @@ async def test_get_agent_run_result_uses_output_message_id(monkeypatch: pytest.M
     assert payload["final_message_id"] == 2
     assert payload["langfuse_trace_id"] == "trace-old"
     assert payload["timing"]["first_output_latency_ms"] is None
+    assert payload["timing"]["sandbox_create_container_ms"] == 123.4
+    assert payload["timing"]["sandbox_release_ms"] == 45.6
     assert "debug" not in payload
 
 

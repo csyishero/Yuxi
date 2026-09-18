@@ -1,5 +1,11 @@
 <template>
-  <div class="login-view" :class="{ 'has-alert': serverStatus === 'error' }">
+  <div class="login-view portal-login-view" :class="{ 'has-alert': serverStatus === 'error' }">
+    <img
+      class="portal-login-backdrop"
+      src="/united-intelligence-splash.jpg"
+      alt=""
+      aria-hidden="true"
+    />
     <!-- 服务状态提示 -->
     <div v-if="serverStatus === 'error'" class="server-status-alert">
       <div class="alert-content">
@@ -14,35 +20,46 @@
       </div>
     </div>
 
-    <!-- 顶部导航：品牌名称 & 操作按钮 -->
-    <nav class="login-navbar">
-      <div class="navbar-content">
-        <div class="brand-container" @click="goHome" style="cursor: pointer">
-          <img v-if="brandLogo" :src="brandLogo" alt="logo" class="brand-logo" />
-          <h1 class="brand-text">
-            <span v-if="brandOrgName" class="brand-org">{{ brandOrgName }}</span>
-            <span v-if="brandOrgName && brandName !== brandOrgName" class="brand-separator"></span>
-            <span class="brand-main">{{ brandName }}</span>
-          </h1>
-        </div>
-      </div>
-    </nav>
+    <header class="portal-brand-bar">
+      <button type="button" class="portal-brand-home" aria-label="返回开屏页" @click="goHome">
+        <img src="/united-intelligence-logo.png" alt="联合智擎" />
+      </button>
+    </header>
 
     <!-- 主要内容区：居中卡片 -->
     <main class="login-main">
-      <div class="login-card">
-        <!-- 左侧图片 -->
-        <div class="card-side is-image">
-          <img :src="loginBgImage" alt="登录背景" class="login-bg-image" />
+      <div class="login-card portal-login-panel">
+        <div class="card-side is-image portal-login-intro">
+          <div class="portal-kicker">UNIFIED AI WORKSPACE</div>
+          <h1>简洁、安全、可信的<br />智能工作入口</h1>
+          <p>
+            通过统一身份认证进入联合智擎，安全访问知识问答、智能体与个人工作空间，体验更克制、更专业的金融级
+            AI 门户。
+          </p>
+          <div class="portal-feature-list" aria-label="门户能力">
+            <div class="portal-feature-item">
+              <span></span>
+              <div><strong>统一入口</strong><small>一个登录页进入全部 AI 能力</small></div>
+            </div>
+            <div class="portal-feature-item">
+              <span></span>
+              <div><strong>金融级安全</strong><small>权限隔离，登录过程清晰可信</small></div>
+            </div>
+            <div class="portal-feature-item">
+              <span></span>
+              <div><strong>高效协同</strong><small>登录后直达问答与智能体工作台</small></div>
+            </div>
+          </div>
         </div>
 
         <!-- 右侧表单 -->
         <div class="card-side is-form">
           <div class="form-wrapper">
-            <header class="form-header">
-              <!-- 如果是在初始化，显示特定标题 -->
-              <h2 v-if="isFirstRun" class="init-title">系统初始化，请创建超级管理员</h2>
-              <p v-else class="welcome-text">欢迎登录</p>
+            <header class="form-header portal-form-header">
+              <h2>{{ isFirstRun ? '初始化管理员' : '用户登录' }}</h2>
+              <p>
+                {{ isFirstRun ? '首次使用，请创建系统超级管理员账户' : '请输入您的登录账号和密码' }}
+              </p>
             </header>
 
             <div class="login-content" :class="{ 'is-initializing': isFirstRun }">
@@ -259,22 +276,17 @@
                 {{ errorMessage }}
               </div>
             </div>
+
+            <button type="button" class="portal-back-button" @click="goHome">
+              <ArrowLeft :size="14" aria-hidden="true" />
+              返回开屏页
+            </button>
           </div>
         </div>
       </div>
     </main>
 
-    <!-- 页面底部：版权信息等 -->
-    <footer class="page-footer">
-      <div class="footer-links">
-        <a href="https://github.com/xerrors" target="_blank">联系我们</a>
-        <span class="divider">|</span>
-        <a href="https://github.com/xerrors/Yuxi" target="_blank">使用帮助</a>
-      </div>
-      <div class="copyright">
-        &copy; {{ new Date().getFullYear() }} {{ brandName }}. All Rights Reserved.
-      </div>
-    </footer>
+    <footer class="page-footer">杭州联合银行 · 联合智擎 AI 应用门户</footer>
   </div>
 </template>
 
@@ -291,6 +303,7 @@ import {
   User as UserIcon,
   Lock as LockIcon,
   Key as KeyIcon,
+  ArrowLeft,
   AlertCircle as ExclamationCircleIcon
 } from '@lucide/vue'
 import { tryAutoStartOIDC, sanitizeRedirect } from '@/utils/oidcAutoStart'
@@ -303,25 +316,6 @@ const infoStore = useInfoStore()
 const agentStore = useAgentStore()
 
 // 品牌展示数据
-const loginBgImage = computed(() => {
-  return infoStore.organization?.login_bg || '/login-bg.jpg'
-})
-const brandLogo = computed(() => {
-  return infoStore.organization?.logo || ''
-})
-const brandOrgName = computed(() => {
-  return infoStore.organization?.name?.trim() || ''
-})
-const brandName = computed(() => {
-  const orgName = brandOrgName.value
-  const brandNameRaw = infoStore.branding?.name?.trim() || 'Yuxi'
-
-  if (orgName && brandNameRaw && orgName !== brandNameRaw) {
-    return brandNameRaw
-  }
-
-  return orgName || brandNameRaw
-})
 const userAgreementUrl = computed(() => {
   return infoStore.footer?.user_agreement_url?.trim() || ''
 })
@@ -1061,6 +1055,346 @@ onUnmounted(() => {
 
   .card-side.is-form {
     padding: 40px 20px;
+  }
+}
+
+/* 联合智擎门户登录页：复用现有鉴权表单，仅更新信息层级与视觉。 */
+.portal-login-view {
+  min-height: 100vh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background:
+    radial-gradient(
+      circle at 18% 10%,
+      color-mix(in srgb, var(--portal-brand-blue) 12%, transparent),
+      transparent 28%
+    ),
+    radial-gradient(
+      circle at 84% 18%,
+      color-mix(in srgb, var(--portal-brand-green) 8%, transparent),
+      transparent 28%
+    ),
+    var(--gray-25);
+  background-image: none;
+
+  &.has-alert {
+    padding-top: 74px;
+  }
+
+  &::after {
+    content: '';
+    position: fixed;
+    z-index: 0;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--gray-0) 78%, transparent),
+      color-mix(in srgb, var(--gray-25) 92%, transparent)
+    );
+  }
+}
+
+.portal-login-backdrop {
+  position: fixed;
+  z-index: 0;
+  inset: -18px;
+  width: calc(100% + 36px);
+  height: calc(100% + 36px);
+  object-fit: cover;
+  opacity: 0.12;
+  filter: blur(14px) saturate(0.9);
+  pointer-events: none;
+  user-select: none;
+}
+
+.portal-brand-bar {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 84px;
+  padding: 0 40px;
+}
+
+.portal-brand-home {
+  display: inline-flex;
+  align-items: center;
+  width: 220px;
+  height: 56px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+
+  img {
+    display: block;
+    width: 210px;
+    max-height: 52px;
+    object-fit: contain;
+    object-position: left center;
+  }
+
+  &:focus-visible {
+    border-radius: 8px;
+    outline: 3px solid color-mix(in srgb, var(--portal-brand-blue) 25%, transparent);
+    outline-offset: 3px;
+  }
+}
+
+.portal-login-view .login-main {
+  position: relative;
+  z-index: 2;
+  min-height: calc(100vh - 126px);
+  padding: 12px 32px 52px;
+}
+
+.portal-login-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 400px;
+  align-items: center;
+  gap: 64px;
+  width: min(1120px, 88vw);
+  max-width: none;
+  height: auto;
+  min-height: 540px;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.portal-login-panel .portal-login-intro {
+  display: block;
+  padding: 0 8px;
+  overflow: visible;
+  background: transparent;
+
+  .portal-kicker {
+    display: inline-flex;
+    align-items: center;
+    min-height: 30px;
+    padding: 0 13px;
+    border: 1px solid color-mix(in srgb, var(--portal-brand-blue) 10%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--gray-0) 74%, transparent);
+    color: var(--portal-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+  }
+
+  h1 {
+    margin: 20px 0 14px;
+    color: var(--portal-heading);
+    font-size: 40px;
+    font-weight: 700;
+    line-height: 1.28;
+  }
+
+  > p {
+    max-width: 560px;
+    margin: 0;
+    color: var(--portal-muted);
+    font-size: 15px;
+    line-height: 1.95;
+  }
+}
+
+.portal-feature-list {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 520px;
+  margin-top: 30px;
+}
+
+.portal-feature-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+
+  > span {
+    flex: 0 0 4px;
+    width: 4px;
+    height: 40px;
+    margin-top: 1px;
+    border-radius: 999px;
+    background: linear-gradient(180deg, var(--portal-brand-blue), var(--portal-brand-green));
+  }
+
+  div {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  strong {
+    color: var(--gray-800);
+    font-size: 15px;
+  }
+
+  small {
+    color: var(--gray-500);
+    font-size: 13px;
+    line-height: 1.7;
+  }
+}
+
+.portal-login-panel .card-side.is-form {
+  display: flex;
+  align-items: center;
+  padding: 34px 32px 24px;
+  border: 1px solid color-mix(in srgb, var(--portal-brand-blue) 9%, var(--portal-line));
+  border-radius: 22px;
+  background: var(--portal-surface);
+  box-shadow:
+    0 20px 48px color-mix(in srgb, var(--portal-heading) 8%, transparent),
+    0 2px 8px color-mix(in srgb, var(--portal-heading) 3%, transparent);
+  backdrop-filter: blur(12px) saturate(1.02);
+}
+
+.portal-login-panel .form-wrapper {
+  max-width: none;
+  gap: 18px;
+}
+
+.portal-form-header {
+  h2 {
+    margin: 0;
+    color: var(--portal-heading);
+    font-size: 24px;
+    font-weight: 800;
+    line-height: 1.3;
+  }
+
+  p {
+    margin: 8px 0 0;
+    color: var(--gray-500);
+    font-size: 13px;
+  }
+}
+
+.portal-login-panel .login-form {
+  :deep(.ant-form-item-label > label) {
+    color: var(--gray-700);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  :deep(.ant-input-affix-wrapper),
+  :deep(.ant-input) {
+    min-height: 50px;
+    border-color: var(--portal-line);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--gray-0) 96%, transparent);
+  }
+
+  :deep(.ant-input-affix-wrapper:hover),
+  :deep(.ant-input:hover) {
+    border-color: color-mix(in srgb, var(--portal-brand-blue) 34%, var(--portal-line));
+  }
+
+  :deep(.ant-input-affix-wrapper-focused),
+  :deep(.ant-input:focus) {
+    border-color: var(--portal-brand-blue);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--portal-brand-blue) 8%, transparent);
+  }
+
+  :deep(.ant-btn-primary) {
+    height: 50px;
+    border: 0;
+    border-radius: 12px;
+    background: linear-gradient(90deg, var(--portal-brand-blue), var(--portal-brand-cyan));
+    box-shadow: 0 12px 24px color-mix(in srgb, var(--portal-brand-blue) 18%, transparent);
+    font-size: 15px;
+    font-weight: 700;
+  }
+}
+
+.portal-login-panel .third-party-login .divider span {
+  background: transparent;
+}
+
+.portal-back-button {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--gray-500);
+  font-size: 12px;
+  cursor: pointer;
+
+  &:hover,
+  &:focus-visible {
+    background: var(--gray-50);
+    color: var(--portal-brand-blue);
+    outline: none;
+  }
+}
+
+.portal-login-view .page-footer {
+  position: relative;
+  z-index: 2;
+  min-height: 42px;
+  padding: 12px 20px;
+  color: var(--gray-500);
+  font-size: 12px;
+}
+
+@media (max-width: 1000px) {
+  .portal-login-view .login-main {
+    align-items: flex-start;
+    min-height: auto;
+    padding-top: 16px;
+  }
+
+  .portal-login-panel {
+    grid-template-columns: 1fr;
+    gap: 22px;
+    width: min(520px, 92vw);
+  }
+
+  .portal-login-panel .portal-login-intro {
+    h1 {
+      font-size: 30px;
+    }
+  }
+
+  .portal-feature-list {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .portal-login-view.has-alert {
+    padding-top: 96px;
+  }
+
+  .portal-brand-bar {
+    height: 72px;
+    padding: 0 20px;
+  }
+
+  .portal-brand-home,
+  .portal-brand-home img {
+    width: 188px;
+  }
+
+  .portal-login-panel .portal-login-intro {
+    display: none;
+  }
+
+  .portal-login-panel .card-side.is-form {
+    padding: 28px 22px 20px;
   }
 }
 </style>

@@ -47,14 +47,18 @@ test('只读连接器没有知识库详情入口并拒绝直接详情 URL', () =
     listSource,
     /const navigateToDatabase = \(database\) => \{\s*if \(kbUtils\.isReadOnlyDatabase\(database\)\) return/
   )
-  assert.match(listSource, /<a-menu-item v-if="database\.can_manage" key="edit">/)
+  assert.match(listSource, /<a-menu-item v-if="canConfigureDatabase\(database\)" key="edit">/)
   assert.match(
-    detailSource,
-    /store\.database\?\.kb_id === nextKbId &&[\s\S]*?kbUtils\.isReadOnlyDatabase\(store\.database\)[\s\S]*?route\.query\.action === 'edit' && canManageDatabase\.value[\s\S]*?showEditModal\(\)[\s\S]*?router\.replace\(\{ path: '\/extensions', query: \{ tab: 'knowledge' \} \}\)/
+    listSource,
+    /const canConfigureDatabase = \(database\) =>[\s\S]*?'configure', 'share', 'grant'/
   )
   assert.match(
     detailSource,
-    /action !== 'edit' \|\| loading \|\| !loaded \|\| !canManageDatabase\.value/
+    /store\.database\?\.kb_id === nextKbId &&[\s\S]*?kbUtils\.isReadOnlyDatabase\(store\.database\)[\s\S]*?route\.query\.action === 'edit' && canOpenConfiguration\.value[\s\S]*?showEditModal\(\)[\s\S]*?router\.replace\(\{ path: '\/extensions', query: \{ tab: 'knowledge' \} \}\)/
+  )
+  assert.match(
+    detailSource,
+    /action !== 'edit' \|\| loading \|\| !loaded \|\| !canOpenConfiguration\.value/
   )
   assert.match(detailSource, /@after-close="handleEditModalAfterClose"/)
   assert.match(

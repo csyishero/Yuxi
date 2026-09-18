@@ -26,6 +26,7 @@
       </template>
       <template #actions>
         <a-button
+          v-if="canCreateDatabase"
           type="primary"
           class="lucide-icon-btn"
           :disabled="!kbTypes.length"
@@ -51,11 +52,16 @@
     <ResourceEmptyState
       v-else-if="!databases || databases.length === 0"
       title="暂无知识库"
-      description="创建知识库后，可以上传文件并配置检索、图谱和评估能力。"
+      :description="
+        canCreateDatabase
+          ? '创建知识库后，可以上传文件并配置检索、图谱和评估能力。'
+          : '当前没有向你共享的知识库。'
+      "
       :icon="getKbTypeIcon('milvus')"
     >
       <template #actions>
         <a-button
+          v-if="canCreateDatabase"
           type="primary"
           size="large"
           class="lucide-icon-btn"
@@ -96,14 +102,14 @@
                 <span>复制 ID</span>
               </span>
             </a-menu-item>
-            <a-menu-item v-if="database.can_manage" key="edit">
+            <a-menu-item v-if="canConfigureDatabase(database)" key="edit">
               <span class="lucide-menu-item">
                 <Pencil :size="15" />
                 <span>编辑知识库</span>
               </span>
             </a-menu-item>
             <a-menu-divider />
-            <a-menu-item v-if="database.can_manage" key="delete" danger>
+            <a-menu-item v-if="canDeleteDatabase(database)" key="delete" danger>
               <span class="lucide-menu-item">
                 <Trash2 :size="15" />
                 <span>删除知识库</span>
@@ -121,6 +127,7 @@ import { ref, onMounted, reactive, watch, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useDatabaseStore } from '@/stores/database'
+import { useUserStore } from '@/stores/user'
 import { Copy, Pencil, Plus, Trash2 } from '@lucide/vue'
 import { message, Modal } from 'ant-design-vue'
 import { databaseApi, typeApi } from '@/apis/knowledge_api'
@@ -137,6 +144,7 @@ import { getShareConfigLabel } from '@/utils/shareConfig'
 const route = useRoute()
 const router = useRouter()
 const databaseStore = useDatabaseStore()
+const userStore = useUserStore()
 
 const props = defineProps({
   embedded: { type: Boolean, default: false }
@@ -151,6 +159,15 @@ const knowledgeViewItems = [
 ]
 
 const kbTypes = computed(() => Object.keys(supportedKbTypes.value))
+const canCreateDatabase = computed(() => userStore.isAdmin)
+const hasDatabaseCapability = (database, capability) =>
+  (database.effective_capabilities || []).includes(capability)
+const canConfigureDatabase = (database) =>
+  ['configure', 'share', 'grant'].some((capability) =>
+    hasDatabaseCapability(database, capability)
+  )
+const canDeleteDatabase = (database) =>
+  hasDatabaseCapability(database, 'delete-knowledge-base')
 const searchQuery = ref('')
 const typeFilter = ref(null)
 
@@ -242,6 +259,9 @@ const cardTags = (database) => {
       color: 'gray'
     }
   ]
+  if (database.effective_permission === 'read') {
+    tags.push({ name: '只读', color: 'orange' })
+  }
   if (database.embedding_model_spec) {
     tags.push({
       name: database.embedding_model_spec.split('/').slice(-1)[0],
@@ -296,6 +316,7 @@ const handleDatabaseAction = (key, database) => {
     return
   }
   if (key === 'edit') {
+    if (!canConfigureDatabase(database)) return
     router.push({
       path: `/extensions/knowledgebase/${database.kb_id}`,
       query: { action: 'edit' }
@@ -303,6 +324,7 @@ const handleDatabaseAction = (key, database) => {
     return
   }
   if (key === 'delete') {
+    if (!canDeleteDatabase(database)) return
     deleteDatabase(database)
   }
 }

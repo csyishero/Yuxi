@@ -25,14 +25,14 @@ test('路由决定新建布局，已有线程的加载和空消息不显示居�
             data: () => ({
               isNewConversation,
               isLoadingMessages,
-              conversations,
-              randomGreeting: '欢迎测试'
+              conversations
             }),
             render
           })
         )
         assert.equal(html.includes('start-screen'), isNewConversation)
-        assert.equal(html.includes('欢迎测试'), isNewConversation)
+        assert.equal(html.includes('联合智擎，与知识对话'), isNewConversation)
+        assert.equal(html.includes('选择智能体并输入问题'), isNewConversation)
         assert.equal(html.includes('正在加载消息'), isLoadingMessages)
       }
     }

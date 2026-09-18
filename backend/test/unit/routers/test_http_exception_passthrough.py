@@ -158,7 +158,7 @@ def test_graph_configuration_error_response(monkeypatch, error, status_code, det
     """通过实际 Router 检查响应协议，保持非 HTTP 异常原有映射。"""
     app = FastAPI()
     app.include_router(knowledge_router.knowledge)
-    app.dependency_overrides[knowledge_router.require_knowledge_base_manage] = lambda: SimpleNamespace(uid="user-1")
+    app.dependency_overrides[knowledge_router.require_knowledge_base_configure] = lambda: SimpleNamespace(uid="user-1")
     monkeypatch.setattr(knowledge_router.MilvusGraphService, "configure", AsyncMock(side_effect=error))
 
     response = TestClient(app).post("/knowledge/databases/kb-1/graph-build/config", json={})

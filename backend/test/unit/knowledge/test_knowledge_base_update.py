@@ -7,6 +7,7 @@ from yuxi.knowledge.base import KnowledgeBase
 from yuxi.knowledge.chunking.ragflow_like.nlp import count_tokens
 from yuxi.knowledge.manager import KnowledgeBaseManager
 from yuxi.knowledge.read_models import KnowledgeBaseDetail
+from yuxi.permissions import DEFAULT_KNOWLEDGE_BASE_CAPABILITY_POLICY
 
 
 class FakeKnowledgeBase(KnowledgeBase):
@@ -213,17 +214,58 @@ async def test_create_database_persists_allowed_record_fields(tmp_path, monkeypa
         embedding_model_spec="provider:embedding",
         share_config=share_config,
         created_by="root",
+        owner_department_id=7,
         auto_generate_questions=False,
     )
 
     assert len(created_payloads) == 1
     payload = created_payloads[0]
-    assert payload["share_config"] == share_config
+    assert payload["share_config"] == {
+        **share_config,
+        "owner_department_id": 7,
+        "capability_policy": DEFAULT_KNOWLEDGE_BASE_CAPABILITY_POLICY,
+    }
     assert payload["created_by"] == "root"
     assert "share_config" not in payload["additional_params"]
     assert "created_by" not in payload["additional_params"]
     assert result.kb_id.startswith("kb_")
     assert not hasattr(kb, "_runtime_configs")
+
+
+def test_share_config_uses_server_owned_department_id(tmp_path):
+    manager = KnowledgeBaseManager(str(tmp_path))
+
+    normalized = manager._normalize_share_config(
+        {
+            "version": 2,
+            "owner_department_id": 999,
+            "read_scope": {"access_level": "global"},
+            "manage_scope": None,
+        },
+        owner_department_id=7,
+        strict=True,
+    )
+
+    assert normalized["owner_department_id"] == 7
+
+
+@pytest.mark.parametrize("access_level", ["global", "department"])
+def test_knowledge_base_rejects_broad_additional_manager_scope(tmp_path, access_level):
+    manager = KnowledgeBaseManager(str(tmp_path))
+    manage_scope = {"access_level": access_level}
+    if access_level == "department":
+        manage_scope["department_ids"] = [7]
+
+    with pytest.raises(ValueError, match="额外管理员只能通过指定成员授权"):
+        manager._normalize_share_config(
+            {
+                "version": 2,
+                "read_scope": {"access_level": "global"},
+                "manage_scope": manage_scope,
+            },
+            owner_department_id=7,
+            strict=True,
+        )
 
 
 async def test_manager_refresh_database_stats_persists_metadata(tmp_path, monkeypatch):

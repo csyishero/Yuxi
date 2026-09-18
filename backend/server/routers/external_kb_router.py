@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.knowledge.base import KBNotFoundError
 from yuxi.knowledge.read_models import KnowledgeBaseSummary
+from yuxi.permissions import KnowledgeBaseCapability
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
 
@@ -39,6 +40,9 @@ async def list_external_databases(current_user: User = Depends(get_required_user
                 "description": db.description or "",
                 "kb_type": kb_type,
                 "supports_documents": knowledge_base.database_type_supports_documents(kb_type),
+                "effective_capabilities": sorted(
+                    capability.value for capability in db.effective_capabilities
+                ),
             }
         )
     return {"databases": items}
@@ -57,6 +61,9 @@ async def list_external_files(
     database = await knowledge_base.get_accessible_database_info_by_uid(current_user.uid, kb_id)
     if not database:
         raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在或无权访问")
+    required_capability = KnowledgeBaseCapability.SEARCH if query else KnowledgeBaseCapability.VIEW
+    if required_capability not in database.effective_capabilities:
+        raise HTTPException(status_code=403, detail=f"缺少 {required_capability.value} 权限")
     if not knowledge_base.database_type_supports_documents(database.kb_type):
         raise HTTPException(
             status_code=400,
@@ -82,7 +89,11 @@ async def retrieve_external(
     """对知识库执行检索查询，返回结构化结果。"""
     if not payload.query:
         raise HTTPException(status_code=400, detail="query is required")
-    await _require_accessible_kb(kb_id, current_user.uid)
+    await _require_accessible_kb(
+        kb_id,
+        current_user.uid,
+        required_capability=KnowledgeBaseCapability.SEARCH,
+    )
     options = dict(payload.options or {})
     if payload.file_name:
         options["file_name"] = payload.file_name
@@ -106,7 +117,13 @@ async def open_external_file(
     current_user: User = Depends(get_required_user),
 ):
     """按行窗口打开文件解析后的 Markdown 内容。"""
-    await _require_accessible_kb(kb_id, current_user.uid, require_documents=True, operation="文档查看")
+    await _require_accessible_kb(
+        kb_id,
+        current_user.uid,
+        require_documents=True,
+        operation="文档查看",
+        required_capability=KnowledgeBaseCapability.VIEW,
+    )
     try:
         return await knowledge_base.open_document(kb_id, file_id, offset=offset, limit=limit)
     except ValueError as e:
@@ -126,7 +143,13 @@ async def find_external_file(
     current_user: User = Depends(get_required_user),
 ):
     """在指定文件内做关键词或正则定位，返回匹配窗口。"""
-    await _require_accessible_kb(kb_id, current_user.uid, require_documents=True, operation="文档查找")
+    await _require_accessible_kb(
+        kb_id,
+        current_user.uid,
+        require_documents=True,
+        operation="文档查找",
+        required_capability=KnowledgeBaseCapability.SEARCH,
+    )
     if not payload.patterns:
         raise HTTPException(status_code=400, detail="patterns 不能为空")
     try:
@@ -154,11 +177,14 @@ async def _require_accessible_kb(
     *,
     require_documents: bool = False,
     operation: str = "文档查看",
+    required_capability: KnowledgeBaseCapability | None = None,
 ) -> KnowledgeBaseSummary:
     """校验知识库对 uid 可见，必要时同时校验文档能力。"""
     database = await knowledge_base.get_accessible_database_info_by_uid(uid, str(kb_id or "").strip())
     if not database:
         raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在或无权访问")
+    if required_capability is not None and required_capability not in database.effective_capabilities:
+        raise HTTPException(status_code=403, detail=f"缺少 {required_capability.value} 权限")
     if require_documents and not knowledge_base.database_type_supports_documents(database.kb_type):
         kb_type = database.kb_type.lower()
         raise HTTPException(status_code=400, detail=f"{database.name or kb_type} 只支持检索，不支持{operation}")

@@ -166,7 +166,8 @@
 
               <!-- 打招呼区域 - 在输入框上方 -->
               <div v-if="isNewConversation" class="chat-greeting-input">
-                <h1>{{ randomGreeting }}</h1>
+                <h1>联合智擎，与知识对话</h1>
+                <p>选择智能体并输入问题，使用 @ 可以引用文件、知识库或技能。</p>
               </div>
 
               <section
@@ -971,18 +972,6 @@ const sendCooldownActive = ref(false)
 const cancellingRequestIds = reactive(new Set())
 const steeringRequestIds = reactive(new Set())
 let sendCooldownTimer = null
-// 预设的打招呼文本
-const greetingMessages = [
-  '语析，析万物之语',
-  '语析，与知识对话',
-  '答案藏在知识里，我来找',
-  '与知识对话，与答案相遇',
-  '你负责提问，我负责寻找'
-]
-
-// 随机选择一个打招呼文本
-const randomGreeting = greetingMessages[Math.floor(Math.random() * greetingMessages.length)]
-
 // 业务状态（保留在组件本地）
 const chatState = reactive({
   // 以threadId为键的线程状态
@@ -4174,14 +4163,50 @@ watch(currentChatId, (threadId, oldThreadId) => {
 }
 
 .chat-greeting-input {
-  padding: 10px 0;
+  position: relative;
+  padding: 12px 0;
   text-align: center;
-  margin-bottom: 7vh;
+  margin-bottom: 24px;
 
   h1 {
-    font-size: 1.4rem;
-    color: var(--gray-1000);
+    position: relative;
+    z-index: 1;
+    font-size: 26px;
+    font-weight: 700;
+    color: var(--portal-heading);
     margin: 0;
+  }
+
+  p {
+    position: relative;
+    z-index: 1;
+    margin: 9px 0 0;
+    color: var(--gray-500);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  &::before,
+  &::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    pointer-events: none;
+    border: 1px solid color-mix(in srgb, var(--portal-brand-cyan) 18%, transparent);
+    border-radius: 50%;
+    transform: translate(-50%, -50%) rotate(-8deg);
+  }
+
+  &::before {
+    width: min(680px, 86vw);
+    height: 172px;
+  }
+
+  &::after {
+    width: min(520px, 70vw);
+    height: 126px;
+    transform: translate(-50%, -50%) rotate(9deg);
   }
 }
 
@@ -4588,7 +4613,7 @@ watch(currentChatId, (threadId, oldThreadId) => {
 
   &.start-screen {
     position: absolute;
-    top: 45%;
+    top: 48%;
     left: 50%;
     transform: translate(-50%, -50%);
     bottom: auto;

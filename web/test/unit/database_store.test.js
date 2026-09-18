@@ -76,6 +76,68 @@ test('从二级目录点击全部文件会清空 parent_id 并返回根目录', 
   }
 })
 
+test('只有上传权限时只创建文件记录，不会隐式触发解析', async (t) => {
+  const server = await createServer({
+    server: { middlewareMode: true, hmr: false },
+    appType: 'custom'
+  })
+
+  const pinia = createPinia()
+  const app = createApp({})
+  app.use(pinia)
+  app.use(createRouter({ history: createMemoryHistory(), routes: [] }))
+  setActivePinia(pinia)
+
+  try {
+    const { documentApi, databaseApi } = await server.ssrLoadModule('/src/apis/knowledge_api.js')
+    const { useDatabaseStore } = await server.ssrLoadModule('/src/stores/database.js')
+    const calls = []
+    t.mock.method(message, 'success', () => {})
+    t.mock.method(databaseApi, 'getDatabaseInfo', async () => ({
+      kb_id: 'kb-upload-only',
+      effective_capabilities: ['view', 'upload'],
+      stats: { processing_count: 0 }
+    }))
+    t.mock.method(documentApi, 'listDocuments', async () => ({
+      items: [],
+      stats: { processing_count: 0 }
+    }))
+    t.mock.method(documentApi, 'addDocuments', async () => {
+      calls.push('parse')
+      return { status: 'queued' }
+    })
+    t.mock.method(documentApi, 'addUploadedDocuments', async (_kbId, items, params) => {
+      calls.push({ items, params })
+      return { status: 'success', message: '已添加 1 个文件' }
+    })
+
+    const store = app.runWithContext(() => useDatabaseStore())
+    store.kbId = 'kb-upload-only'
+    store.database = {
+      kb_id: 'kb-upload-only',
+      effective_capabilities: ['view', 'upload']
+    }
+
+    assert.equal(
+      await store.addFiles({
+        items: ['minio://bucket/file.pdf'],
+        contentType: 'file',
+        params: { ocr_engine: 'rapid_ocr' }
+      }),
+      true
+    )
+    assert.deepEqual(calls, [
+      {
+        items: ['minio://bucket/file.pdf'],
+        params: { ocr_engine: 'rapid_ocr', content_type: 'file' }
+      }
+    ])
+    store.stopAutoRefresh()
+  } finally {
+    await server.close()
+  }
+})
+
 test('知识库提交跨账号返回时，不把旧入队任务登记给新账号', async (t) => {
   const server = await createServer({
     server: { middlewareMode: true, hmr: false },

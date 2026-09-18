@@ -51,18 +51,30 @@ class _FakeClient:
         return self._tools
 
 
-async def test_ensure_builtin_mcp_servers_removes_retired_system_server(monkeypatch, mcp_session):
-    retired_server = MCPServer(
-        slug="sequentialthinking",
-        name="sequentialthinking",
-        description="old builtin",
-        transport="streamable_http",
-        url="https://remote.mcpservers.org/sequentialthinking/mcp",
-        enabled=1,
-        created_by="system",
-        updated_by="system",
+async def test_ensure_builtin_mcp_servers_removes_retired_system_servers(monkeypatch, mcp_session):
+    mcp_session.add_all(
+        [
+            MCPServer(
+                slug="sequentialthinking",
+                name="sequentialthinking",
+                transport="streamable_http",
+                url="https://example.com/sequentialthinking/mcp",
+                enabled=1,
+                created_by="system",
+                updated_by="system",
+            ),
+            MCPServer(
+                slug="mcp-server-chart",
+                name="Mcp Server Chart",
+                transport="stdio",
+                command="npx",
+                args=["-y", "@antv/mcp-server-chart"],
+                enabled=1,
+                created_by="system",
+                updated_by="system",
+            ),
+        ]
     )
-    mcp_session.add(retired_server)
     await mcp_session.commit()
 
     monkeypatch.setattr(
@@ -73,15 +85,15 @@ async def test_ensure_builtin_mcp_servers_removes_retired_system_server(monkeypa
 
     await mcp_service.ensure_builtin_mcp_servers_in_db()
 
-    retired = await mcp_session.scalar(select(MCPServer).where(MCPServer.slug == "sequentialthinking"))
-    chart = await mcp_session.scalar(select(MCPServer).where(MCPServer.slug == "mcp-server-chart"))
-    assert retired is None
-    assert chart is not None
+    remaining = await mcp_session.scalars(
+        select(MCPServer).where(MCPServer.slug.in_(("sequentialthinking", "mcp-server-chart")))
+    )
+    assert list(remaining) == []
 
 
 async def test_ensure_builtin_mcp_servers_preserves_user_server_with_retired_slug(monkeypatch, mcp_session):
     user_server = MCPServer(
-        slug="sequentialthinking",
+        slug="mcp-server-chart",
         name="用户自定义 MCP",
         description="user managed",
         transport="streamable_http",
@@ -101,7 +113,7 @@ async def test_ensure_builtin_mcp_servers_preserves_user_server_with_retired_slu
 
     await mcp_service.ensure_builtin_mcp_servers_in_db()
 
-    server = await mcp_session.scalar(select(MCPServer).where(MCPServer.slug == "sequentialthinking"))
+    server = await mcp_session.scalar(select(MCPServer).where(MCPServer.slug == "mcp-server-chart"))
     assert server is not None
     assert server.created_by == "admin"
 
@@ -193,10 +205,8 @@ async def test_runtime_configs_exclude_user_created_stdio_servers(mcp_session):
     configs = await mcp_service._load_enabled_mcp_server_configs(db=mcp_session)
     slugs = await mcp_service.get_enabled_mcp_server_slugs(db=mcp_session)
 
-    assert set(configs) == {"mcp-server-chart", "remote-http"}
-    assert set(slugs) == {"mcp-server-chart", "remote-http"}
-    assert configs["mcp-server-chart"]["command"] == "npx"
-    assert configs["mcp-server-chart"]["args"] == ["-y", "@antv/mcp-server-chart"]
+    assert set(configs) == {"remote-http"}
+    assert set(slugs) == {"remote-http"}
     assert "command" not in configs["remote-http"]
     assert "args" not in configs["remote-http"]
 
@@ -215,19 +225,21 @@ async def test_create_mcp_server_rejects_user_created_stdio(mcp_session):
     assert server is None
 
 
-async def test_create_mcp_server_rejects_builtin_slug(mcp_session):
-    with pytest.raises(ValueError, match="slug"):
-        await mcp_service.create_mcp_server(
-            mcp_session,
-            slug="mcp-server-chart",
-            name="伪造内置 MCP",
-            transport="streamable_http",
-            url="https://example.com/mcp",
-            created_by="admin",
-        )
+async def test_create_remote_mcp_server_allows_retired_builtin_slug(mcp_session):
+    server = await mcp_service.create_mcp_server(
+        mcp_session,
+        slug="mcp-server-chart",
+        name="管理员远程 MCP",
+        transport="streamable_http",
+        url="https://example.com/mcp",
+        created_by="admin",
+    )
+
+    assert server.created_by == "admin"
+    assert server.transport == "streamable_http"
 
 
-async def test_update_builtin_mcp_server_rejects_connection_changes(mcp_session):
+async def test_update_retired_builtin_record_migrates_to_remote_transport(mcp_session):
     server = MCPServer(
         slug="mcp-server-chart",
         name="内置 stdio",
@@ -240,18 +252,18 @@ async def test_update_builtin_mcp_server_rejects_connection_changes(mcp_session)
     mcp_session.add(server)
     await mcp_session.commit()
 
-    with pytest.raises(PermissionError, match="系统内置"):
-        await mcp_service.update_mcp_server(
-            mcp_session,
-            slug="mcp-server-chart",
-            transport="streamable_http",
-            url="https://example.com/mcp",
-            updated_by="admin",
-        )
+    await mcp_service.update_mcp_server(
+        mcp_session,
+        slug="mcp-server-chart",
+        transport="streamable_http",
+        url="https://example.com/mcp",
+        updated_by="admin",
+    )
 
     await mcp_session.refresh(server)
-    assert server.transport == "stdio"
-    assert server.command == "trusted-command"
+    assert server.transport == "streamable_http"
+    assert server.url == "https://example.com/mcp"
+    assert server.command is None
 
 
 async def test_update_legacy_stdio_requires_remote_url(mcp_session):

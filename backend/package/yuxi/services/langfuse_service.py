@@ -251,6 +251,20 @@ def get_trace_info(run_context: LangfuseRunContext | None) -> dict[str, Any]:
     return trace_info
 
 
+def update_current_sandbox_timing(timing: dict[str, float]) -> bool:
+    """把可信 Sandbox 阶段耗时附加到当前 Langfuse observation。"""
+    client = get_langfuse_client()
+    if client is None or not timing:
+        return False
+
+    try:
+        client.update_current_span(metadata={"sandbox_timing": dict(timing)})
+        return True
+    except Exception as exc:
+        logger.warning(f"更新 Langfuse Sandbox 计时失败，将保留本地计时: {type(exc).__name__}")
+        return False
+
+
 def submit_user_feedback_score(
     *,
     trace_id: str,

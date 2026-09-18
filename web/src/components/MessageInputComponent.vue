@@ -1331,8 +1331,8 @@ defineExpose({
   width: 100%;
   margin: 0 auto;
   border: 1px solid var(--gray-150);
-  border-radius: 1.4rem;
-  box-shadow: 0 2px 8px var(--shadow-1);
+  border-radius: 16px;
+  box-shadow: 0 8px 24px var(--shadow-1);
   transition: all 0.3s ease;
   background: var(--gray-0);
   gap: 0px;
@@ -1502,7 +1502,7 @@ defineExpose({
   height: 32px;
   width: 32px;
   cursor: pointer;
-  background-color: var(--main-500);
+  background: linear-gradient(135deg, var(--portal-brand-blue), var(--portal-brand-cyan));
   border-radius: 50%;
   border: none;
   transition: all 0.2s ease;
@@ -1515,7 +1515,7 @@ defineExpose({
   font-size: 14px;
 
   &:hover {
-    background-color: var(--main-color);
+    background: linear-gradient(135deg, var(--portal-brand-blue), var(--portal-brand-green));
     box-shadow: 0 4px 8px var(--shadow-3);
     color: var(--gray-0);
   }

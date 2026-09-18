@@ -546,12 +546,9 @@ def builtin_skill_specs():
     return {spec["slug"]: spec for spec in svc.list_builtin_skill_specs()}
 
 
-def test_image_gen_builtin_skill_spec(builtin_skill_specs):
-    assert "image-gen" in builtin_skill_specs
-    image_gen = builtin_skill_specs["image-gen"]
-    assert image_gen["name"] == "image-gen"
-    assert image_gen["tool_dependencies"] == ["present_artifacts"]
-    assert (image_gen["source_dir"] / "SKILL.md").exists()
+def test_retired_builtin_skills_are_not_registered(builtin_skill_specs):
+    assert "image-gen" not in builtin_skill_specs
+    assert "mysql-reporter" not in builtin_skill_specs
 
 
 def test_html_preview_builtin_skill_spec(builtin_skill_specs):
@@ -586,21 +583,6 @@ def test_knowledge_base_builtin_skill_spec(builtin_skill_specs):
         "download_kb_file",
     ]
     assert (knowledge_base["source_dir"] / "SKILL.md").exists()
-
-
-def test_mysql_reporter_builtin_skill_spec_replaces_reporter_and_deep_reporter(builtin_skill_specs):
-    assert "reporter" not in builtin_skill_specs
-    assert "deep-reporter" not in builtin_skill_specs
-    assert "mysql-reporter" in builtin_skill_specs
-    mysql_reporter = builtin_skill_specs["mysql-reporter"]
-    assert mysql_reporter["name"] == "mysql reporter"
-    assert mysql_reporter["tool_dependencies"] == []
-    assert mysql_reporter["mcp_dependencies"] == ["mcp-server-chart"]
-    assert (mysql_reporter["source_dir"] / "SKILL.md").exists()
-    for script_name in ("list_tables.py", "describe_table.py", "query.py"):
-        script_path = mysql_reporter["source_dir"] / "scripts" / script_name
-        assert script_path.exists()
-        assert script_path.read_text(encoding="utf-8").startswith("# /// script")
 
 
 def test_is_valid_skill_slug():
@@ -780,15 +762,16 @@ def test_projection_comparison_rejects_file_replaced_after_stat(tmp_path: Path, 
 
 
 @pytest.mark.asyncio
-async def test_skill_policy_change_removes_stale_projection_before_refresh(
+async def test_skill_policy_changes_remove_stale_projections_before_refresh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """撤权提交时旧 Skill 必须先消失，再按新数据库授权恢复仍有权用户。"""
     for uid in ("user-1", "user-2"):
-        target = tmp_path / "skill-projections" / uid / "reporter"
-        target.mkdir(parents=True)
-        (target / "SKILL.md").write_text("# stale\n", encoding="utf-8")
+        for slug in ("reporter", "image-gen"):
+            target = tmp_path / "skill-projections" / uid / slug
+            target.mkdir(parents=True)
+            (target / "SKILL.md").write_text("# stale\n", encoding="utf-8")
 
     lifecycle: list[str] = []
 
@@ -800,7 +783,9 @@ async def test_skill_policy_change_removes_stale_projection_before_refresh(
     class Db:
         async def commit(self):
             assert not (tmp_path / "skill-projections/user-1/reporter").exists()
+            assert not (tmp_path / "skill-projections/user-1/image-gen").exists()
             assert not (tmp_path / "skill-projections/user-2/reporter").exists()
+            assert not (tmp_path / "skill-projections/user-2/image-gen").exists()
             lifecycle.append("commit")
 
         async def execute(self, _statement, _parameters=None):
@@ -812,7 +797,7 @@ async def test_skill_policy_change_removes_stale_projection_before_refresh(
 
     monkeypatch.setattr(svc, "refresh_user_skill_projection_async", refresh)
 
-    await svc.apply_skill_projection_policy_change(Db(), "reporter")
+    await svc.apply_skill_projection_policy_changes(Db(), ["reporter", "image-gen"])
 
     assert lifecycle == ["commit", "refresh:user-1", "refresh:user-2"]
 
@@ -1623,6 +1608,82 @@ def test_list_builtin_skill_specs_rejects_missing_required_directory(
 
     with pytest.raises(ValueError, match="内置 skill 目录不存在"):
         svc.list_builtin_skill_specs()
+
+
+@pytest.mark.asyncio
+async def test_retire_unregistered_builtin_skills_removes_records_sources_and_projections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    items = [
+        Skill(
+            slug="html-preview",
+            name="html-preview",
+            description="active builtin",
+            dir_path="shared/html-preview",
+            source_type="builtin",
+        ),
+        Skill(
+            slug="image-gen",
+            name="image-gen",
+            description="retired builtin",
+            dir_path="shared/image-gen",
+            source_type="builtin",
+        ),
+        Skill(
+            slug="mysql-reporter",
+            name="mysql-reporter",
+            description="retired builtin",
+            dir_path="shared/mysql-reporter",
+            source_type="builtin",
+        ),
+        Skill(
+            slug="custom-skill",
+            name="custom-skill",
+            description="uploaded",
+            dir_path="shared/custom-skill",
+            source_type="upload",
+        ),
+    ]
+    deleted: list[str] = []
+    projection_updates: list[str] = []
+
+    class FakeRepo:
+        async def list_all(self):
+            return items
+
+        async def delete(self, item: Skill):
+            deleted.append(item.slug)
+
+    async def fake_apply_projection_policy_changes(_db, slugs: list[str]):
+        projection_updates.extend(slugs)
+
+    skills_root = tmp_path / "shared"
+    for slug in ("html-preview", "image-gen", "mysql-reporter", "custom-skill"):
+        skill_dir = skills_root / slug
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(slug, encoding="utf-8")
+
+    monkeypatch.setattr(svc, "get_skills_root_dir", lambda: skills_root)
+    monkeypatch.setattr(
+        svc,
+        "apply_skill_projection_policy_changes",
+        fake_apply_projection_policy_changes,
+    )
+
+    retired = await svc._retire_unregistered_builtin_skills(
+        object(),
+        FakeRepo(),
+        active_slugs={"html-preview"},
+    )
+
+    assert retired == ["image-gen", "mysql-reporter"]
+    assert deleted == retired
+    assert projection_updates == retired
+    assert not (skills_root / "image-gen").exists()
+    assert not (skills_root / "mysql-reporter").exists()
+    assert (skills_root / "html-preview").exists()
+    assert (skills_root / "custom-skill").exists()
 
 
 @pytest.mark.asyncio

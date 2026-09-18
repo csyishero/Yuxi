@@ -1,12 +1,14 @@
 export const createDefaultShareConfig = () => ({
   version: 2,
   read_scope: { access_level: 'global', department_ids: [], user_uids: [] },
+  edit_scope: null,
   manage_scope: null
 })
 
 export const createEmptyDatabaseForm = (embeddingModel = '') => ({
   name: '',
   description: '',
+  department_id: null,
   embedding_model_spec: embeddingModel,
   kb_type: '',
   chunk_preset_id: DEFAULT_CHUNK_PRESET_ID,
@@ -29,6 +31,8 @@ export const selectDatabaseType = (form, type, typeInfo) => ({
 
 export const validateDatabaseConfig = (form, typeInfo) => {
   if (!String(form?.name || '').trim()) return '请输入知识库名称'
+  const departmentId = Number(form?.department_id)
+  if (!Number.isInteger(departmentId) || departmentId <= 0) return '请选择知识库所属部门'
   if (typeInfo?.requires_embedding_model && !form?.embedding_model_spec) {
     return '请选择嵌入模型'
   }
@@ -61,6 +65,7 @@ export const buildDatabaseRequest = (form, typeInfo, shareConfig, defaultEmbeddi
   const request = {
     database_name: form.name.trim(),
     description: form.description?.trim() || '',
+    department_id: Number(form.department_id),
     kb_type: form.kb_type,
     additional_params: additionalParams,
     share_config: shareConfig

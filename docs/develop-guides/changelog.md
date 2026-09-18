@@ -26,6 +26,7 @@
 - 修复普通 HTTP 环境创建 API Key 无响应（[#998](https://github.com/xerrors/Yuxi/issues/998)），重试沿用同一幂等请求 ID；公网部署仍须配置 HTTPS。
 - 修复知识库统计刷新命中过期缓存（[#997](https://github.com/xerrors/Yuxi/issues/997)）及带时区字段处理错误（[#988](https://github.com/xerrors/Yuxi/issues/988)）。
 - 修复共享智能体编辑时误删不可见的既有资源选择；运行时仍只使用当前用户有权访问的资源。新建托管 Project 使用可读目录名，既有 UUID 目录保持有效。
+- 知识库 READ / EDIT / MANAGE 授权新增可编辑能力树，可按浏览、检索、下载、上传、解析、入库、共享、删除等具体操作裁剪权限；策略复用现有 `share_config`，旧知识库自动沿用默认模板，无需数据库迁移。系统继承管理员仍保留全部能力，普通用户可通过“指定协管成员”被委派为单个知识库管理员，但不会获得创建或管理其他知识库的权限；额外管理员不接受全局/部门范围授权。HTTP 接口与 Agent 工具共同执行同一套能力校验。
 - 修复子智能体禁用工具后仍可调用后端执行的问题；禁用状态在执行端拒绝工具访问（[#1001](https://github.com/xerrors/Yuxi/pull/1001)）。
 - 修复书籍分块偶发遗漏短文档标题、将不同节错误合并的问题；标题识别使用无放回抽样，短文档保留全部段落。
 - 修复 PDF 预览偶发误报「无法加载 PDF 文件或文件格式受损」：生产 Nginx 为 `.mjs` 静态资源补充 JavaScript MIME，pdf.js Worker 不再被浏览器拒绝；前端区分渲染组件、网络与文件损坏错误，并修复快速切换文件时的过期加载竞态；CMap 字体映射改为随应用本地发布，不再依赖 jsDelivr CDN。
@@ -280,7 +281,7 @@ v0.7.2.beta1 包含不可逆的数据与文件布局迁移，主要影响历史�
 - 新增内置「深度研究」多智能体：编排器 Agent（`deep-research`，ChatbotAgent 后端）负责澄清、拆解、并行调度子智能体与综合成稿，配套两个子智能体 `research-explorer`（围绕单个子问题多轮检索网页/知识库并返回带引用发现）和 `fact-verifier`（对抗式核验关键论断、标注冲突与置信度）；完整研究方法论沉淀为新增内置 Skill `deep-research`（依赖 `tavily_search`），编排器运行时读取并据此调度。三者随 `lifespan` 启动通过 `AgentRepository.ensure_deep_research_agents` 幂等落库（已存在不覆盖管理员修改）。
 - 新增内置 `general-purpose` 通用任务子智能体：使用 `SubAgentBackend` 与空运行配置，作为 `task` 工具的通用委派目标，由启动初始化自动写入数据库。
 - 收敛 MCP 创建与编辑入口：前端移除整段配置文本入口和模式切换器，仅保留表单字段提交；后端 MCP 创建/更新请求拒绝额外配置字段，避免绕过表单约束。
-- 调整内置 MCP 默认项：移除 `sequentialthinking` 的系统内置同步，启动同步时清理历史系统内置记录，保留用户手动创建的同名 MCP。
+- 调整内置 MCP 默认项：移除 `sequentialthinking` 与 `mcp-server-chart` 的系统内置同步，启动同步时清理历史系统内置记录，保留用户手动创建的同名远程 MCP。
 - 图片生成能力迁移为 Skill：Qwen-Image 从内置 Python 生成工具迁移到内置 Skill `image-gen`，模型调用与图片下载在 Agent 沙盒中完成，生成结果保存到 outputs 并通过 `present_artifacts` 展示，为多图片生成模型接入复用同一产物展示链路。
 - 优化前端头像加载兜底：用户与智能体头像优先展示已配置图片，加载失败后回退到基于 ID 的 DiceBear 默认头像；离线或默认头像不可达时显示名称前两个字和稳定背景色。
 - 降低知识库路由与工具模块复杂度：示例问题生成迁移到知识库 utils，文件上传统一 100 MB 限制，URL 预处理入库路径与旧 `content_type=url` 行为收敛，并修复 uid、导出 MIME 与异常透传等路由问题。

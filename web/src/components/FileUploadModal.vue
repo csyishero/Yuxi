@@ -30,7 +30,7 @@
             class="custom-segmented"
           />
         </div>
-        <div class="auto-index-toggle">
+        <div v-if="canAutoIndex" class="auto-index-toggle">
           <a-checkbox v-model:checked="autoIndex">上传后自动入库</a-checkbox>
         </div>
       </div>
@@ -64,7 +64,7 @@
             </div>
             <p class="param-description">选择文件保存的目标文件夹</p>
           </div>
-          <div class="col-item" v-if="uploadMode !== 'url'">
+          <div class="col-item" v-if="uploadMode !== 'url' && canParseFiles">
             <div class="setting-label">OCR 引擎（仅应用于 PDF/图片文件）</div>
             <div class="setting-content">
               <OCRSelector
@@ -469,6 +469,9 @@ const visible = computed({
 const kbId = computed(() => store.kbId)
 const uploadUrl = computed(() => fileApi.getUploadUrl(kbId.value))
 const chunkLoading = computed(() => store.state.chunkLoading)
+const effectiveCapabilities = computed(() => new Set(store.database?.effective_capabilities || []))
+const canParseFiles = computed(() => effectiveCapabilities.value.has('parse'))
+const canAutoIndex = computed(() => canParseFiles.value && effectiveCapabilities.value.has('index'))
 
 // 上传模式
 const uploadMode = ref('file')
@@ -744,6 +747,10 @@ const buildAutoIndexParams = () => {
 }
 
 const isFolderUpload = ref(false)
+
+watch(canAutoIndex, (allowed) => {
+  if (!allowed) autoIndex.value = false
+})
 
 // 计算属性：是否启用了OCR
 const isOcrEnabled = computed(() => {
@@ -1149,7 +1156,7 @@ const chunkData = async () => {
   }
 
   // 验证OCR服务可用性（非 URL 模式下）
-  if (uploadMode.value !== 'url' && !validateOcrService()) {
+  if (canParseFiles.value && uploadMode.value !== 'url' && !validateOcrService()) {
     return
   }
 
@@ -1181,7 +1188,7 @@ const chunkData = async () => {
         mergeSameNameFiles(item.same_name_files)
 
         const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase()
-        if (imageExtensions.includes(ext) && !isOcrEnabled.value) {
+        if (canParseFiles.value && imageExtensions.includes(ext) && !isOcrEnabled.value) {
           message.error({
             content: '检测到图片文件，必须启用 OCR 才能提取文本内容。',
             duration: 5
@@ -1196,12 +1203,13 @@ const chunkData = async () => {
         Object.assign(params, buildAutoIndexParams())
       }
 
-      await store.addFiles({
+      const added = await store.addFiles({
         items,
         contentType: 'file',
         params,
         parentId: selectedFolderId.value
       })
+      if (!added) return
 
       emit('success')
       handleCancel()
@@ -1274,12 +1282,13 @@ const chunkData = async () => {
       params._preprocessed_map = preprocessedMap
 
       // 调用 addFiles (file mode)
-      await store.addFiles({
+      const added = await store.addFiles({
         items: items,
         contentType: 'file', // 重要：这里改为 file，因为我们已经转成了 minio 上的文件
         params,
         parentId: selectedFolderId.value
       })
+      if (!added) return
 
       emit('success')
       handleCancel()
@@ -1319,7 +1328,7 @@ const chunkData = async () => {
 
     // 检查是否需要OCR
     const ext = file_path.substring(file_path.lastIndexOf('.')).toLowerCase()
-    if (imageExtensions.includes(ext) && !isOcrEnabled.value) {
+    if (canParseFiles.value && imageExtensions.includes(ext) && !isOcrEnabled.value) {
       message.error({
         content: '检测到图片文件，必须启用 OCR 才能提取文本内容。',
         duration: 5
@@ -1344,12 +1353,13 @@ const chunkData = async () => {
       Object.assign(params, buildAutoIndexParams())
     }
 
-    await store.addFiles({
+    const added = await store.addFiles({
       items,
       contentType: 'file',
       params,
       parentId: selectedFolderId.value
     })
+    if (!added) return
 
     emit('success')
     handleCancel()

@@ -45,6 +45,25 @@
             />
           </div>
           <div class="form-section">
+            <label for="database-create-department">所属部门 <b>*</b></label>
+            <a-select
+              v-if="userStore.isSuperAdmin"
+              id="database-create-department"
+              v-model:value="form.department_id"
+              :options="departmentOptions"
+              :loading="departmentsLoading"
+              class="full-width"
+              placeholder="请选择知识库所属部门"
+            />
+            <a-input
+              v-else
+              id="database-create-department"
+              :value="selectedDepartmentName"
+              readonly
+            />
+            <small>知识库归属该部门，该部门管理员自动拥有管理权限。</small>
+          </div>
+          <div class="form-section">
             <label>知识库类型 <b>*</b></label>
             <div class="type-options" role="radiogroup" aria-label="知识库类型">
               <button
@@ -164,6 +183,10 @@
             </div>
 
             <div class="summary-grid">
+              <div class="summary-item">
+                <span class="summary-label">所属部门</span>
+                <span class="summary-value">{{ selectedDepartmentName || '-' }}</span>
+              </div>
               <div v-if="selectedTypeInfo?.requires_embedding_model" class="summary-item">
                 <span class="summary-label">嵌入模型</span>
                 <span class="summary-value" :title="form.embedding_model_spec">{{
@@ -192,8 +215,10 @@
           <ShareConfigForm
             ref="shareConfigFormRef"
             v-model="shareConfig"
-            :auto-select-user-dept="true"
             :require-read-scope="true"
+            :show-edit-scope="true"
+            :resource-department-id="form.department_id"
+            :show-knowledge-base-inheritance="true"
           />
         </section>
       </main>
@@ -223,6 +248,8 @@ import ShareConfigForm from '@/components/ShareConfigForm.vue'
 import { useChunkPresetOptions } from '@/composables/useChunkPresetOptions'
 import { useConfigStore } from '@/stores/config'
 import { useDatabaseStore } from '@/stores/database'
+import { useUserStore } from '@/stores/user'
+import { departmentApi } from '@/apis/department_api'
 import { getKbTypeIcon, getKbTypeLabel } from '@/utils/kb_utils'
 import {
   buildDatabaseRequest,
@@ -239,6 +266,9 @@ const props = defineProps({
 const emit = defineEmits(['update:open', 'completed'])
 const configStore = useConfigStore()
 const databaseStore = useDatabaseStore()
+const userStore = useUserStore()
+const departments = ref([])
+const departmentsLoading = ref(false)
 const {
   chunkPresetSelectOptions: chunkPresetOptions,
   chunkPresetLoading,
@@ -269,6 +299,18 @@ const configuredParamCount = computed(
       return value !== undefined && value !== null && String(value).trim() !== ''
     }).length
 )
+const departmentOptions = computed(() =>
+  departments.value.map((department) => ({
+    label: department.name,
+    value: Number(department.id)
+  }))
+)
+const selectedDepartmentName = computed(() => {
+  const department = departments.value.find(
+    (item) => Number(item.id) === Number(form.department_id)
+  )
+  return department?.name || userStore.departmentName || ''
+})
 const footerSummary = computed(() => {
   if (currentStep.value === 0) {
     const typeText = selectedTypeLabel.value
@@ -282,10 +324,27 @@ const footerSummary = computed(() => {
 
 const reset = () => {
   Object.assign(form, createEmptyDatabaseForm(configStore.config?.embed_model))
+  form.department_id = userStore.departmentId ? Number(userStore.departmentId) : null
   const firstType = Object.keys(props.supportedKbTypes)[0] || ''
   Object.assign(form, selectDatabaseType(form, firstType, props.supportedKbTypes[firstType]))
   shareConfig.value = createDefaultShareConfig()
   currentStep.value = 0
+}
+
+const loadDepartments = async () => {
+  departmentsLoading.value = true
+  try {
+    const result = await departmentApi.getDepartments()
+    departments.value = result.departments || result || []
+    if (!form.department_id && userStore.isSuperAdmin && departments.value.length) {
+      form.department_id = Number(departments.value[0].id)
+    }
+  } catch (error) {
+    departments.value = []
+    message.error(error.message || '加载部门列表失败')
+  } finally {
+    departmentsLoading.value = false
+  }
 }
 
 const selectType = (type) =>
@@ -302,6 +361,10 @@ const goNext = () => {
     }
     if (!selectedTypeInfo.value) {
       message.warning('请选择知识库类型')
+      return
+    }
+    if (!Number.isFinite(Number(form.department_id))) {
+      message.warning('请选择知识库所属部门')
       return
     }
   }
@@ -351,6 +414,7 @@ watch(
   (open) => {
     if (!open) return
     reset()
+    loadDepartments()
     loadChunkPresetOptions()
   }
 )

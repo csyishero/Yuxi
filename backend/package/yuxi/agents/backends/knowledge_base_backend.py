@@ -18,6 +18,9 @@ async def resolve_visible_knowledge_bases_for_context(context) -> list[dict[str,
             "name": summary.name,
             "description": summary.description,
             "kb_type": summary.kb_type,
+            "effective_capabilities": sorted(
+                capability.value for capability in summary.effective_capabilities
+            ),
         }
         for summary in summaries
     ]

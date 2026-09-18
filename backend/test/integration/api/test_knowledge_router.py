@@ -301,14 +301,18 @@ async def test_knowledge_virtual_folder_migration_runs_without_sse_and_is_resuma
         assert final_detection.json()["has_virtual_folders"] is False
         async with engine.connect() as connection:
             folder_creators = (
-                await connection.execute(
-                    text(
-                        "SELECT created_by FROM knowledge_files WHERE kb_id = :kb "
-                        "AND is_folder IS TRUE AND filename IN (:root, 'shared', 'other')"
-                    ),
-                    {"kb": kb_id, "root": f"history-{prefix}"},
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT created_by FROM knowledge_files WHERE kb_id = :kb "
+                            "AND is_folder IS TRUE AND filename IN (:root, 'shared', 'other')"
+                        ),
+                        {"kb": kb_id, "root": f"history-{prefix}"},
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         assert len(folder_creators) == 3
         assert all(folder_creators)
     finally:
@@ -362,26 +366,28 @@ async def test_virtual_folder_migration_keeps_conflicts_and_commits_other_paths(
 
         async with engine.connect() as connection:
             rows = (
-                await connection.execute(
-                    text(
-                        "SELECT filename, parent_id FROM knowledge_files WHERE file_id IN "
-                        "(:blocked_file, :movable_file) ORDER BY file_id"
-                    ),
-                    {
-                        "blocked_file": f"file_{suffix}_blocked",
-                        "movable_file": f"file_{suffix}_movable",
-                    },
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT filename, parent_id FROM knowledge_files WHERE file_id IN "
+                            "(:blocked_file, :movable_file) ORDER BY file_id"
+                        ),
+                        {
+                            "blocked_file": f"file_{suffix}_blocked",
+                            "movable_file": f"file_{suffix}_movable",
+                        },
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         assert {row["filename"] for row in rows} == {f"{blocked}/a.txt", "b.txt"}
         assert sum(row["parent_id"] is not None for row in rows) == 1
     finally:
         await engine.dispose()
 
 
-async def test_folder_mutations_reject_invalid_name_and_directory_cycle(
-    test_client, admin_headers, knowledge_database
-):
+async def test_folder_mutations_reject_invalid_name_and_directory_cycle(test_client, admin_headers, knowledge_database):
     kb_id = knowledge_database["kb_id"]
 
     parent_response = await test_client.post(
@@ -587,26 +593,34 @@ async def test_knowledge_routes_enforce_permissions(test_client, standard_user, 
     )
     _assert_forbidden_response(forbidden_create)
 
-    forbidden_list = await test_client.get("/api/knowledge/databases", headers=standard_user["headers"])
-    _assert_forbidden_response(forbidden_list)
+    list_response = await test_client.get("/api/knowledge/databases", headers=standard_user["headers"])
+    assert list_response.status_code == 200, list_response.text
+    database = next(
+        entry for entry in list_response.json()["databases"] if entry["kb_id"] == knowledge_database["kb_id"]
+    )
+    assert database["effective_permission"] == "read"
+    assert database["can_edit"] is False
+    assert database["can_manage"] is False
 
-    forbidden_chunk_presets = await test_client.get("/api/knowledge/chunk-presets", headers=standard_user["headers"])
-    _assert_forbidden_response(forbidden_chunk_presets)
+    chunk_presets = await test_client.get("/api/knowledge/chunk-presets", headers=standard_user["headers"])
+    assert chunk_presets.status_code == 200, chunk_presets.text
 
-    forbidden_get = await test_client.get(f"/api/knowledge/databases/{kb_id}", headers=standard_user["headers"])
-    _assert_forbidden_response(forbidden_get)
+    get_response = await test_client.get(f"/api/knowledge/databases/{kb_id}", headers=standard_user["headers"])
+    assert get_response.status_code == 200, get_response.text
+    assert get_response.json()["effective_permission"] == "read"
+    assert get_response.json()["can_edit"] is False
+    assert get_response.json()["can_manage"] is False
 
-    forbidden_exists = await test_client.get(
+    exists_response = await test_client.get(
         f"/api/knowledge/databases/{kb_id}/documents/exists",
         params={"filename": "demo.txt"},
         headers=standard_user["headers"],
     )
-    _assert_forbidden_response(forbidden_exists)
+    assert exists_response.status_code == 200, exists_response.text
+    assert exists_response.json()["exists"] is False
 
 
-async def test_kb_image_proxy_requires_auth_and_streams_private_image(
-    test_client, admin_headers, knowledge_database
-):
+async def test_kb_image_proxy_requires_auth_and_streams_private_image(test_client, admin_headers, knowledge_database):
     """知识库图片代理：未登录不可访问，鉴权后可读取私有 bucket 图片"""
     from yuxi.storage.minio.client import MinIOClient, get_minio_client
 
@@ -962,11 +976,25 @@ async def test_create_database_defaults_to_global_share_config(test_client, admi
     database = await _create_test_database(test_client, admin_headers)
     kb_id = database["kb_id"]
     try:
-        assert database["share_config"] == {
-            "version": 2,
-            "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []},
-            "manage_scope": None,
+        assert database["share_config"]["version"] == 2
+        assert database["share_config"]["read_scope"] == {
+            "access_level": "global",
+            "department_ids": [],
+            "user_uids": [],
         }
+        assert database["share_config"]["manage_scope"] is None
+        assert database["share_config"]["capability_policy"] == {
+            "read": ["download", "search", "view"],
+            "edit": ["index", "metadata", "parse", "upload"],
+            "manage": [
+                "configure",
+                "delete-document",
+                "delete-knowledge-base",
+                "grant",
+                "share",
+            ],
+        }
+        assert database["share_config"]["owner_department_id"] == database["owner_department_id"]
     finally:
         await test_client.delete(f"/api/knowledge/databases/{kb_id}", headers=admin_headers)
 
@@ -994,12 +1022,13 @@ async def test_share_config_filters_accessible_databases(test_client, admin_head
         database = await _create_test_database(
             test_client,
             admin_headers,
-            {"version": 2, "read_scope": scope, "manage_scope": scope},
+            {"version": 2, "read_scope": scope, "manage_scope": None},
         )
 
         saved_config = database["share_config"]
-        assert saved_config["manage_scope"]["access_level"] == access_level
-        assert scope_target in saved_config["manage_scope"][scope_key]
+        assert saved_config["read_scope"]["access_level"] == access_level
+        assert scope_target in saved_config["read_scope"][scope_key]
+        assert saved_config["manage_scope"] is None
 
         assert database["kb_id"] in await _accessible_kb_ids(test_client, user_a["headers"])
         assert database["kb_id"] not in await _accessible_kb_ids(test_client, user_b["headers"])
@@ -1012,6 +1041,181 @@ async def test_share_config_filters_accessible_databases(test_client, admin_head
             await _delete_user_by_id(test_client, admin_headers, user_b["user"]["id"])
         await _delete_department_with_admin(test_client, admin_headers, department_a)
         await _delete_department_with_admin(test_client, admin_headers, department_b)
+
+
+async def test_regular_contributor_can_add_but_cannot_delete_or_manage(test_client, admin_headers):
+    """命中编辑范围的普通用户可贡献文档，但不能删除内容或修改知识库配置。"""
+    department = await _create_test_department(test_client, admin_headers, "pytest_edit_scope")
+    user = database = None
+
+    try:
+        user = await _create_test_user(test_client, admin_headers, department["id"])
+        user_uid = user["user"]["uid"]
+        database = await _create_test_database(
+            test_client,
+            admin_headers,
+            {
+                "version": 2,
+                "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []},
+                "edit_scope": {"access_level": "user", "department_ids": [], "user_uids": [user_uid]},
+                "manage_scope": None,
+            },
+        )
+        kb_id = database["kb_id"]
+
+        list_response = await test_client.get("/api/knowledge/databases", headers=user["headers"])
+        assert list_response.status_code == 200, list_response.text
+        visible_database = next(item for item in list_response.json()["databases"] if item["kb_id"] == kb_id)
+        assert visible_database["effective_permission"] == "edit"
+        assert visible_database["can_edit"] is True
+        assert visible_database["can_manage"] is False
+
+        create_folder = await test_client.post(
+            f"/api/knowledge/databases/{kb_id}/folders",
+            json={"folder_name": f"editable_{uuid.uuid4().hex[:8]}", "parent_id": None},
+            headers=user["headers"],
+        )
+        assert create_folder.status_code == 200, create_folder.text
+
+        forbidden_delete = await test_client.delete(
+            f"/api/knowledge/databases/{kb_id}/documents/{create_folder.json()['file_id']}",
+            headers=user["headers"],
+        )
+        _assert_forbidden_response(forbidden_delete)
+
+        forbidden_update = await test_client.put(
+            f"/api/knowledge/databases/{kb_id}",
+            json={"name": database["name"], "description": "must not be updated by an editor"},
+            headers=user["headers"],
+        )
+        _assert_forbidden_response(forbidden_update)
+    finally:
+        if database:
+            await test_client.delete(f"/api/knowledge/databases/{database['kb_id']}", headers=admin_headers)
+        if user:
+            await _delete_user_by_id(test_client, admin_headers, user["user"]["id"])
+        await _delete_department_with_admin(test_client, admin_headers, department)
+
+
+async def test_regular_user_can_manage_only_explicitly_assigned_knowledge_base(test_client, admin_headers):
+    """普通用户被逐人委派后可管理该知识库，但仍不能创建其他知识库。"""
+    department = await _create_test_department(test_client, admin_headers, "pytest_explicit_kb_manager")
+    user = database = None
+
+    try:
+        user = await _create_test_user(test_client, admin_headers, department["id"])
+        user_uid = user["user"]["uid"]
+        database = await _create_test_database(
+            test_client,
+            admin_headers,
+            {
+                "version": 2,
+                "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []},
+                "edit_scope": {"access_level": "user", "department_ids": [], "user_uids": [user_uid]},
+                "manage_scope": {"access_level": "user", "department_ids": [], "user_uids": [user_uid]},
+            },
+        )
+        kb_id = database["kb_id"]
+
+        list_response = await test_client.get("/api/knowledge/databases", headers=user["headers"])
+        assert list_response.status_code == 200, list_response.text
+        visible_database = next(item for item in list_response.json()["databases"] if item["kb_id"] == kb_id)
+        assert visible_database["effective_permission"] == "manage"
+        assert visible_database["can_manage"] is True
+        assert "configure" in visible_database["effective_capabilities"]
+        assert "grant" in visible_database["effective_capabilities"]
+
+        options_response = await test_client.get(
+            f"/api/knowledge/databases/{kb_id}/permission-options",
+            headers=user["headers"],
+        )
+        assert options_response.status_code == 200, options_response.text
+        options = options_response.json()
+        assert {item["id"] for item in options["departments"]} == {department["id"]}
+        assert user_uid in {item["uid"] for item in options["users"]}
+
+        update_response = await test_client.put(
+            f"/api/knowledge/databases/{kb_id}",
+            json={"name": database["name"], "description": "Updated by delegated manager"},
+            headers=user["headers"],
+        )
+        assert update_response.status_code == 200, update_response.text
+
+        forbidden_create = await test_client.post(
+            "/api/knowledge/databases",
+            json={
+                "database_name": f"pytest_forbidden_{uuid.uuid4().hex[:8]}",
+                "description": "Delegated manager must not create databases",
+                "embedding_model_spec": "siliconflow-cn:Pro/BAAI/bge-m3",
+            },
+            headers=user["headers"],
+        )
+        _assert_forbidden_response(forbidden_create)
+    finally:
+        if database:
+            await test_client.delete(f"/api/knowledge/databases/{database['kb_id']}", headers=admin_headers)
+        if user:
+            await _delete_user_by_id(test_client, admin_headers, user["user"]["id"])
+        await _delete_department_with_admin(test_client, admin_headers, department)
+
+
+async def test_custom_capability_policy_is_enforced_by_real_http_routes(test_client, admin_headers):
+    """保存自定义能力后，允许元数据操作并拒绝未授权搜索和上传。"""
+    department = await _create_test_department(test_client, admin_headers, "pytest_capability_policy")
+    user = database = None
+
+    try:
+        user = await _create_test_user(test_client, admin_headers, department["id"])
+        user_uid = user["user"]["uid"]
+        database = await _create_test_database(
+            test_client,
+            admin_headers,
+            {
+                "version": 2,
+                "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []},
+                "edit_scope": {"access_level": "user", "department_ids": [], "user_uids": [user_uid]},
+                "manage_scope": None,
+                "capability_policy": {
+                    "read": ["view"],
+                    "edit": ["metadata"],
+                    "manage": [],
+                },
+            },
+        )
+        kb_id = database["kb_id"]
+
+        list_response = await test_client.get("/api/knowledge/databases", headers=user["headers"])
+        assert list_response.status_code == 200, list_response.text
+        visible_database = next(item for item in list_response.json()["databases"] if item["kb_id"] == kb_id)
+        assert visible_database["effective_capabilities"] == ["metadata", "view"]
+
+        create_folder = await test_client.post(
+            f"/api/knowledge/databases/{kb_id}/folders",
+            json={"folder_name": f"metadata_{uuid.uuid4().hex[:8]}", "parent_id": None},
+            headers=user["headers"],
+        )
+        assert create_folder.status_code == 200, create_folder.text
+
+        search_response = await test_client.get(
+            f"/api/knowledge/databases/{kb_id}/documents/search",
+            params={"query": "metadata"},
+            headers=user["headers"],
+        )
+        _assert_forbidden_response(search_response)
+
+        upload_response = await test_client.post(
+            "/api/knowledge/files/upload",
+            params={"kb_id": kb_id},
+            files={"file": ("denied.txt", b"denied", "text/plain")},
+            headers=user["headers"],
+        )
+        _assert_forbidden_response(upload_response)
+    finally:
+        if database:
+            await test_client.delete(f"/api/knowledge/databases/{database['kb_id']}", headers=admin_headers)
+        if user:
+            await _delete_user_by_id(test_client, admin_headers, user["user"]["id"])
+        await _delete_department_with_admin(test_client, admin_headers, department)
 
 
 async def test_get_knowledge_base_types(test_client, admin_headers):

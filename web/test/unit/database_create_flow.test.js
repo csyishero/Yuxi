@@ -30,6 +30,8 @@ test('配置校验拒绝空名称和必填动态字段', () => {
   const empty = selectDatabaseType(createEmptyDatabaseForm(), 'dify', difyType)
   assert.equal(validateDatabaseConfig(empty, difyType), '请输入知识库名称')
   empty.name = '资料'
+  assert.equal(validateDatabaseConfig(empty, difyType), '请选择知识库所属部门')
+  empty.department_id = 7
   assert.equal(validateDatabaseConfig(empty, difyType), '请填写地址')
 })
 
@@ -37,6 +39,7 @@ test('只为需要嵌入模型的类型构建模型和分块参数', () => {
   const form = {
     ...createEmptyDatabaseForm('embed/model'),
     name: '资料',
+    department_id: 7,
     kb_type: 'milvus',
     chunk_preset_id: 'general'
   }
@@ -47,6 +50,7 @@ test('只为需要嵌入模型的类型构建模型和分块参数', () => {
     'fallback/model'
   )
   assert.equal(request.embedding_model_spec, 'embed/model')
+  assert.equal(request.department_id, 7)
   assert.equal(request.additional_params.chunk_preset_id, 'general')
 
   const connectorRequest = buildDatabaseRequest(
@@ -59,9 +63,9 @@ test('只为需要嵌入模型的类型构建模型和分块参数', () => {
   assert.equal('chunk_preset_id' in connectorRequest.additional_params, false)
 })
 
-test('知识库类型标签映射将 milvus 解析为 Yuxi', () => {
-  assert.equal(getKbTypeLabel('milvus'), 'Yuxi')
-  assert.equal(getKbTypeLabel('Milvus'), 'Yuxi')
+test('知识库类型标签映射将 milvus 解析为联合智擎', () => {
+  assert.equal(getKbTypeLabel('milvus'), '联合智擎')
+  assert.equal(getKbTypeLabel('Milvus'), '联合智擎')
   assert.equal(getKbTypeLabel('dify'), 'Dify')
   assert.equal(getKbTypeLabel('notion'), 'Notion')
   assert.equal(getKbTypeLabel('unknown'), 'unknown')

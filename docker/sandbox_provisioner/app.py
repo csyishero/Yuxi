@@ -13,7 +13,7 @@ import weakref
 from collections.abc import AsyncIterator
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 from urllib import request
@@ -84,6 +84,11 @@ SANDBOX_READY_MAX_DELAY_SECONDS = 1.0
 SANDBOX_READY_BACKOFF_MULTIPLIER = 2.0
 SANDBOX_READY_JITTER_RATIO = 0.2
 SANDBOX_READY_REQUEST_TIMEOUT_SECONDS = 3.0
+
+
+def elapsed_ms(started_ns: int) -> float:
+    """把单调时钟区间转换为毫秒。"""
+    return round((time.perf_counter_ns() - started_ns) / 1_000_000, 2)
 
 
 def _is_persistent_sandbox_mount_path(path: str) -> bool:
@@ -335,11 +340,13 @@ class SandboxResponse(BaseModel):
     status: str | None = None
     generation: str | None = None
     workdir_path: str | None = None
+    timing: dict[str, float] = Field(default_factory=dict)
 
 
 class DeleteSandboxResponse(BaseModel):
     ok: bool
     sandbox_id: str
+    timing: dict[str, float] = Field(default_factory=dict)
 
 
 class TouchSandboxResponse(BaseModel):
@@ -365,6 +372,7 @@ class SandboxRecord:
     status: str | None = None
     generation: str | None = None
     workdir_path: str | None = None
+    timing: dict[str, float] = field(default_factory=dict)
 
 
 class SandboxGenerationMismatchError(RuntimeError):
@@ -502,7 +510,7 @@ class MemoryProvisionerBackend:
 
     def delete(
         self, sandbox_id: str, *, expected_generation: str | None = None
-    ) -> None:
+    ) -> dict[str, float]:
         with self._lock:
             record = self._records.get(sandbox_id)
             if (
@@ -514,6 +522,7 @@ class MemoryProvisionerBackend:
                     "sandbox generation does not match delete request"
                 )
             self._records.pop(sandbox_id, None)
+        return {}
 
 
 def wait_for_sandbox_ready(sandbox_url: str, timeout_seconds: float = 30) -> bool:
@@ -940,6 +949,7 @@ class LocalContainerProvisionerBackend:
         inherit_env: bool = True,
     ) -> SandboxRecord:
         with self._sandbox_lock(sandbox_id):
+            timing: dict[str, float] = {}
             safe_thread_id = self._validate_thread_id(thread_id)
             safe_uid = self._validate_uid(uid)
             safe_workdir_path = (
@@ -1000,10 +1010,13 @@ class LocalContainerProvisionerBackend:
                     self.delete(sandbox_id)
                     existing = None
             if existing is not None:
+                started_ns = time.perf_counter_ns()
                 self._ensure_network(sandbox_id)
+                timing["sandbox_create_network_ms"] = elapsed_ms(started_ns)
                 if existing.status == "running":
                     try:
                         record = self._to_record(existing, sandbox_id)
+                        started_ns = time.perf_counter_ns()
                         if not wait_for_sandbox_ready(
                             record.sandbox_url,
                             timeout_seconds=self._health_timeout_seconds,
@@ -1011,6 +1024,8 @@ class LocalContainerProvisionerBackend:
                             raise RuntimeError(
                                 f"sandbox {sandbox_id} is not ready at {record.sandbox_url}"
                             )
+                        timing["sandbox_wait_ready_ms"] = elapsed_ms(started_ns)
+                        record.timing = timing
                         return record
                     except Exception as exc:
                         logger.warning(
@@ -1047,7 +1062,9 @@ class LocalContainerProvisionerBackend:
                     PurePosixPath(safe_workdir_path).parts,
                     label="workdir_path",
                 )
+            started_ns = time.perf_counter_ns()
             network_name = self._ensure_network(sandbox_id)
+            timing["sandbox_create_network_ms"] = elapsed_ms(started_ns)
 
             container_name = self._container_name(sandbox_id)
             run_kwargs = {
@@ -1091,17 +1108,22 @@ class LocalContainerProvisionerBackend:
             run_kwargs["environment"] = sandbox_env
 
             try:
+                started_ns = time.perf_counter_ns()
                 container = self._client.containers.run(
                     self._sandbox_image, **run_kwargs
                 )
+                timing["sandbox_create_container_ms"] = elapsed_ms(started_ns)
                 container.reload()
                 record = self._to_record(container, sandbox_id)
+                started_ns = time.perf_counter_ns()
                 if not wait_for_sandbox_ready(
                     record.sandbox_url, timeout_seconds=self._health_timeout_seconds
                 ):
                     raise RuntimeError(
                         f"sandbox {sandbox_id} is not ready at {record.sandbox_url}"
                     )
+                timing["sandbox_wait_ready_ms"] = elapsed_ms(started_ns)
+                record.timing = timing
                 return record
             except Exception:
                 try:
@@ -1219,7 +1241,8 @@ class LocalContainerProvisionerBackend:
 
     def delete(
         self, sandbox_id: str, *, expected_generation: str | None = None
-    ) -> None:
+    ) -> dict[str, float]:
+        timing: dict[str, float] = {}
         with self._sandbox_lock(sandbox_id), self._delete_slots:
             container = self._get_container(sandbox_id)
             if container is not None:
@@ -1229,10 +1252,15 @@ class LocalContainerProvisionerBackend:
                     raise SandboxGenerationMismatchError(
                         "sandbox generation does not match delete request"
                     )
+                started_ns = time.perf_counter_ns()
                 if container.status == "running":
                     container.stop(timeout=self._stop_timeout_seconds)
                 container.remove(v=True, force=True)
+                timing["sandbox_delete_container_ms"] = elapsed_ms(started_ns)
+            started_ns = time.perf_counter_ns()
             self._delete_network(sandbox_id)
+            timing["sandbox_delete_network_ms"] = elapsed_ms(started_ns)
+        return timing
 
 
 class KubernetesProvisionerBackend:
@@ -1543,6 +1571,7 @@ class KubernetesProvisionerBackend:
         from kubernetes.client.rest import ApiException
 
         with self._lock:
+            timing: dict[str, float] = {}
             safe_thread_id = LocalContainerProvisionerBackend._validate_thread_id(
                 thread_id
             )
@@ -1563,6 +1592,7 @@ class KubernetesProvisionerBackend:
                     return discovered
                 raise ValueError("sandbox identity does not match existing generation")
 
+            started_ns = time.perf_counter_ns()
             try:
                 self._core_api.create_namespaced_pod(
                     namespace=self._namespace,
@@ -1588,7 +1618,9 @@ class KubernetesProvisionerBackend:
                     raise ValueError(
                         "sandbox identity does not match existing generation"
                     ) from exc
+            timing["sandbox_create_container_ms"] = elapsed_ms(started_ns)
 
+            started_ns = time.perf_counter_ns()
             try:
                 self._core_api.create_namespaced_service(
                     namespace=self._namespace,
@@ -1597,6 +1629,7 @@ class KubernetesProvisionerBackend:
             except ApiException as exc:
                 if exc.status != 409:
                     raise
+            timing["sandbox_create_network_ms"] = elapsed_ms(started_ns)
 
             health_timeout = int(os.getenv("SANDBOX_HEALTH_TIMEOUT_SECONDS", "60"))
             record = self.discover(sandbox_id)
@@ -1612,6 +1645,7 @@ class KubernetesProvisionerBackend:
                 ephemeral_storage=ephemeral_storage,
             ):
                 raise ValueError("sandbox identity does not match created generation")
+            started_ns = time.perf_counter_ns()
             if not wait_for_sandbox_ready(
                 record.sandbox_url, timeout_seconds=health_timeout
             ):
@@ -1622,6 +1656,8 @@ class KubernetesProvisionerBackend:
                 raise RuntimeError(
                     f"sandbox {sandbox_id} is not ready at {record.sandbox_url}"
                 )
+            timing["sandbox_wait_ready_ms"] = elapsed_ms(started_ns)
+            record.timing = timing
             return record
 
     def discover(self, sandbox_id: str) -> SandboxRecord | None:
@@ -1720,9 +1756,10 @@ class KubernetesProvisionerBackend:
 
     def delete(
         self, sandbox_id: str, *, expected_generation: str | None = None
-    ) -> None:
+    ) -> dict[str, float]:
         from kubernetes.client.rest import ApiException
 
+        timing: dict[str, float] = {}
         with self._lock:
             pod_name = self._pod_name(sandbox_id)
             service_name = self._service_name(sandbox_id)
@@ -1732,6 +1769,7 @@ class KubernetesProvisionerBackend:
                 delete_options = self._client.V1DeleteOptions(
                     preconditions=self._client.V1Preconditions(uid=expected_generation)
                 )
+            started_ns = time.perf_counter_ns()
             try:
                 self._core_api.delete_namespaced_pod(
                     name=pod_name,
@@ -1745,6 +1783,9 @@ class KubernetesProvisionerBackend:
                     ) from exc
                 if exc.status != 404:
                     raise
+            timing["sandbox_delete_container_ms"] = elapsed_ms(started_ns)
+
+            started_ns = time.perf_counter_ns()
             try:
                 self._core_api.delete_namespaced_service(
                     name=service_name, namespace=self._namespace
@@ -1752,6 +1793,8 @@ class KubernetesProvisionerBackend:
             except ApiException as exc:
                 if exc.status != 404:
                     raise
+            timing["sandbox_delete_network_ms"] = elapsed_ms(started_ns)
+        return timing
 
 
 class SandboxIdleReaper:
@@ -1911,6 +1954,7 @@ def sandbox_response(record: SandboxRecord) -> SandboxResponse:
         status=record.status,
         generation=record.generation,
         workdir_path=record.workdir_path,
+        timing=record.timing,
     )
 
 
@@ -2095,9 +2139,7 @@ def _delete_sandbox_records_for_quiescence(
         if pending:
             raise SandboxQuiesceTimeoutError
         return {
-            sandbox_id
-            for future in done
-            if (sandbox_id := future.result()) is not None
+            sandbox_id for future in done if (sandbox_id := future.result()) is not None
         }
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
@@ -2131,7 +2173,10 @@ def _delete_sandbox_record_for_quiescence(record: SandboxRecord) -> str | None:
 def delete_sandbox(sandbox_id: str, expected_generation: str | None = None):
     sandbox_operation_pins.begin_delete(sandbox_id)
     try:
-        backend_impl.delete(sandbox_id, expected_generation=expected_generation)
+        timing = backend_impl.delete(
+            sandbox_id,
+            expected_generation=expected_generation,
+        )
     except SandboxGenerationMismatchError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -2140,7 +2185,11 @@ def delete_sandbox(sandbox_id: str, expected_generation: str | None = None):
         sandbox_operation_pins.end_delete(sandbox_id)
     idle_reaper.forget(sandbox_id, expected_generation=expected_generation)
 
-    return DeleteSandboxResponse(ok=True, sandbox_id=sandbox_id)
+    return DeleteSandboxResponse(
+        ok=True,
+        sandbox_id=sandbox_id,
+        timing=timing or {},
+    )
 
 
 @app.api_route(

@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import time
 import uuid
 from contextlib import aclosing, suppress
 from datetime import datetime
@@ -36,6 +37,7 @@ from yuxi.utils.logging_config import logger
 from yuxi.workspace.errors import FileTransferLimitError
 
 from .provider import get_sandbox_provider, sandbox_id_for_thread, sandbox_provisioner_token
+from .provisioner_client import merge_sandbox_timing
 
 _USER_DATA_ROOT = "/" + VIRTUAL_PATH_PREFIX.strip("/")
 _SKILLS_ROOT = "/" + VIRTUAL_SKILLS_PATH.strip("/")
@@ -195,6 +197,7 @@ class ProvisionerSandboxBackend(BaseSandbox):
         self._provider = get_sandbox_provider()
         self._client: Any | None = None
         self._client_url: str | None = None
+        self._connection: Any | None = None
         self._command_timeout_seconds = int(os.getenv("SANDBOX_EXEC_TIMEOUT_SECONDS") or 180)
         self._max_output_bytes = int(os.getenv("SANDBOX_MAX_OUTPUT_BYTES") or 262_144)
 
@@ -289,12 +292,35 @@ class ProvisionerSandboxBackend(BaseSandbox):
 
     def _get_client(self) -> Any:
         connection = self._get_connection()
+        self._connection = connection
 
         if self._client is None or self._client_url != connection.sandbox_url:
             self._client = self._build_client(connection.sandbox_url)
             self._client_url = connection.sandbox_url
 
         return self._client
+
+    def _record_execute_request_timing(self, started_ns: int) -> None:
+        """累计一次命令请求耗时，并投影到当前 Langfuse 工具节点。"""
+        execute_timing = {
+            "sandbox_execute_request_ms": round(
+                (time.perf_counter_ns() - started_ns) / 1_000_000,
+                2,
+            )
+        }
+        connection = self._connection
+        if connection is not None:
+            connection.timing = merge_sandbox_timing(
+                getattr(connection, "timing", None),
+                execute_timing,
+            )
+            trace_timing = connection.timing
+        else:
+            trace_timing = execute_timing
+
+        from yuxi.services.langfuse_service import update_current_sandbox_timing
+
+        update_current_sandbox_timing(trace_timing)
 
     def ensure_available(self) -> str:
         """显式确保本实例 sandbox 已创建并返回稳定 ID。"""
@@ -543,13 +569,16 @@ class ProvisionerSandboxBackend(BaseSandbox):
         Output is normalized to text and truncated to the configured maximum
         payload size before being returned.
         """
+        execute_started_ns: int | None = None
         try:
             kwargs: dict[str, Any] = {"command": command}
             if timeout is not None:
                 kwargs["timeout"] = timeout
                 kwargs["hard_timeout"] = timeout
                 kwargs["request_options"] = {"timeout_in_seconds": timeout}
-            result = self._get_client().shell.exec_command(**kwargs)
+            client = self._get_client()
+            execute_started_ns = time.perf_counter_ns()
+            result = client.shell.exec_command(**kwargs)
 
             output = result.data.output or ""
             exit_code = result.data.exit_code
@@ -568,6 +597,9 @@ class ProvisionerSandboxBackend(BaseSandbox):
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Sandbox execute failed for thread {self._thread_id}: {exc}")
             return ExecuteResponse(output=f"Error: {exc}", exit_code=1, truncated=False)
+        finally:
+            if execute_started_ns is not None:
+                self._record_execute_request_timing(execute_started_ns)
 
     def ls(self, path: str) -> LsResult:
         """List direct children of an allowed sandbox path with lightweight metadata."""

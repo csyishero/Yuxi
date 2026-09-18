@@ -19,6 +19,8 @@ from yuxi.knowledge.schemas import (
 )
 from yuxi.utils import logger
 
+_LEGACY_VISIBLE_KB_CAPABILITIES = frozenset({"view", "search", "download"})
+
 # ========== 通用知识库工具 ==========
 
 
@@ -105,7 +107,14 @@ async def get_mindmap(kb_name: str, runtime: ToolRuntime) -> str:
         return "请提供知识库名称"
 
     visible_kbs = await _resolve_visible_knowledge_bases_for_query(runtime)
-    target_info = next((kb for kb in visible_kbs if kb.get("name") == kb_name), None)
+    target_info = next(
+        (
+            kb
+            for kb in visible_kbs
+            if kb.get("name") == kb_name and "view" in _effective_capabilities(kb)
+        ),
+        None,
+    )
     if not target_info:
         return f"知识库 '{kb_name}' 不存在或当前会话未启用"
     target_kb_id = target_info["kb_id"]
@@ -159,7 +168,11 @@ async def query_kb(kb_id: str, query_text: str, file_name: str | None = None, ru
         return "请提供查询内容"
 
     visible_kbs = await _resolve_visible_knowledge_bases_for_query(runtime)
-    target_kb_id, target_error = _find_query_target(kb_id=kb_id, visible_kbs=visible_kbs)
+    target_kb_id, target_error = _find_query_target(
+        kb_id=kb_id,
+        visible_kbs=visible_kbs,
+        required_capability="search",
+    )
     if target_error:
         return target_error
 
@@ -196,7 +209,11 @@ async def open_kb_document(
         return "请提供 file_id"
 
     visible_kbs = await _resolve_visible_knowledge_bases_for_query(runtime)
-    target_kb_id, target_error = _find_query_target(kb_id=normalized_kb_id, visible_kbs=visible_kbs)
+    target_kb_id, target_error = _find_query_target(
+        kb_id=normalized_kb_id,
+        visible_kbs=visible_kbs,
+        required_capability="view",
+    )
     if target_error:
         return target_error
 
@@ -241,7 +258,11 @@ async def find_kb_document(
         return "请提供 patterns"
 
     visible_kbs = await _resolve_visible_knowledge_bases_for_query(runtime)
-    target_kb_id, target_error = _find_query_target(kb_id=normalized_kb_id, visible_kbs=visible_kbs)
+    target_kb_id, target_error = _find_query_target(
+        kb_id=normalized_kb_id,
+        visible_kbs=visible_kbs,
+        required_capability="search",
+    )
     if target_error:
         return target_error
 
@@ -300,11 +321,15 @@ async def search_file(
         return "无法获取当前会话可访问的知识库"
 
     if kb_name:
-        target_kbs = [kb for kb in visible_kbs if kb.get("name") == kb_name]
+        target_kbs = [
+            kb
+            for kb in visible_kbs
+            if kb.get("name") == kb_name and "search" in _effective_capabilities(kb)
+        ]
         if not target_kbs:
             return f"知识库 '{kb_name}' 不存在或当前会话未启用"
     else:
-        target_kbs = visible_kbs
+        target_kbs = [kb for kb in visible_kbs if "search" in _effective_capabilities(kb)]
 
     knowledge_base = _get_knowledge_base()
     searchable_kbs = [kb for kb in target_kbs if knowledge_base.database_type_supports_documents(kb.get("kb_type"))]
@@ -351,7 +376,11 @@ async def download_kb_file(
         return "请提供 file_id"
 
     visible_kbs = await _resolve_visible_knowledge_bases_for_query(runtime)
-    target_kb_id, target_error = _find_query_target(kb_id=normalized_kb_id, visible_kbs=visible_kbs)
+    target_kb_id, target_error = _find_query_target(
+        kb_id=normalized_kb_id,
+        visible_kbs=visible_kbs,
+        required_capability="download",
+    )
     if target_error:
         return target_error
 
@@ -437,16 +466,30 @@ def _find_query_target(
     *,
     kb_id: str,
     visible_kbs: list[dict[str, Any]],
+    required_capability: str | None = None,
 ) -> tuple[str | None, str | None]:
     """校验 kb_id 在当前会话可见知识库内，返回 (kb_id, error)。"""
     if not visible_kbs:
         return None, "无法获取当前会话可访问的知识库"
 
     normalized_kb_id = str(kb_id or "").strip()
-    visible_kb_ids = {str(kb.get("kb_id") or "").strip() for kb in visible_kbs}
-    if normalized_kb_id not in visible_kb_ids:
+    target = next(
+        (kb for kb in visible_kbs if str(kb.get("kb_id") or "").strip() == normalized_kb_id),
+        None,
+    )
+    if target is None:
         return None, f"知识库资源 '{normalized_kb_id}' 不存在或当前会话未启用"
+    if required_capability and required_capability not in _effective_capabilities(target):
+        return None, f"当前用户缺少知识库 '{normalized_kb_id}' 的 {required_capability} 权限"
     return normalized_kb_id, None
+
+
+def _effective_capabilities(knowledge_base: dict[str, Any]) -> set[str] | frozenset[str]:
+    """读取会话能力；兼容升级前未携带能力字段的旧会话缓存。"""
+    capabilities = knowledge_base.get("effective_capabilities")
+    if capabilities is None:
+        return _LEGACY_VISIBLE_KB_CAPABILITIES
+    return {str(capability) for capability in capabilities}
 
 
 def _runtime_sandbox_scope(runtime: ToolRuntime | None) -> tuple[str, str, str, str] | None:

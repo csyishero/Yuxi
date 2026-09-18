@@ -653,6 +653,11 @@ def test_provider_release_uses_cached_generation() -> None:
     class FakeClient:
         def delete(self, sandbox_id, *, expected_generation=None):
             deleted.append((sandbox_id, expected_generation))
+            return {
+                "sandbox_delete_container_ms": 3.5,
+                "sandbox_delete_network_ms": 1.5,
+                "unknown_ms": 200,
+            }
 
     provider = _make_provider(FakeClient())
     cache_key = "user-1::root-thread"
@@ -661,11 +666,25 @@ def test_provider_release_uses_cached_generation() -> None:
         uid="user-1",
         workdir_path="projects/11111111-1111-4111-8111-111111111111",
         generation="generation-1",
+        timing={
+            "sandbox_create_container_ms": 10.0,
+            "sandbox_execute_request_ms": 8.0,
+        },
     )
 
-    provider.release("root-thread", uid="user-1", workdir_path="projects/11111111-1111-4111-8111-111111111111")
+    timing = provider.release(
+        "root-thread",
+        uid="user-1",
+        workdir_path="projects/11111111-1111-4111-8111-111111111111",
+    )
 
     assert deleted == [("sandbox-1", "generation-1")]
+    assert timing["sandbox_create_container_ms"] == 10.0
+    assert timing["sandbox_execute_request_ms"] == 8.0
+    assert timing["sandbox_delete_container_ms"] == 3.5
+    assert timing["sandbox_delete_network_ms"] == 1.5
+    assert timing["sandbox_release_ms"] >= 0
+    assert "unknown_ms" not in timing
 
 
 def test_provider_uses_distinct_sandbox_scope_for_different_uid(monkeypatch) -> None:
@@ -1444,6 +1463,32 @@ def test_provisioner_execute_applies_timeout_to_command_and_http_request(monkeyp
             "request_options": {"timeout_in_seconds": 300},
         }
     ]
+
+
+def test_provisioner_execute_accumulates_request_timing_without_recording_command(monkeypatch) -> None:
+    monkeypatch.setattr("yuxi.agents.backends.sandbox.backend.get_sandbox_provider", lambda: object())
+    backend = ProvisionerSandboxBackend(thread_id="thread-1", uid="user-1")
+    connection = SimpleNamespace(timing={"sandbox_discover_ms": 2.0})
+    backend._connection = connection
+    fake_client = SimpleNamespace(
+        shell=SimpleNamespace(
+            exec_command=lambda **_kwargs: SimpleNamespace(data=SimpleNamespace(exit_code=0, output="done"))
+        )
+    )
+    backend._get_client = MethodType(lambda self: fake_client, backend)
+    observed: list[dict[str, float]] = []
+    monkeypatch.setattr(
+        "yuxi.services.langfuse_service.update_current_sandbox_timing",
+        lambda timing: observed.append(dict(timing)),
+    )
+
+    result = backend.execute("echo hi")
+
+    assert result.exit_code == 0
+    assert connection.timing["sandbox_discover_ms"] == 2.0
+    assert connection.timing["sandbox_execute_request_ms"] >= 0
+    assert "sandbox_command_ms" not in connection.timing
+    assert observed == [connection.timing]
 
 
 def test_provisioner_download_files_streams_binary_bytes(monkeypatch) -> None:

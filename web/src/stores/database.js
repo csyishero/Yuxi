@@ -3,7 +3,6 @@ import { ref, reactive } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { databaseApi, documentApi, queryApi } from '@/apis/knowledge_api'
 import { useTaskerStore } from '@/stores/tasker'
-import { useUserStore } from '@/stores/user'
 import { useRouter } from 'vue-router'
 import { parseToShanghai } from '@/utils/time'
 import { canSelectFile, isProcessingFile } from '@/utils/knowledge_file_policy'
@@ -17,7 +16,6 @@ const AUTO_REFRESH_STALE_POLLS_LIMIT = 6
 export const useDatabaseStore = defineStore('database', () => {
   const router = useRouter()
   const taskerStore = useTaskerStore()
-  const userStore = useUserStore()
 
   // State
   const databases = ref([])
@@ -92,13 +90,11 @@ export const useDatabaseStore = defineStore('database', () => {
   }
 
   // Actions
-  // 管理员获取所有知识库，普通用户获取有权限访问的知识库
+  // 后端统一按当前用户的有效权限过滤知识库，并返回完整的权限元数据。
   async function loadDatabases() {
     state.listLoading = true
     try {
-      const data = userStore.isAdmin
-        ? await databaseApi.getDatabases()
-        : await databaseApi.getAccessibleDatabases()
+      const data = await databaseApi.getDatabases()
       const list = data?.databases || []
       databases.value = list.sort((a, b) => {
         const timeA = parseToShanghai(a.created_at)
@@ -486,11 +482,28 @@ export const useDatabaseStore = defineStore('database', () => {
       if (parentId) {
         requestParams.parent_id = parentId
       }
-      const data = await documentApi.addDocuments(kbId.value, items, requestParams)
-      if (data.status === 'success' || data.status === 'queued') {
+      const capabilities = database.value?.effective_capabilities
+      const canParse = !Array.isArray(capabilities) || capabilities.includes('parse')
+      const data = canParse
+        ? await documentApi.addDocuments(kbId.value, items, requestParams)
+        : await documentApi.addUploadedDocuments(kbId.value, items, requestParams)
+      if (
+        data.status === 'success' ||
+        data.status === 'queued' ||
+        data.status === 'partial_failed'
+      ) {
         const itemType = contentType === 'file' ? '文件' : 'URL'
-        enableAutoRefresh('auto')
-        message.success(data.message || `${itemType}已提交处理，请在任务中心查看进度`)
+        if (data.status === 'queued') {
+          enableAutoRefresh('auto')
+        }
+        const successMessage = canParse
+          ? `${itemType}已提交处理，请在任务中心查看进度`
+          : `${itemType}已保存到知识库`
+        if (data.status === 'partial_failed') {
+          message.warning(data.message || `${itemType}部分添加失败`)
+        } else {
+          message.success(data.message || successMessage)
+        }
         if (data.task_id) {
           registerTask({
             task_id: data.task_id,

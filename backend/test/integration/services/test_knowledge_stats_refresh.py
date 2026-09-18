@@ -186,7 +186,7 @@ async def test_repair_returns_fresh_persisted_stats(stats_store, tmp_path, monke
     app = FastAPI()
     app.include_router(knowledge_router.knowledge, prefix="/api")
     # 本用例验证 HTTP 统计契约；权限规则由知识库权限 integration 拥有。
-    app.dependency_overrides[knowledge_router.require_knowledge_base_manage] = lambda: object()
+    app.dependency_overrides[knowledge_router.require_knowledge_base_configure] = lambda: object()
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         server = uvicorn.Server(uvicorn.Config(app, lifespan="off", log_level="error"))

@@ -25,7 +25,14 @@ from yuxi.knowledge.read_models import (
 )
 from yuxi.knowledge.schemas import FindOutputSchema, OpenOutputSchema
 from yuxi.knowledge.utils.security import redact_sensitive_params
-from yuxi.permissions import ResourcePermission, normalize_permission_config, resolve_knowledge_base_permission
+from yuxi.permissions import (
+    ResourcePermission,
+    knowledge_base_owner_department_id,
+    normalize_knowledge_base_capability_policy,
+    normalize_permission_config,
+    resolve_knowledge_base_capabilities,
+    resolve_knowledge_base_permission,
+)
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
 from yuxi.utils.datetime_utils import utc_isoformat
@@ -192,31 +199,78 @@ class KnowledgeBaseManager:
         self,
         share_config: dict | None,
         *,
-        user_uid: str | None = None,
-        department_id: int | str | None = None,
+        owner_department_id: int | str | None = None,
+        strict: bool = False,
     ) -> dict:
         if share_config is None:
-            return {
+            normalized = {
                 "version": 2,
                 "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []},
                 "manage_scope": None,
             }
-
-        if share_config and share_config.get("version") == 2:
+        elif share_config.get("version") == 2:
             normalized = normalize_permission_config(
                 share_config,
-                strict=user_uid is not None or department_id is not None,
+                strict=strict,
             )
-            if normalized["read_scope"] is None and (user_uid is not None or department_id is not None):
+            if normalized["read_scope"] is None and strict:
                 raise ValueError("知识库必须设置读取范围")
-            read_scope = normalized["read_scope"]
-            if read_scope and read_scope["access_level"] == "department" and department_id is not None:
-                read_scope["department_ids"] = sorted({*read_scope["department_ids"], int(department_id)})
-            elif read_scope and read_scope["access_level"] == "user" and user_uid:
-                read_scope["user_uids"] = sorted({*read_scope["user_uids"], str(user_uid)})
-            return normalized
+            manage_scope = normalized.get("manage_scope")
+            if strict and manage_scope and manage_scope["access_level"] != "user":
+                raise ValueError("知识库额外管理员只能通过指定成员授权")
+        else:
+            raise ValueError("知识库共享配置必须使用 version 2")
 
-        raise ValueError("知识库共享配置必须使用 version 2")
+        if owner_department_id is not None:
+            normalized["owner_department_id"] = int(owner_department_id)
+        normalized["capability_policy"] = normalize_knowledge_base_capability_policy(
+            normalized.get("capability_policy"),
+            strict=strict,
+        )
+        return normalized
+
+    async def _resolve_owner_department_id(self, row: Any) -> int | None:
+        """解析固定归属，并为缺少字段的历史知识库提供创建人部门兼容。"""
+
+        owner_department_id = knowledge_base_owner_department_id(row)
+        if owner_department_id is not None:
+            return owner_department_id
+        created_by = str(getattr(row, "created_by", "") or "").strip()
+        if not created_by:
+            return None
+
+        from yuxi.repositories.user_repository import UserRepository
+
+        creators = await UserRepository().list_by_uids([created_by])
+        creator = creators[0] if creators else None
+        creator_department_id = getattr(creator, "department_id", None)
+        return int(creator_department_id) if creator_department_id is not None else None
+
+    async def _resolve_owner_departments(self, rows: list[Any]) -> dict[str, int | None]:
+        """批量解析列表归属，避免历史知识库逐条查询创建人。"""
+
+        resolved: dict[str, int | None] = {}
+        legacy_creator_uids: list[str] = []
+        for row in rows:
+            owner_department_id = knowledge_base_owner_department_id(row)
+            resolved[row.kb_id] = owner_department_id
+            if owner_department_id is None and getattr(row, "created_by", None):
+                legacy_creator_uids.append(str(row.created_by))
+        if not legacy_creator_uids:
+            return resolved
+
+        from yuxi.repositories.user_repository import UserRepository
+
+        creators = await UserRepository().list_by_uids(legacy_creator_uids)
+        creator_departments = {
+            creator.uid: int(getattr(creator, "department_id"))
+            for creator in creators
+            if getattr(creator, "department_id", None) is not None
+        }
+        for row in rows:
+            if resolved[row.kb_id] is None:
+                resolved[row.kb_id] = creator_departments.get(str(getattr(row, "created_by", "") or ""))
+        return resolved
 
     @staticmethod
     def _normalize_database_stats(stats: dict | None) -> dict[str, int]:
@@ -270,6 +324,7 @@ class KnowledgeBaseManager:
         row: Any,
         *,
         stats: dict[str, int] | None = None,
+        owner_department_id: int | None = None,
     ) -> dict[str, Any]:
         """将知识库记录转换为 Summary 与 Detail 共用的规范字段。"""
         kb_type = row.kb_type or "milvus"
@@ -293,9 +348,13 @@ class KnowledgeBaseManager:
             "llm_model_spec": row.llm_model_spec,
             "query_params": dict(row.query_params or {}),
             "additional_params": additional_params,
-            "share_config": self._normalize_share_config(row.share_config),
+            "share_config": self._normalize_share_config(
+                row.share_config,
+                owner_department_id=owner_department_id,
+            ),
             "created_by": row.created_by,
             "created_at": row.created_at,
+            "owner_department_id": owner_department_id,
             **normalized_stats,
         }
 
@@ -305,6 +364,7 @@ class KnowledgeBaseManager:
 
         kb_repo = KnowledgeBaseRepository()
         rows = await kb_repo.get_all()
+        owner_departments = await self._resolve_owner_departments(rows)
         all_databases: list[KnowledgeBaseSummary] = []
         for row in rows:
             kb_type = row.kb_type or "milvus"
@@ -314,7 +374,12 @@ class KnowledgeBaseManager:
 
             # 单条记录元数据不合法时只跳过该条，避免一条坏记录隐藏整个列表。
             try:
-                database = KnowledgeBaseSummary(**self._database_read_fields(row))
+                database = KnowledgeBaseSummary(
+                    **self._database_read_fields(
+                        row,
+                        owner_department_id=owner_departments.get(row.kb_id),
+                    )
+                )
             except Exception as e:
                 logger.warning(f"Skip database with invalid metadata: kb_id={row.kb_id}, kb_type={kb_type}: {e}")
                 continue
@@ -339,10 +404,7 @@ class KnowledgeBaseManager:
         if user.get("role") == "superadmin":
             return True
 
-        from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
-
-        kb_repo = KnowledgeBaseRepository()
-        kb = await kb_repo.get_by_kb_id(kb_id)
+        kb = await self.get_database_info(kb_id)
         if kb is None:
             return False
 
@@ -411,14 +473,16 @@ class KnowledgeBaseManager:
             permission = resolve_knowledge_base_permission(user_info, database)
             if permission == ResourcePermission.NONE:
                 continue
+            capabilities = resolve_knowledge_base_capabilities(user_info, database)
             additional_params = database.additional_params
-            if permission == ResourcePermission.READ:
+            if permission != ResourcePermission.MANAGE:
                 additional_params = redact_sensitive_params(additional_params)
             filtered_databases.append(
                 replace(
                     database,
                     additional_params=additional_params,
                     effective_permission=permission,
+                    effective_capabilities=capabilities,
                 )
             )
 
@@ -463,7 +527,7 @@ class KnowledgeBaseManager:
         llm_model_spec: str | None = None,
         share_config: dict | None = None,
         created_by: str | None = None,
-        created_by_department_id: int | str | None = None,
+        owner_department_id: int | str | None = None,
         **kwargs,
     ) -> KnowledgeBaseDetail:
         """
@@ -477,7 +541,7 @@ class KnowledgeBaseManager:
             llm_model_spec: LLM 模型 spec
             share_config: 共享配置
             created_by: 创建者 uid
-            created_by_department_id: 创建者部门 ID
+            owner_department_id: 知识库所属部门 ID
             **kwargs: 其他配置参数
 
         Returns:
@@ -490,10 +554,12 @@ class KnowledgeBaseManager:
         if await self.database_name_exists(database_name):
             raise KBNameConflictError(f"知识库名称 '{database_name}' 已存在，请使用其他名称")
 
+        if owner_department_id is None:
+            raise ValueError("知识库必须指定所属部门")
         share_config = self._normalize_share_config(
             share_config,
-            user_uid=created_by,
-            department_id=created_by_department_id,
+            owner_department_id=owner_department_id,
+            strict=True,
         )
 
         kb_instance = await self._get_or_create_kb_instance(kb_type)
@@ -755,8 +821,13 @@ class KnowledgeBaseManager:
             files_page_size = 500
 
         file_stats = await self._get_database_file_stats(kb_id)
+        owner_department_id = await self._resolve_owner_department_id(kb)
         return KnowledgeBaseDetail(
-            **self._database_read_fields(kb, stats=file_stats),
+            **self._database_read_fields(
+                kb,
+                stats=file_stats,
+                owner_department_id=owner_department_id,
+            ),
             mindmap=kb.mindmap,
             sample_questions=tuple(kb.sample_questions or []),
             files=files,
@@ -1146,10 +1217,13 @@ class KnowledgeBaseManager:
             update_data["additional_params"] = merged_additional_params
 
         if share_config is not None:
+            owner_department_id = await self._resolve_owner_department_id(kb)
+            if owner_department_id is None:
+                raise ValueError("知识库缺少所属部门，无法更新共享配置")
             update_data["share_config"] = self._normalize_share_config(
                 share_config,
-                user_uid=operator_uid,
-                department_id=operator_department_id,
+                owner_department_id=owner_department_id,
+                strict=True,
             )
 
         # 保存到数据库

@@ -243,7 +243,12 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
             "lease_expires_at",
             "timeout_seconds",
         } <= task_columns
-        assert {"prepared_at", "first_output_at", "first_model_request_at"} <= run_columns
+        assert {
+            "prepared_at",
+            "first_output_at",
+            "first_model_request_at",
+            "sandbox_timing",
+        } <= run_columns
         assert "last_event_id" not in run_columns
         assert tuple(row) == ("running", None, 0, 0)
         assert scheduled_tables == {"scheduled_agent_jobs", "scheduled_agent_runs"}
@@ -268,7 +273,7 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
             "ix_scheduled_agent_runs_job_created",
             "ix_scheduled_agent_runs_dispatching",
         }.issubset(scheduled_indexes)
-        assert BUSINESS_SCHEMA_VERSION == 7
+        assert BUSINESS_SCHEMA_VERSION == 8
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 
@@ -280,6 +285,7 @@ async def test_release_upgrade_adds_audit_columns_idempotently() -> None:
         await manager.create_business_tables()
         async with scoped_engine.begin() as connection:
             await connection.execute(text("ALTER TABLE agent_runs DROP COLUMN langfuse_trace_id"))
+            await connection.execute(text("ALTER TABLE agent_runs DROP COLUMN sandbox_timing"))
             audit_columns = (
                 "operation_id",
                 "started_at",
@@ -329,6 +335,7 @@ async def test_release_upgrade_adds_audit_columns_idempotently() -> None:
                 ).all()
             }
         assert ("agent_runs", "langfuse_trace_id") in columns
+        assert ("agent_runs", "sandbox_timing") in columns
         assert {("messages", column) for column in audit_columns} <= columns
         assert "uq_messages_run_operation_id" not in audit_indexes
         assert "(run_id, role, operation_id)" in audit_indexes["uq_messages_run_role_operation_id"]
