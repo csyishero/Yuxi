@@ -273,6 +273,51 @@ test('用户管理组件不再通过 Store 全量加载用户', async () => {
   assert.equal(source.includes('paginatedUsers'), false)
 })
 
+test('普通用户修改本人密码只调用当前账户密码接口', async () => {
+  await withServer(async (server) => {
+    storageValues.clear()
+    storageValues.set('user_token', 'user-token')
+    const requests = []
+    globalThis.fetch = async (url, options = {}) => {
+      requests.push({ url: String(url), options })
+      return new Response(JSON.stringify({ success: true, message: '密码修改成功' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+
+    setActivePinia(createPinia())
+    const { useUserStore } = await server.ssrLoadModule('/src/stores/user.js')
+    const userStore = useUserStore()
+    userStore.token = 'user-token'
+    userStore.userRole = 'user'
+
+    const result = await userStore.changePassword({
+      current_password: 'current-password',
+      new_password: 'new-password'
+    })
+
+    assert.deepEqual(result, { success: true, message: '密码修改成功' })
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].url, '/api/auth/password')
+    assert.equal(requests[0].options.method, 'PUT')
+    assert.deepEqual(JSON.parse(requests[0].options.body), {
+      current_password: 'current-password',
+      new_password: 'new-password'
+    })
+  })
+})
+
+test('账户设置的修改密码按钮显式触发处理函数', async () => {
+  const source = await import('node:fs/promises').then((fs) =>
+    fs.readFile(new URL('../../src/components/AccountSettingsComponent.vue', import.meta.url), 'utf8')
+  )
+
+  assert.equal(source.includes('html-type="button"'), true)
+  assert.equal(source.includes('@click="handlePasswordChange"'), true)
+  assert.equal(source.includes('@finish="handlePasswordChange"'), false)
+})
+
 test('知识库 API 单一构造并编码文件上传端点', async () => {
   await withServer(async (server) => {
     const { fileApi } = await server.ssrLoadModule('/src/apis/knowledge_api.js')

@@ -18,7 +18,10 @@ from yuxi.services.auth_service import (
     CLI_AUTH_POLL_INTERVAL_SECONDS,
     CLI_AUTH_SESSION_TTL_SECONDS,
     CLIAuthError,
+    CurrentPasswordMismatchError,
+    PasswordReuseError,
     approve_cli_auth_session,
+    change_current_user_password,
     create_cli_auth_session,
     exchange_cli_auth_token,
     get_cli_auth_session_for_user,
@@ -93,6 +96,18 @@ class UserUpdate(BaseModel):
 class UserProfileUpdate(BaseModel):
     username: str | None = None
     phone_number: str | None = None
+
+
+class PasswordChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class PasswordChangeResponse(BaseModel):
+    success: bool
+    message: str
 
 
 class UserResponse(BaseModel):
@@ -452,6 +467,32 @@ async def read_users_me(current_user: User = Depends(get_required_user), db: Asy
         user_dict["department_name"] = await DepartmentRepository(db).get_name_by_id(current_user.department_id)
 
     return user_dict
+
+
+# 路由：修改当前用户密码
+@auth.put("/password", response_model=PasswordChangeResponse)
+async def change_password(
+    password_data: PasswordChange,
+    request: Request,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """校验当前密码后修改已登录用户本人的密码。"""
+
+    try:
+        await change_current_user_password(
+            db,
+            user=current_user,
+            current_password=password_data.current_password,
+            new_password=password_data.new_password,
+            request=request,
+        )
+    except CurrentPasswordMismatchError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前密码错误") from exc
+    except PasswordReuseError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="新密码不能与当前密码相同") from exc
+
+    return PasswordChangeResponse(success=True, message="密码修改成功")
 
 
 # 路由：更新个人资料

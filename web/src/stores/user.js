@@ -214,6 +214,15 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
+  async function changePassword(passwordData) {
+    try {
+      return await authApi.changePassword(passwordData)
+    } catch (error) {
+      console.error('修改本人密码错误:', { status: error?.status ?? null })
+      throw error
+    }
+  }
+
   return {
     // 状态
     token,
@@ -244,7 +253,8 @@ export const useUserStore = defineStore('user', () => {
     validateUsernameAndGenerateUid,
     uploadAvatar,
     getCurrentUser,
-    updateProfile
+    updateProfile,
+    changePassword
   }
 })
 

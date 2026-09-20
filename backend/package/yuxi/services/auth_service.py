@@ -6,6 +6,7 @@ import string
 from dataclasses import dataclass
 from datetime import timedelta
 
+from fastapi import Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.repositories.api_key_repository import (
@@ -14,6 +15,8 @@ from yuxi.repositories.api_key_repository import (
     APIKeyRepository,
     APIKeySubjectUnavailable,
 )
+from yuxi.repositories.user_repository import UserRepository
+from yuxi.services.operation_log_service import log_operation
 from yuxi.storage.postgres.models_business import APIKey, CLIAuthSession, Department, User
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import utc_now_naive
@@ -34,6 +37,39 @@ class CLIAuthError(Exception):
     code: str
     message: str
     status_code: int = 400
+
+
+class CurrentPasswordMismatchError(Exception):
+    """当前密码与已登录用户的密码摘要不匹配。"""
+
+
+class PasswordReuseError(Exception):
+    """新密码与当前密码相同。"""
+
+
+async def change_current_user_password(
+    db: AsyncSession,
+    *,
+    user: User,
+    current_password: str,
+    new_password: str,
+    request: Request | None = None,
+) -> None:
+    """校验当前密码并原子更新本人密码与审计记录。"""
+
+    if not AuthUtils.verify_password(user.password_hash, current_password):
+        raise CurrentPasswordMismatchError
+    if AuthUtils.verify_password(user.password_hash, new_password):
+        raise PasswordReuseError
+
+    try:
+        user.password_hash = AuthUtils.hash_password(new_password)
+        await UserRepository(db).save(user)
+        await log_operation(db, user.id, "修改本人密码", "用户修改本人登录密码", request)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
 
 def _hash_secret(value: str) -> str:

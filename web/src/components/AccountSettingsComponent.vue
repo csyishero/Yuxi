@@ -111,6 +111,57 @@
       </div>
       <UserConfigSettingsCard ref="userConfigRef" />
     </div>
+
+    <div class="account-card security-card">
+      <div class="security-heading">
+        <div>
+          <div class="security-title">修改密码</div>
+          <p class="security-description">修改当前账户的登录密码，保存后需要重新登录。</p>
+        </div>
+      </div>
+
+      <a-form class="password-form" layout="vertical" :model="passwordDraft">
+        <div class="password-fields">
+          <a-form-item label="当前密码" name="currentPassword" required>
+            <a-input-password
+              v-model:value="passwordDraft.currentPassword"
+              name="current-password"
+              autocomplete="current-password"
+              placeholder="请输入当前密码"
+              :disabled="changingPassword"
+            />
+          </a-form-item>
+
+          <a-form-item label="新密码" name="newPassword" required>
+            <a-input-password
+              v-model:value="passwordDraft.newPassword"
+              name="new-password"
+              autocomplete="new-password"
+              :placeholder="`请输入新密码（至少 ${MIN_PASSWORD_LENGTH} 位）`"
+              :minlength="MIN_PASSWORD_LENGTH"
+              :disabled="changingPassword"
+            />
+          </a-form-item>
+
+          <a-form-item label="确认新密码" name="confirmPassword" required>
+            <a-input-password
+              v-model:value="passwordDraft.confirmPassword"
+              name="confirm-password"
+              autocomplete="new-password"
+              placeholder="请再次输入新密码"
+              :disabled="changingPassword"
+              @press-enter="handlePasswordChange"
+            />
+          </a-form-item>
+        </div>
+
+        <div class="password-actions">
+          <a-button type="primary" html-type="button" :loading="changingPassword" @click="handlePasswordChange">
+            修改密码
+          </a-button>
+        </div>
+      </a-form>
+    </div>
   </div>
 </template>
 
@@ -122,6 +173,7 @@ import { message } from 'ant-design-vue'
 import { Building2, RefreshCw, ShieldCheck, Upload } from '@lucide/vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { useUserStore } from '@/stores/user'
+import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
 
 const userStore = useUserStore()
@@ -132,9 +184,15 @@ const editingField = ref('')
 const usernameInput = ref(null)
 const phoneInput = ref(null)
 const userConfigRef = ref(null)
+const changingPassword = ref(false)
 const profileDraft = reactive({
   username: '',
   phone_number: ''
+})
+const passwordDraft = reactive({
+  currentPassword: '',
+  newPassword: '',
+  confirmPassword: ''
 })
 
 const avatarDefaultSrc = computed(() => (userStore.uid ? generatePixelAvatar(userStore.uid) : ''))
@@ -227,6 +285,50 @@ const saveField = async (field) => {
   }
 }
 
+const handlePasswordChange = async () => {
+  if (!passwordDraft.currentPassword) {
+    message.error('请输入当前密码')
+    return
+  }
+  if (!isPasswordLongEnough(passwordDraft.newPassword)) {
+    message.error(`新密码至少需要 ${MIN_PASSWORD_LENGTH} 个字符`)
+    return
+  }
+  if (passwordDraft.newPassword === passwordDraft.currentPassword) {
+    message.error('新密码不能与当前密码相同')
+    return
+  }
+  if (passwordDraft.newPassword !== passwordDraft.confirmPassword) {
+    message.error('两次输入的新密码不一致')
+    return
+  }
+
+  changingPassword.value = true
+  let passwordChanged = false
+  try {
+    await userStore.changePassword({
+      current_password: passwordDraft.currentPassword,
+      new_password: passwordDraft.newPassword
+    })
+    passwordDraft.currentPassword = ''
+    passwordDraft.newPassword = ''
+    passwordDraft.confirmPassword = ''
+    passwordChanged = true
+    message.success('密码修改成功，请重新登录')
+    setTimeout(() => {
+      userStore.logout()
+      window.location.href = '/login'
+    }, 800)
+  } catch (error) {
+    console.error('修改密码失败:', { status: error?.status ?? null })
+    message.error(error?.status === 400 ? '当前密码错误' : error.message || '密码修改失败，请稍后重试')
+  } finally {
+    if (!passwordChanged) {
+      changingPassword.value = false
+    }
+  }
+}
+
 const getRoleColor = (role) => {
   switch (role) {
     case 'superadmin':
@@ -306,6 +408,44 @@ watch(() => [userStore.username, userStore.phoneNumber], syncProfileDraft, { imm
     flex-direction: column;
     gap: 18px;
     background: var(--gray-25);
+  }
+
+  .security-card {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .security-title {
+    color: var(--gray-900);
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .security-description {
+    margin: 4px 0 0;
+    color: var(--gray-600);
+    font-size: 13px;
+  }
+
+  .password-form {
+    max-width: 760px;
+  }
+
+  .password-fields {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+
+    @media (max-width: 900px) {
+      grid-template-columns: 1fr;
+      gap: 0;
+    }
+  }
+
+  .password-actions {
+    display: flex;
+    justify-content: flex-end;
   }
 
   .profile-summary {

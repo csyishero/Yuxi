@@ -232,6 +232,43 @@ async def test_profile_requires_authentication(test_client):
     assert response.json()["detail"] == "请登录后再访问"
 
 
+async def test_standard_user_can_change_own_password_with_current_password(test_client, standard_user):
+    new_password = f"New!{uuid.uuid4().hex[:10]}"
+
+    wrong_current_response = await test_client.put(
+        "/api/auth/password",
+        json={"current_password": "wrong-password", "new_password": new_password},
+        headers=standard_user["headers"],
+    )
+    assert wrong_current_response.status_code == 400, wrong_current_response.text
+
+    old_login_response = await test_client.post(
+        "/api/auth/token",
+        data={"username": standard_user["user"]["uid"], "password": standard_user["password"]},
+    )
+    assert old_login_response.status_code == 200, old_login_response.text
+
+    change_response = await test_client.put(
+        "/api/auth/password",
+        json={"current_password": standard_user["password"], "new_password": new_password},
+        headers=standard_user["headers"],
+    )
+    assert change_response.status_code == 200, change_response.text
+    assert change_response.json() == {"success": True, "message": "密码修改成功"}
+
+    old_password_response = await test_client.post(
+        "/api/auth/token",
+        data={"username": standard_user["user"]["uid"], "password": standard_user["password"]},
+    )
+    assert old_password_response.status_code == 401, old_password_response.text
+
+    new_password_response = await test_client.post(
+        "/api/auth/token",
+        data={"username": standard_user["user"]["uid"], "password": new_password},
+    )
+    assert new_password_response.status_code == 200, new_password_response.text
+
+
 async def test_admin_can_create_and_delete_user(test_client, admin_headers):
     suffix = uuid.uuid4().hex[:8]
     payload = {

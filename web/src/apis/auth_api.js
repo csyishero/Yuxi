@@ -112,6 +112,10 @@ async function updateProfile(profileData) {
   return apiPut('/api/auth/profile', profileData)
 }
 
+async function changePassword(passwordData) {
+  return apiPut('/api/auth/password', passwordData)
+}
+
 async function checkUid(uid) {
   return apiSuperAdminGet(`/api/auth/check-uid/${encodeURIComponent(uid)}`)
 }
@@ -143,6 +147,7 @@ export const authApi = {
   uploadAvatar,
   getCurrentUser,
   updateProfile,
+  changePassword,
   checkUid,
   impersonateUser,
   getOIDCConfig,

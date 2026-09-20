@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from server.routers.auth_dept_router import DepartmentCreate
-from server.routers.auth_router import InitializeAdmin, UserCreate, UserUpdate
+from server.routers.auth_router import InitializeAdmin, PasswordChange, UserCreate, UserUpdate
 
 
 @pytest.mark.parametrize(
@@ -11,6 +11,7 @@ from server.routers.auth_router import InitializeAdmin, UserCreate, UserUpdate
         (InitializeAdmin, {"uid": "admin", "password": "short"}),
         (UserCreate, {"username": "user", "password": "short"}),
         (UserUpdate, {"password": "short"}),
+        (PasswordChange, {"current_password": "current-password", "new_password": "short"}),
         (
             DepartmentCreate,
             {
@@ -34,6 +35,7 @@ def test_admin_password_models_reject_passwords_shorter_than_eight_characters(mo
         (InitializeAdmin, {"uid": "admin", "password": "12345678"}),
         (UserCreate, {"username": "user", "password": "12345678"}),
         (UserUpdate, {"password": "12345678"}),
+        (PasswordChange, {"current_password": "current-password", "new_password": "12345678"}),
         (
             DepartmentCreate,
             {
@@ -50,3 +52,10 @@ def test_admin_password_models_accept_eight_character_passwords(model, payload):
 
 def test_user_update_allows_password_to_be_omitted():
     assert UserUpdate().password is None
+
+
+def test_password_change_requires_current_password():
+    with pytest.raises(ValidationError) as exc_info:
+        PasswordChange.model_validate({"current_password": "", "new_password": "12345678"})
+
+    assert exc_info.value.errors()[0]["type"] == "string_too_short"
