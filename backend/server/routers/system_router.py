@@ -90,7 +90,32 @@ def _serialize_system_config(values: dict) -> dict:
         }
         for field in system_options.fields
     }
-    return {**values, "_config_items": fields}
+    production = os.getenv("YUXI_ENV", "development").strip().lower() in {"prod", "production"}
+    default_ports = {
+        "neo4j": 8474 if production else 7474,
+        "api_docs": 6050 if production else 5050,
+        "minio": 10001 if production else 9001,
+        "milvus": 10091 if production else 9091,
+    }
+    service_links = {
+        "neo4j": {
+            "port": os.getenv("YUXI_NEO4J_HTTP_PORT", str(default_ports["neo4j"])),
+            "path": "/",
+        },
+        "api_docs": {
+            "port": os.getenv("YUXI_API_PORT", str(default_ports["api_docs"])),
+            "path": "/docs",
+        },
+        "minio": {
+            "port": os.getenv("YUXI_MINIO_CONSOLE_PORT", str(default_ports["minio"])),
+            "path": "/",
+        },
+        "milvus": {
+            "port": os.getenv("YUXI_MILVUS_HEALTH_PORT", str(default_ports["milvus"])),
+            "path": "/webui/",
+        },
+    }
+    return {**values, "_config_items": fields, "_service_links": service_links}
 
 
 @system.get("/config")

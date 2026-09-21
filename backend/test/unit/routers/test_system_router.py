@@ -57,8 +57,32 @@ def test_readiness_endpoint_returns_structured_503(monkeypatch):
     assert response.json()["version"] == "0.7.2.dev0"
 
 
-def test_serialize_system_config_includes_field_metadata():
+def test_serialize_system_config_includes_field_metadata(monkeypatch):
+    monkeypatch.setenv("YUXI_ENV", "development")
     result = system_router._serialize_system_config({"default_model": "test-provider:latest"})
 
     assert result["default_model"] == "test-provider:latest"
     assert result["_config_items"]["default_model"]["type"] == "model"
+    assert result["_service_links"] == {
+        "neo4j": {"port": "7474", "path": "/"},
+        "api_docs": {"port": "5050", "path": "/docs"},
+        "minio": {"port": "9001", "path": "/"},
+        "milvus": {"port": "9091", "path": "/webui/"},
+    }
+
+
+def test_serialize_system_config_uses_production_and_custom_service_ports(monkeypatch):
+    monkeypatch.setenv("YUXI_ENV", "prod")
+    monkeypatch.setenv("YUXI_NEO4J_HTTP_PORT", "18474")
+    monkeypatch.setenv("YUXI_API_PORT", "16050")
+    monkeypatch.setenv("YUXI_MINIO_CONSOLE_PORT", "19001")
+    monkeypatch.setenv("YUXI_MILVUS_HEALTH_PORT", "19091")
+
+    result = system_router._serialize_system_config({})
+
+    assert result["_service_links"] == {
+        "neo4j": {"port": "18474", "path": "/"},
+        "api_docs": {"port": "16050", "path": "/docs"},
+        "minio": {"port": "19001", "path": "/"},
+        "milvus": {"port": "19091", "path": "/webui/"},
+    }

@@ -74,6 +74,10 @@ services:
       <<: *api-worker-env
       YUXI_RUNTIME_DIR: /app/runtime/api
       YUXI_USER_DATA_DIR: /app/user-data
+      YUXI_API_PORT: ${YUXI_API_PORT:-5050}
+      YUXI_NEO4J_HTTP_PORT: ${YUXI_NEO4J_HTTP_PORT:-7474}
+      YUXI_MINIO_CONSOLE_PORT: ${YUXI_MINIO_CONSOLE_PORT:-9001}
+      YUXI_MILVUS_HEALTH_PORT: ${YUXI_MILVUS_HEALTH_PORT:-9091}
       POSTGRES_POOL_SIZE: ${API_POSTGRES_POOL_SIZE:-120}
       POSTGRES_MAX_OVERFLOW: ${API_POSTGRES_MAX_OVERFLOW:-40}
       POSTGRES_POOL_TIMEOUT_SECONDS: ${API_POSTGRES_POOL_TIMEOUT_SECONDS:-30}
@@ -295,8 +299,8 @@ services:
   graph:
     image: neo4j:5.26.29
     ports:
-      - "127.0.0.1:${YUXI_NEO4J_HTTP_PORT:-7474}:7474"
-      - "127.0.0.1:${YUXI_NEO4J_BOLT_PORT:-7687}:7687"
+      - "${YUXI_MANAGEMENT_BIND_HOST:-127.0.0.1}:${YUXI_NEO4J_HTTP_PORT:-7474}:7474"
+      - "${YUXI_MANAGEMENT_BIND_HOST:-127.0.0.1}:${YUXI_NEO4J_BOLT_PORT:-7687}:7687"
     volumes:
       - type: bind
         source: ${YUXI_STATE_DIR:-./docker/volumes}/neo4j/data
@@ -363,7 +367,7 @@ services:
       start_period: 30s
     ports:
       - "127.0.0.1:${YUXI_MINIO_API_PORT:-9000}:9000"
-      - "127.0.0.1:${YUXI_MINIO_CONSOLE_PORT:-9001}:9001"
+      - "${YUXI_MANAGEMENT_BIND_HOST:-127.0.0.1}:${YUXI_MINIO_CONSOLE_PORT:-9001}:9001"
     networks:
       - app-network
     restart: unless-stopped
@@ -394,7 +398,7 @@ services:
       retries: 5
     ports:
       - "127.0.0.1:${YUXI_MILVUS_PORT:-19530}:19530"
-      - "127.0.0.1:${YUXI_MILVUS_HEALTH_PORT:-9091}:9091"
+      - "${YUXI_MANAGEMENT_BIND_HOST:-127.0.0.1}:${YUXI_MILVUS_HEALTH_PORT:-9091}:9091"
     depends_on:
       - "etcd"
       - "minio"

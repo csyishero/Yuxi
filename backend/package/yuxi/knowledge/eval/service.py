@@ -19,6 +19,7 @@ from yuxi.models import select_model
 from yuxi.repositories.evaluation_repository import EvaluationRepository
 from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from yuxi.repositories.knowledge_chunk_repository import KnowledgeChunkRepository
+from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
 from yuxi.repositories.task_repository import TaskRepository
 from yuxi.services.task_service import TaskContext, tasker
 from yuxi.storage.postgres.manager import pg_manager
@@ -49,6 +50,7 @@ class EvaluationService:
         self.eval_repo = EvaluationRepository()
         self.kb_repo = KnowledgeBaseRepository()
         self.chunk_repo = KnowledgeChunkRepository()
+        self.file_repo = KnowledgeFileRepository()
         self.task_repo = TaskRepository()
 
     def _dataset_to_dict(self, row) -> dict[str, Any]:
@@ -67,14 +69,75 @@ class EvaluationService:
             "updated_at": format_utc_datetime(row.updated_at),
         }
 
-    def _dataset_item_to_dict(self, item) -> dict[str, Any]:
-        return {
+    def _dataset_item_to_dict(
+        self,
+        item,
+        gold_chunks: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        data = {
             "item_id": item.item_id,
             "item_index": item.item_index,
             "query": item.query_text,
             "gold_chunk_ids": item.gold_chunk_ids or [],
             "gold_answer": item.gold_answer,
         }
+        if gold_chunks is not None:
+            data["gold_chunks"] = gold_chunks
+        return data
+
+    @staticmethod
+    def _chunk_content_preview(content: str | None, max_length: int = 180) -> str:
+        normalized = re.sub(r"\s+", " ", content or "").strip()
+        if len(normalized) <= max_length:
+            return normalized
+        return f"{normalized[:max_length].rstrip()}…"
+
+    async def _dataset_items_to_dicts(self, items: list[Any], kb_id: str) -> list[dict[str, Any]]:
+        """批量补齐 Gold Chunk 对应的真实文件信息，避免分页内 N+1 查询。"""
+
+        chunk_ids = list(
+            dict.fromkeys(chunk_id for item in items for chunk_id in (item.gold_chunk_ids or []) if chunk_id)
+        )
+        chunks = await self.chunk_repo.list_by_chunk_ids(chunk_ids)
+        chunks_by_id = {chunk.chunk_id: chunk for chunk in chunks if str(chunk.kb_id) == str(kb_id)}
+        file_ids = list(dict.fromkeys(chunk.file_id for chunk in chunks_by_id.values() if chunk.file_id))
+        files = await self.file_repo.list_by_file_ids(file_ids)
+        files_by_id = {file.file_id: file for file in files if str(file.kb_id) == str(kb_id)}
+
+        serialized_items = []
+        for item in items:
+            gold_chunks = []
+            for chunk_id in item.gold_chunk_ids or []:
+                chunk = chunks_by_id.get(chunk_id)
+                file = files_by_id.get(chunk.file_id) if chunk is not None else None
+                if chunk is None:
+                    gold_chunks.append(
+                        {
+                            "chunk_id": chunk_id,
+                            "exists": False,
+                            "file_exists": False,
+                        }
+                    )
+                    continue
+                gold_chunks.append(
+                    {
+                        "chunk_id": chunk.chunk_id,
+                        "exists": True,
+                        "file_id": chunk.file_id,
+                        "file_exists": file is not None,
+                        "filename": (
+                            file.filename or file.original_filename or chunk.file_id
+                            if file is not None
+                            else chunk.file_id
+                        ),
+                        "chunk_index": chunk.chunk_index,
+                        "start_char_pos": chunk.start_char_pos,
+                        "end_char_pos": chunk.end_char_pos,
+                        "content_preview": self._chunk_content_preview(chunk.content),
+                    }
+                )
+            serialized_items.append(self._dataset_item_to_dict(item, gold_chunks))
+        return serialized_items
 
     def _run_item_to_dict(self, item) -> dict[str, Any]:
         return {
@@ -295,11 +358,12 @@ class EvaluationService:
 
             total_items = await self.eval_repo.count_dataset_items(dataset_id)
             items = await self.eval_repo.list_dataset_items(dataset_id, (page - 1) * page_size, page_size)
+            serialized_items = await self._dataset_items_to_dicts(items, kb_id)
             total_pages = (total_items + page_size - 1) // page_size
             data = self._dataset_to_dict(row)
             data.update(
                 {
-                    "items": [self._dataset_item_to_dict(item) for item in items],
+                    "items": serialized_items,
                     "pagination": {
                         "current_page": page,
                         "page_size": page_size,
@@ -314,6 +378,42 @@ class EvaluationService:
         except Exception as e:
             logger.error(f"获取评估数据集详情失败: {e}")
             raise
+
+    async def update_dataset_item(
+        self,
+        dataset_id: str,
+        item_id: str,
+        *,
+        query: str,
+        gold_answer: str | None,
+    ) -> dict[str, Any]:
+        row = await self.eval_repo.get_dataset(dataset_id)
+        if row is None:
+            raise ValueError("Dataset not found")
+        await self._sync_dataset_build_metadata(row)
+        if (row.build_metadata or {}).get("status", "completed") != "completed":
+            raise ValueError("评估基准尚未生成完成，暂不能编辑")
+
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise ValueError("问题不能为空")
+        normalized_answer = (gold_answer or "").strip() or None
+        updated = await self.eval_repo.update_dataset_item_with_summary(
+            dataset_id,
+            item_id,
+            {
+                "query_text": normalized_query,
+                "gold_answer": normalized_answer,
+            },
+        )
+        if updated is None:
+            raise ValueError("Dataset item not found")
+        item, dataset = updated
+        serialized_item = (await self._dataset_items_to_dicts([item], str(dataset.kb_id)))[0]
+        return {
+            "item": serialized_item,
+            "dataset": self._dataset_to_dict(dataset),
+        }
 
     async def export_dataset_jsonl(self, dataset_id: str) -> dict[str, str]:
         row = await self.eval_repo.get_dataset(dataset_id)

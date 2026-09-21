@@ -5,6 +5,7 @@ import {
   apiDelete,
   apiAdminGet,
   apiAdminPost,
+  apiAdminPut,
   apiAdminDelete,
   apiRequest,
   buildQuery
@@ -136,9 +137,7 @@ export const documentApi = {
 
   searchDocuments: async (kbId, params = {}) => {
     const query = buildQuery(params)
-    return apiGet(
-      `/api/knowledge/databases/${kbId}/documents/search${query ? `?${query}` : ''}`
-    )
+    return apiGet(`/api/knowledge/databases/${kbId}/documents/search${query ? `?${query}` : ''}`)
   },
 
   /**
@@ -634,6 +633,10 @@ export const evaluationApi = {
 
   downloadDataset: async (datasetId) => {
     return apiAdminGet(`/api/evaluation/datasets/${datasetId}/download`, {}, 'blob')
+  },
+
+  updateDatasetItem: async (datasetId, itemId, payload) => {
+    return apiAdminPut(`/api/evaluation/datasets/${datasetId}/items/${itemId}`, payload)
   },
 
   generateDataset: async (kbId, params) => {

@@ -45,6 +45,11 @@ class RunEvaluationRequest(BaseModel):
     retrieval_config: dict[str, Any] = Field(default_factory=dict, alias="model_config")
 
 
+class UpdateDatasetItemRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=20_000)
+    gold_answer: str | None = Field(default=None, max_length=200_000)
+
+
 async def _get_evaluation_dataset_or_raise(dataset_id: str) -> Any:
     """加载评估数据集，不存在时返回统一的 404。"""
 
@@ -176,6 +181,35 @@ async def download_evaluation_dataset(
     except Exception as e:
         logger.exception(f"导出评估数据集失败: {e}")
         raise HTTPException(status_code=500, detail=f"导出评估数据集失败: {str(e)}")
+
+
+@evaluation.put("/datasets/{dataset_id}/items/{item_id}")
+async def update_evaluation_dataset_item(
+    dataset_id: str,
+    item_id: str,
+    request: UpdateDatasetItemRequest,
+    current_user: User = Depends(require_evaluation_dataset_manage),
+):
+    """修改评估基准中的问题与 Gold Answer。"""
+
+    try:
+        service = EvaluationService()
+        result = await service.update_dataset_item(
+            dataset_id,
+            item_id,
+            query=request.query,
+            gold_answer=request.gold_answer,
+        )
+        return {"message": "success", "data": result}
+    except ValueError as e:
+        if "not found" in str(e).lower():
+            raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"修改评估基准题目失败: {e}")
+        raise HTTPException(status_code=500, detail=f"修改评估基准题目失败: {str(e)}")
 
 
 @evaluation.delete("/datasets/{dataset_id}")

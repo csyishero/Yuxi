@@ -121,6 +121,50 @@ class EvaluationRepository:
             )
             return list(result.scalars().all())
 
+    async def update_dataset_item_with_summary(
+        self,
+        dataset_id: str,
+        item_id: str,
+        data: dict[str, Any],
+    ) -> tuple[EvaluationDatasetItem, EvaluationDataset] | None:
+        """原子更新题目，并同步数据集的标注汇总状态。"""
+
+        writable_fields = {"query_text", "gold_answer"}
+        sanitized_data = {key: value for key, value in data.items() if key in writable_fields}
+        async with pg_manager.get_async_session_context() as session:
+            dataset = await session.scalar(
+                select(EvaluationDataset).where(EvaluationDataset.dataset_id == dataset_id).with_for_update()
+            )
+            if dataset is None:
+                return None
+
+            item = await session.scalar(
+                select(EvaluationDatasetItem)
+                .where(
+                    EvaluationDatasetItem.dataset_id == dataset_id,
+                    EvaluationDatasetItem.item_id == item_id,
+                )
+                .with_for_update()
+            )
+            if item is None:
+                return None
+
+            for key, value in sanitized_data.items():
+                setattr(item, key, value)
+            await session.flush()
+
+            result = await session.execute(
+                select(
+                    EvaluationDatasetItem.gold_chunk_ids,
+                    EvaluationDatasetItem.gold_answer,
+                ).where(EvaluationDatasetItem.dataset_id == dataset_id)
+            )
+            annotations = result.all()
+            dataset.has_gold_chunks = any(bool(chunk_ids) for chunk_ids, _ in annotations)
+            dataset.has_gold_answers = any(bool((answer or "").strip()) for _, answer in annotations)
+            await session.flush()
+            return item, dataset
+
     async def delete_dataset(self, dataset_id: str) -> None:
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(select(EvaluationDataset).where(EvaluationDataset.dataset_id == dataset_id))

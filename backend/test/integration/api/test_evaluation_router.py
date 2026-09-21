@@ -59,3 +59,39 @@ async def test_download_dataset_not_found(test_client, admin_headers):
         headers=admin_headers,
     )
     assert response.status_code == 404, response.text
+
+
+async def test_admin_can_edit_dataset_question_and_gold_answer(
+    test_client,
+    admin_headers,
+    knowledge_database,
+):
+    dataset_id, _ = await _upload_test_dataset(test_client, admin_headers, knowledge_database["kb_id"])
+    detail_response = await test_client.get(
+        f"/api/evaluation/databases/{knowledge_database['kb_id']}/datasets/{dataset_id}",
+        headers=admin_headers,
+    )
+    assert detail_response.status_code == 200, detail_response.text
+    item_id = detail_response.json()["data"]["items"][0]["item_id"]
+
+    update_response = await test_client.put(
+        f"/api/evaluation/datasets/{dataset_id}/items/{item_id}",
+        json={"query": "  修改后的问题  ", "gold_answer": "  修改后的标准答案  "},
+        headers=admin_headers,
+    )
+
+    assert update_response.status_code == 200, update_response.text
+    updated = update_response.json()["data"]
+    assert updated["item"]["query"] == "修改后的问题"
+    assert updated["item"]["gold_answer"] == "修改后的标准答案"
+    assert updated["dataset"]["has_gold_answers"] is True
+
+
+async def test_standard_user_cannot_edit_dataset_item(test_client, standard_user):
+    response = await test_client.put(
+        "/api/evaluation/datasets/dataset-fake/items/item-fake",
+        json={"query": "无权修改", "gold_answer": ""},
+        headers=standard_user["headers"],
+    )
+
+    assert response.status_code == 403

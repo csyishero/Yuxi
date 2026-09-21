@@ -64,7 +64,10 @@ test('评估基准三级页包含题目和评估结果 Tab 并按当前基准过
   assert.match(source, /const filter = resultFilter\.value/)
   assert.match(source, /resultFilter: filter/)
   assert.match(source, /label: getRunName\(run\)/)
-  assert.match(source, /const getRunName = \(run\) => run\?\.name \|\| run\?\.run_name \|\| '未命名测试'/)
+  assert.match(
+    source,
+    /const getRunName = \(run\) => run\?\.name \|\| run\?\.run_name \|\| '未命名测试'/
+  )
   assert.match(source, /仅查看错误/)
   assert.match(source, /错误及 R@10 < 1/)
   assert.match(source, /toFixed\(2\)/)
@@ -74,7 +77,10 @@ test('评估基准三级页包含题目和评估结果 Tab 并按当前基准过
   assert.match(source, /id="benchmark-run-select"/)
   assert.match(source, /v-model:value="selectedRunId"/)
   assert.match(source, /route\.query\.view === 'results'/)
-  assert.match(source, /\(view\) => \{\s*activeTab\.value = view === 'results' \? 'results' : 'questions'/)
+  assert.match(
+    source,
+    /\(view\) => \{\s*activeTab\.value = view === 'results' \? 'results' : 'questions'/
+  )
   assert.doesNotMatch(source, /\(\) => \[route\.params\.kbId, route\.params\.datasetId\]/)
   assert.match(
     source,
@@ -82,6 +88,15 @@ test('评估基准三级页包含题目和评估结果 Tab 并按当前基准过
   )
   assert.match(source, /response\.data\.filter\(\(run\) => run\.dataset_id === datasetId\.value\)/)
   assert.match(source, /evaluationApi\.getDataset\(kbId\.value, datasetId\.value, page, pageSize\)/)
+  assert.match(source, /evaluationApi\.updateDatasetItem\(/)
+  assert.match(source, /title="编辑评估问答"/)
+  assert.match(source, /已有评估结果保留运行时快照/)
+  assert.match(source, /const canEditQuestions = computed/)
+  assert.match(source, /database\.value\?\.effective_capabilities/)
+  assert.match(source, /class="benchmark-gold-chunk-card"/)
+  assert.match(source, /chunk\.filename \|\| '未找到源文件'/)
+  assert.match(source, /store\.openFileDetail\(chunk\.file_id\)/)
+  assert.match(source, /<FileDetailModal/)
   assert.match(source, /const runId = selectedRunId\.value/)
   assert.match(source, /evaluationApi\.getRunResults\(kbId\.value, runId/)
   assert.match(source, /query: \{ section: 'evaluation' \}/)
@@ -100,7 +115,10 @@ test('评估详情源码包含所选运行的串行轮询与迟到响应守卫',
   assert.match(source, /runsRefreshInFlight = true/)
   assert.match(source, /window\.setTimeout\(\(\) => \{\s*refreshTimer = null\s*loadRuns\(true\)/)
   assert.match(source, /if \(disposed\) return/)
-  assert.match(source, /const requestedRunId = silent \? selectedRunId\.value : String\(route\.query\.run \|\| ''\)/)
+  assert.match(
+    source,
+    /const requestedRunId = silent \? selectedRunId\.value : String\(route\.query\.run \|\| ''\)/
+  )
   assert.match(
     source,
     /else \{\s*selectedRunId\.value = ''\s*resultRequestId \+= 1\s*results\.value = \[\]\s*resultsLoading\.value = false/
@@ -116,16 +134,17 @@ test('评估详情源码包含所选运行的串行轮询与迟到响应守卫',
     source,
     /const handleRunSelection = async \(runId\) => \{[\s\S]*?resultRequestId \+= 1[\s\S]*?syncRefreshTimer\(\)[\s\S]*?Promise\.all/
   )
-  assert.match(source, /onUnmounted\(\(\) => \{\s*disposed = true\s*resultRequestId \+= 1\s*stopRefreshTimer\(\)/)
+  assert.match(
+    source,
+    /onUnmounted\(\(\) => \{\s*disposed = true\s*resultRequestId \+= 1\s*stopRefreshTimer\(\)/
+  )
 })
 
 test('新建评估在没有已完成基准时禁用且不伪造成功', () => {
   const workspaceSource = readSource(
     '../../src/components/evaluation/KnowledgeEvaluationWorkspace.vue'
   )
-  const modalSource = readSource(
-    '../../src/components/evaluation/EvaluationRunCreateModal.vue'
-  )
+  const modalSource = readSource('../../src/components/evaluation/EvaluationRunCreateModal.vue')
 
   assert.match(workspaceSource, /:disabled="completedDatasets\.length === 0"/)
   assert.match(modalSource, /await evaluationApi\.runEvaluation\(props\.kbId/)

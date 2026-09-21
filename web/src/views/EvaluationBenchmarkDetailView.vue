@@ -11,7 +11,9 @@
     >
       <template #breadcrumb>
         <nav class="extension-detail-breadcrumb benchmark-breadcrumb" aria-label="评估基准详情导航">
-          <button type="button" class="extension-detail-back" @click="backToKnowledgeList">知识库</button>
+          <button type="button" class="extension-detail-back" @click="backToKnowledgeList">
+            知识库
+          </button>
           <ChevronRight :size="15" aria-hidden="true" />
           <button type="button" class="extension-detail-back" @click="backToKnowledgeEvaluation">
             {{ database.name || kbId }}
@@ -23,7 +25,6 @@
         </nav>
       </template>
 
-
       <template #panel-questions>
         <div class="benchmark-detail-panel">
           <div class="benchmark-summary-strip">
@@ -32,9 +33,17 @@
               <span>{{ dataset.description || '暂无描述' }}</span>
             </div>
             <div class="benchmark-summary-metrics">
-              <span><small>题目</small><strong>{{ questionPagination.total }}</strong></span>
-              <span><small>Gold Chunks</small><strong>{{ dataset.has_gold_chunks ? '有' : '无' }}</strong></span>
-              <span><small>Gold Answer</small><strong>{{ dataset.has_gold_answers ? '有' : '无' }}</strong></span>
+              <span
+                ><small>题目</small><strong>{{ questionPagination.total }}</strong></span
+              >
+              <span
+                ><small>Gold Chunks</small
+                ><strong>{{ dataset.has_gold_chunks ? '有' : '无' }}</strong></span
+              >
+              <span
+                ><small>Gold Answer</small
+                ><strong>{{ dataset.has_gold_answers ? '有' : '无' }}</strong></span
+              >
             </div>
           </div>
 
@@ -99,16 +108,57 @@
                   <div class="benchmark-cell-primary" :title="record.query">{{ record.query }}</div>
                 </template>
                 <template v-else-if="column.key === 'gold_chunk_ids'">
-                  <div v-if="record.gold_chunk_ids?.length" class="benchmark-cell-code">
-                    {{ record.gold_chunk_ids.join(', ') }}
+                  <div v-if="record.gold_chunk_ids?.length" class="benchmark-gold-chunk-list">
+                    <button
+                      v-for="chunk in getGoldChunks(record)"
+                      :key="chunk.chunk_id"
+                      type="button"
+                      class="benchmark-gold-chunk-card"
+                      :class="{ 'is-missing': !chunk.exists || !chunk.file_exists }"
+                      :disabled="!chunk.exists || !chunk.file_exists"
+                      :title="
+                        chunk.file_exists
+                          ? `打开文件：${chunk.filename}`
+                          : `未找到：${chunk.chunk_id}`
+                      "
+                      @click="openGoldChunkFile(chunk)"
+                    >
+                      <span class="benchmark-gold-chunk-heading">
+                        <FileText :size="14" aria-hidden="true" />
+                        <strong>{{ chunk.filename || '未找到源文件' }}</strong>
+                        <small v-if="Number.isInteger(chunk.chunk_index)">
+                          第 {{ chunk.chunk_index + 1 }} 段
+                        </small>
+                        <small v-else>引用失效</small>
+                      </span>
+                      <span v-if="chunk.content_preview" class="benchmark-gold-chunk-preview">
+                        {{ chunk.content_preview }}
+                      </span>
+                      <code>{{ chunk.chunk_id }}</code>
+                    </button>
                   </div>
                   <span v-else class="benchmark-cell-empty">-</span>
                 </template>
                 <template v-else-if="column.key === 'gold_answer'">
-                  <div v-if="record.gold_answer" class="benchmark-cell-secondary" :title="record.gold_answer">
+                  <div
+                    v-if="record.gold_answer"
+                    class="benchmark-cell-secondary"
+                    :title="record.gold_answer"
+                  >
                     {{ record.gold_answer }}
                   </div>
                   <span v-else class="benchmark-cell-empty">-</span>
+                </template>
+                <template v-else-if="column.key === 'actions'">
+                  <a-button
+                    type="link"
+                    size="small"
+                    class="benchmark-edit-button"
+                    @click="openQuestionEditor(record)"
+                  >
+                    <Pencil :size="14" aria-hidden="true" />
+                    编辑
+                  </a-button>
                 </template>
               </template>
               <template #emptyText>
@@ -149,16 +199,30 @@
                   @change="handleRunSelection"
                 />
                 <div class="benchmark-run-meta">
-                  <span>{{ formatTime(selectedRun?.started_at) }} · {{ formatRunDuration(selectedRun) }}</span>
+                  <span
+                    >{{ formatTime(selectedRun?.started_at) }} ·
+                    {{ formatRunDuration(selectedRun) }}</span
+                  >
                 </div>
-                <span class="benchmark-run-status" :class="`status-${selectedRun?.status || 'unknown'}`">
+                <span
+                  class="benchmark-run-status"
+                  :class="`status-${selectedRun?.status || 'unknown'}`"
+                >
                   {{ getRunStatusText(selectedRun?.status) }}
                 </span>
               </div>
               <div class="benchmark-result-metrics">
-                <span><small>综合评分</small><strong>{{ formatScore(selectedRun?.overall_score) }}</strong></span>
-                <span><small>Recall@10</small><strong>{{ formatMetric(selectedRun?.metrics?.['recall@10']) }}</strong></span>
-                <span><small>完成题目</small><strong>{{ formatRunItems(selectedRun) }}</strong></span>
+                <span
+                  ><small>综合评分</small
+                  ><strong>{{ formatScore(selectedRun?.overall_score) }}</strong></span
+                >
+                <span
+                  ><small>Recall@10</small
+                  ><strong>{{ formatMetric(selectedRun?.metrics?.['recall@10']) }}</strong></span
+                >
+                <span
+                  ><small>完成题目</small><strong>{{ formatRunItems(selectedRun) }}</strong></span
+                >
               </div>
             </div>
 
@@ -206,10 +270,16 @@
               >
                 <template #bodyCell="{ column, record }">
                   <template v-if="column.key === 'query'">
-                    <div class="benchmark-cell-primary" :title="record.query">{{ record.query }}</div>
+                    <div class="benchmark-cell-primary" :title="record.query">
+                      {{ record.query }}
+                    </div>
                   </template>
                   <template v-else-if="column.key === 'generated_answer'">
-                    <div v-if="record.generated_answer" class="benchmark-cell-secondary" :title="record.generated_answer">
+                    <div
+                      v-if="record.generated_answer"
+                      class="benchmark-cell-secondary"
+                      :title="record.generated_answer"
+                    >
                       {{ record.generated_answer }}
                     </div>
                     <span v-else class="benchmark-cell-empty">-</span>
@@ -220,7 +290,11 @@
                         <small>{{ metric.label }}</small>
                         <strong>{{ formatMetric(metric.value) }}</strong>
                       </span>
-                      <span v-if="getRetrievalMetrics(record.metrics).length === 0" class="benchmark-cell-empty">-</span>
+                      <span
+                        v-if="getRetrievalMetrics(record.metrics).length === 0"
+                        class="benchmark-cell-empty"
+                        >-</span
+                      >
                     </div>
                   </template>
                   <template v-else-if="column.key === 'answer_score'">
@@ -240,7 +314,9 @@
                 </template>
                 <template #emptyText>
                   <a-empty
-                    :description="results.length > 0 ? '当前页没有符合筛选条件的结果' : '暂无逐题结果'"
+                    :description="
+                      results.length > 0 ? '当前页没有符合筛选条件的结果' : '暂无逐题结果'
+                    "
                   />
                 </template>
               </a-table>
@@ -249,6 +325,48 @@
         </div>
       </template>
     </ExtensionDetailLayout>
+
+    <a-modal
+      v-model:open="questionEditorOpen"
+      title="编辑评估问答"
+      width="680px"
+      :confirm-loading="questionSaving"
+      ok-text="保存"
+      cancel-text="取消"
+      @ok="saveQuestion"
+      @cancel="closeQuestionEditor"
+    >
+      <a-form layout="vertical" class="benchmark-question-form">
+        <a-form-item label="问题" required>
+          <a-textarea
+            v-model:value="questionEditor.query"
+            :rows="4"
+            :maxlength="20000"
+            show-count
+            placeholder="请输入评估问题"
+          />
+        </a-form-item>
+        <a-form-item label="Gold Answer（标准答案）">
+          <a-textarea
+            v-model:value="questionEditor.goldAnswer"
+            :rows="7"
+            :maxlength="200000"
+            show-count
+            placeholder="留空表示移除标准答案"
+          />
+        </a-form-item>
+        <div class="benchmark-edit-notice">
+          保存后只影响后续发起的评估；已有评估结果保留运行时快照，不会被回写。
+        </div>
+      </a-form>
+    </a-modal>
+
+    <FileDetailModal
+      v-model:open="store.state.fileDetailModalVisible"
+      :kb-id="kbId"
+      :file-id="store.fileDetailFileId"
+      @closed="store.closeFileDetail"
+    />
   </div>
 </template>
 
@@ -261,10 +379,13 @@ import {
   ChevronRight,
   ClipboardList,
   Download,
+  FileText,
   ListFilter,
+  Pencil,
   Search,
   WrapText
 } from '@lucide/vue'
+import FileDetailModal from '@/components/FileDetailModal.vue'
 import ExtensionDetailLayout from '@/components/shared/ExtensionDetailLayout.vue'
 import ResourceEmptyState from '@/components/shared/ResourceEmptyState.vue'
 import { evaluationApi } from '@/apis/knowledge_api'
@@ -277,6 +398,9 @@ const kbId = computed(() => String(route.params.kbId || ''))
 const datasetId = computed(() => String(route.params.datasetId || ''))
 const database = computed(() => store.database)
 const isCurrentDatabaseLoaded = computed(() => database.value?.kb_id === kbId.value)
+const canEditQuestions = computed(() =>
+  (database.value?.effective_capabilities || []).includes('configure')
+)
 
 const tabs = [
   { key: 'questions', label: '题目', icon: ClipboardList },
@@ -291,6 +415,9 @@ const questionKeyword = ref('')
 const questionAnnotationFilter = ref('all')
 const questionAutoWrap = ref(false)
 const questionPagination = reactive({ current: 1, pageSize: 50, total: 0 })
+const questionEditorOpen = ref(false)
+const questionSaving = ref(false)
+const questionEditor = reactive({ itemId: '', query: '', goldAnswer: '' })
 
 const runsLoading = ref(false)
 const datasetRuns = ref([])
@@ -328,12 +455,26 @@ const questionColumns = computed(() => [
   { title: '#', key: 'index', width: 64, align: 'center' },
   { title: '问题', key: 'query', dataIndex: 'query', width: 360 },
   ...(dataset.value?.has_gold_chunks
-    ? [{ title: 'Gold Chunks', key: 'gold_chunk_ids', width: 280 }]
+    ? [{ title: 'Gold Chunks', key: 'gold_chunk_ids', width: 380 }]
     : []),
   ...(dataset.value?.has_gold_answers
     ? [{ title: 'Gold Answer', key: 'gold_answer', width: 420 }]
+    : []),
+  ...(canEditQuestions.value
+    ? [{ title: '操作', key: 'actions', width: 84, align: 'center', fixed: 'right' }]
     : [])
 ])
+
+const getGoldChunks = (record) => {
+  if (Array.isArray(record.gold_chunks) && record.gold_chunks.length > 0) {
+    return record.gold_chunks
+  }
+  return (record.gold_chunk_ids || []).map((chunkId) => ({
+    chunk_id: chunkId,
+    exists: false,
+    file_exists: false
+  }))
+}
 
 const resultColumns = computed(() => [
   { title: '问题', key: 'query', dataIndex: 'query', width: 330 },
@@ -347,7 +488,16 @@ const filteredQuestions = computed(() => {
   return questions.value.filter((question) => {
     const matchesKeyword =
       !keyword ||
-      [question.query, question.gold_answer, ...(question.gold_chunk_ids || [])]
+      [
+        question.query,
+        question.gold_answer,
+        ...(question.gold_chunk_ids || []),
+        ...(question.gold_chunks || []).flatMap((chunk) => [
+          chunk.filename,
+          chunk.content_preview,
+          chunk.file_id
+        ])
+      ]
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(keyword))
     const filter = questionAnnotationFilter.value
@@ -399,7 +549,8 @@ const runOptions = computed(() =>
 
 const getRunName = (run) => run?.name || run?.run_name || '未命名测试'
 const getRunStatusText = (status) =>
-  ({ running: '运行中', completed: '已完成', failed: '失败', paused: '已暂停' })[status] || '未知状态'
+  ({ running: '运行中', completed: '已完成', failed: '失败', paused: '已暂停' })[status] ||
+  '未知状态'
 const formatMetric = (value) => (Number.isFinite(value) ? Number(value).toFixed(2) : '-')
 const formatScore = (value) => (Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : '-')
 const formatTime = (value) => (value ? new Date(value).toLocaleString('zh-CN') : '-')
@@ -425,9 +576,10 @@ const getRetrievalMetricLabel = (key) => {
 
 const getRetrievalMetrics = (metrics = {}) =>
   Object.entries(metrics)
-    .filter(([key, value]) =>
-      Number.isFinite(value) &&
-      (key.startsWith('recall') || key.startsWith('precision') || ['map', 'ndcg'].includes(key))
+    .filter(
+      ([key, value]) =>
+        Number.isFinite(value) &&
+        (key.startsWith('recall') || key.startsWith('precision') || ['map', 'ndcg'].includes(key))
     )
     .map(([key, value]) => ({ key, label: getRetrievalMetricLabel(key), value }))
 
@@ -447,6 +599,67 @@ const loadQuestions = async (page = 1, pageSize = questionPagination.pageSize) =
     dataset.value = null
   } finally {
     questionsLoading.value = false
+  }
+}
+
+const openGoldChunkFile = (chunk) => {
+  if (!chunk?.file_id || !chunk.file_exists) {
+    message.warning('该 Gold Chunk 对应的源文件已不存在')
+    return
+  }
+  store.openFileDetail(chunk.file_id)
+}
+
+const openQuestionEditor = (record) => {
+  if (!canEditQuestions.value) return
+  questionEditor.itemId = record.item_id
+  questionEditor.query = record.query || ''
+  questionEditor.goldAnswer = record.gold_answer || ''
+  questionEditorOpen.value = true
+}
+
+const closeQuestionEditor = () => {
+  if (questionSaving.value) return
+  questionEditorOpen.value = false
+  questionEditor.itemId = ''
+  questionEditor.query = ''
+  questionEditor.goldAnswer = ''
+}
+
+const saveQuestion = async () => {
+  const query = questionEditor.query.trim()
+  if (!query) {
+    message.warning('问题不能为空')
+    return
+  }
+  questionSaving.value = true
+  try {
+    const response = await evaluationApi.updateDatasetItem(datasetId.value, questionEditor.itemId, {
+      query,
+      gold_answer: questionEditor.goldAnswer.trim() || null
+    })
+    if (response?.message !== 'success' || !response.data?.item) {
+      throw new Error('保存后的题目数据格式错误')
+    }
+    const updatedItem = response.data.item
+    questions.value = questions.value.map((item) =>
+      item.item_id === updatedItem.item_id ? updatedItem : item
+    )
+    if (response.data.dataset) {
+      dataset.value = {
+        ...dataset.value,
+        ...response.data.dataset,
+        items: questions.value,
+        pagination: dataset.value?.pagination
+      }
+    }
+    questionEditorOpen.value = false
+    message.success('评估问答已更新')
+  } catch (error) {
+    console.error('更新评估问答失败:', error)
+    message.error(error.message || '更新评估问答失败')
+  } finally {
+    questionSaving.value = false
   }
 }
 
@@ -888,6 +1101,113 @@ onUnmounted(() => {
   font-size: 11px;
 }
 
+.benchmark-gold-chunk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.benchmark-gold-chunk-card {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--gray-200);
+  border-radius: 7px;
+  background: var(--gray-25);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+
+  &:hover:not(:disabled) {
+    border-color: var(--primary-color);
+    background: var(--primary-50, #f1fbfd);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+
+  &.is-missing {
+    border-style: dashed;
+    background: var(--gray-50);
+    opacity: 0.8;
+    cursor: default;
+  }
+
+  code {
+    display: block;
+    overflow: hidden;
+    margin-top: 4px;
+    color: var(--gray-400);
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.benchmark-gold-chunk-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+
+  svg {
+    flex: 0 0 auto;
+    color: var(--primary-color);
+  }
+
+  strong {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--gray-900);
+    font-size: 12px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  small {
+    flex: 0 0 auto;
+    margin-left: auto;
+    color: var(--gray-500);
+    font-size: 10px;
+  }
+}
+
+.benchmark-gold-chunk-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 4px;
+  color: var(--gray-600);
+  font-size: 11px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.benchmark-edit-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-inline: 4px;
+}
+
+.benchmark-question-form {
+  padding-top: 8px;
+}
+
+.benchmark-edit-notice {
+  padding: 9px 12px;
+  border-radius: 6px;
+  background: var(--gray-50);
+  color: var(--gray-500);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .benchmark-cell-empty {
   color: var(--gray-400);
 }
@@ -913,6 +1233,10 @@ onUnmounted(() => {
 
   .benchmark-metric-list {
     flex-wrap: nowrap;
+  }
+
+  .benchmark-gold-chunk-preview {
+    display: none;
   }
 }
 

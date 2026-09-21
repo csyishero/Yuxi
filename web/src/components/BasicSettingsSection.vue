@@ -65,7 +65,7 @@
           <a-button
             type="default"
             class="lucide-icon-btn"
-            @click="openLink('http://localhost:7474/')"
+            @click="openServiceLink('neo4j')"
             :icon="h(Globe, { size: 18 })"
           >
             访问
@@ -80,7 +80,7 @@
           <a-button
             type="default"
             class="lucide-icon-btn"
-            @click="openLink('http://localhost:5050/docs')"
+            @click="openServiceLink('api_docs')"
             :icon="h(Globe, { size: 18 })"
           >
             访问
@@ -95,7 +95,7 @@
           <a-button
             type="default"
             class="lucide-icon-btn"
-            @click="openLink('http://localhost:9001')"
+            @click="openServiceLink('minio')"
             :icon="h(Globe, { size: 18 })"
           >
             访问
@@ -110,7 +110,7 @@
           <a-button
             type="default"
             class="lucide-icon-btn"
-            @click="openLink('http://localhost:9091/webui/')"
+            @click="openServiceLink('milvus')"
             :icon="h(Globe, { size: 18 })"
           >
             访问
@@ -123,8 +123,10 @@
 
 <script setup>
 import { computed, h } from 'vue'
+import { message } from 'ant-design-vue'
 import { useConfigStore } from '@/stores/config'
 import { useUserStore } from '@/stores/user'
+import { buildServiceLink } from '@/utils/serviceLinks'
 import { Globe } from '@lucide/vue'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import EmbeddingModelSelector from '@/components/EmbeddingModelSelector.vue'
@@ -150,8 +152,14 @@ const handleFastModelSelect = (spec) => {
   }
 }
 
-const openLink = (url) => {
-  window.open(url, '_blank')
+const openServiceLink = (serviceName) => {
+  try {
+    const spec = configStore.config?._service_links?.[serviceName]
+    window.open(buildServiceLink(spec), '_blank', 'noopener,noreferrer')
+  } catch (error) {
+    console.error('管理服务地址配置无效:', error)
+    message.error('服务地址配置无效，请联系管理员检查部署端口')
+  }
 }
 </script>
 
