@@ -12,6 +12,17 @@
     </div>
 
     <div class="account-card profile-card">
+      <div class="profile-card-heading">
+        <div>
+          <div class="profile-card-title">账户资料</div>
+          <p class="profile-card-description">查看和维护当前账户的基础信息。</p>
+        </div>
+        <a-button class="lucide-icon-btn password-entry-button" @click="openPasswordModal">
+          <template #icon><KeyRound :size="16" /></template>
+          修改密码
+        </a-button>
+      </div>
+
       <div class="profile-summary">
         <div class="profile-left">
           <a-upload
@@ -112,16 +123,26 @@
       <UserConfigSettingsCard ref="userConfigRef" />
     </div>
 
-    <div class="account-card security-card">
-      <div class="security-heading">
-        <div>
-          <div class="security-title">修改密码</div>
-          <p class="security-description">修改当前账户的登录密码，保存后需要重新登录。</p>
-        </div>
-      </div>
+    <a-modal
+      v-model:open="passwordModalVisible"
+      title="修改登录密码"
+      width="520px"
+      ok-text="确认修改"
+      cancel-text="取消"
+      :confirm-loading="changingPassword"
+      :mask-closable="!changingPassword"
+      :closable="!changingPassword"
+      :cancel-button-props="{ disabled: changingPassword }"
+      @ok="handlePasswordChange"
+      @cancel="closePasswordModal"
+      @after-close="resetPasswordDraft"
+    >
+      <div class="password-modal-content">
+        <p class="password-modal-description">
+          验证当前密码后设置新密码，修改成功后当前登录会失效，需要重新登录。
+        </p>
 
-      <a-form class="password-form" layout="vertical" :model="passwordDraft">
-        <div class="password-fields">
+        <a-form class="password-form" layout="vertical" :model="passwordDraft">
           <a-form-item label="当前密码" name="currentPassword" required>
             <a-input-password
               v-model:value="passwordDraft.currentPassword"
@@ -153,15 +174,13 @@
               @press-enter="handlePasswordChange"
             />
           </a-form-item>
-        </div>
+        </a-form>
 
-        <div class="password-actions">
-          <a-button type="primary" html-type="button" :loading="changingPassword" @click="handlePasswordChange">
-            修改密码
-          </a-button>
+        <div class="password-requirement">
+          密码至少需要 {{ MIN_PASSWORD_LENGTH }} 个字符，且不能与当前密码相同。
         </div>
-      </a-form>
-    </div>
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -170,7 +189,7 @@ import UserConfigSettingsCard from '@/components/UserConfigSettingsCard.vue'
 
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { Building2, RefreshCw, ShieldCheck, Upload } from '@lucide/vue'
+import { Building2, KeyRound, RefreshCw, ShieldCheck, Upload } from '@lucide/vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { useUserStore } from '@/stores/user'
 import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
@@ -185,6 +204,7 @@ const usernameInput = ref(null)
 const phoneInput = ref(null)
 const userConfigRef = ref(null)
 const changingPassword = ref(false)
+const passwordModalVisible = ref(false)
 const profileDraft = reactive({
   username: '',
   phone_number: ''
@@ -194,6 +214,22 @@ const passwordDraft = reactive({
   newPassword: '',
   confirmPassword: ''
 })
+
+const resetPasswordDraft = () => {
+  passwordDraft.currentPassword = ''
+  passwordDraft.newPassword = ''
+  passwordDraft.confirmPassword = ''
+}
+
+const openPasswordModal = () => {
+  resetPasswordDraft()
+  passwordModalVisible.value = true
+}
+
+const closePasswordModal = () => {
+  if (changingPassword.value) return
+  passwordModalVisible.value = false
+}
 
 const avatarDefaultSrc = computed(() => (userStore.uid ? generatePixelAvatar(userStore.uid) : ''))
 
@@ -310,9 +346,8 @@ const handlePasswordChange = async () => {
       current_password: passwordDraft.currentPassword,
       new_password: passwordDraft.newPassword
     })
-    passwordDraft.currentPassword = ''
-    passwordDraft.newPassword = ''
-    passwordDraft.confirmPassword = ''
+    resetPasswordDraft()
+    passwordModalVisible.value = false
     passwordChanged = true
     message.success('密码修改成功，请重新登录')
     setTimeout(() => {
@@ -410,42 +445,29 @@ watch(() => [userStore.username, userStore.phoneNumber], syncProfileDraft, { imm
     background: var(--gray-25);
   }
 
-  .security-card {
+  .profile-card-heading {
     display: flex;
-    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
     gap: 16px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--gray-150);
   }
 
-  .security-title {
+  .profile-card-title {
     color: var(--gray-900);
     font-size: 16px;
     font-weight: 600;
   }
 
-  .security-description {
+  .profile-card-description {
     margin: 4px 0 0;
     color: var(--gray-600);
     font-size: 13px;
   }
 
-  .password-form {
-    max-width: 760px;
-  }
-
-  .password-fields {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 12px;
-
-    @media (max-width: 900px) {
-      grid-template-columns: 1fr;
-      gap: 0;
-    }
-  }
-
-  .password-actions {
-    display: flex;
-    justify-content: flex-end;
+  .password-entry-button {
+    flex: 0 0 auto;
   }
 
   .profile-summary {
@@ -603,6 +625,30 @@ watch(() => [userStore.username, userStore.phoneNumber], syncProfileDraft, { imm
 
   .apikey-card {
     padding: 16px;
+  }
+}
+
+.password-modal-content {
+  .password-modal-description {
+    margin: 0 0 20px;
+    color: var(--gray-600);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  .password-form {
+    :deep(.ant-form-item:last-child) {
+      margin-bottom: 16px;
+    }
+  }
+
+  .password-requirement {
+    padding: 10px 12px;
+    border-radius: 8px;
+    color: var(--gray-600);
+    background: var(--gray-50);
+    font-size: 12px;
+    line-height: 1.5;
   }
 }
 

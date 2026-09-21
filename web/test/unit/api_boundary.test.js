@@ -308,13 +308,15 @@ test('普通用户修改本人密码只调用当前账户密码接口', async ()
   })
 })
 
-test('账户设置的修改密码按钮显式触发处理函数', async () => {
+test('账户设置通过按钮打开修改密码弹窗并在确认时提交', async () => {
   const source = await import('node:fs/promises').then((fs) =>
     fs.readFile(new URL('../../src/components/AccountSettingsComponent.vue', import.meta.url), 'utf8')
   )
 
-  assert.equal(source.includes('html-type="button"'), true)
-  assert.equal(source.includes('@click="handlePasswordChange"'), true)
+  assert.equal(source.includes('@click="openPasswordModal"'), true)
+  assert.equal(source.includes('v-model:open="passwordModalVisible"'), true)
+  assert.equal(source.includes('@ok="handlePasswordChange"'), true)
+  assert.equal(source.includes('class="account-card security-card"'), false)
   assert.equal(source.includes('@finish="handlePasswordChange"'), false)
 })
 
