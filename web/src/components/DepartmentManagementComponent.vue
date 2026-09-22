@@ -374,53 +374,55 @@ const handleDepartmentFormSubmit = async () => {
       return
     }
 
-    // 验证管理员UID
     const adminUid = departmentManagement.form.adminUid.trim()
-    if (!adminUid) {
-      notification.error({ message: '请输入管理员UID' })
-      return
-    }
+    // 管理员账号随新部门创建，编辑部门资料时不校验这些隐藏字段。
+    if (!departmentManagement.editMode) {
+      if (!adminUid) {
+        notification.error({ message: '请输入管理员UID' })
+        return
+      }
 
-    if (!/^[a-zA-Z0-9_]+$/.test(adminUid)) {
-      notification.error({ message: 'UID只能包含字母、数字和下划线' })
-      return
-    }
+      if (!/^[a-zA-Z0-9_]+$/.test(adminUid)) {
+        notification.error({ message: 'UID只能包含字母、数字和下划线' })
+        return
+      }
 
-    if (adminUid.length < 3 || adminUid.length > 20) {
-      notification.error({ message: 'UID长度必须在3-20个字符之间' })
-      return
-    }
+      if (adminUid.length < 3 || adminUid.length > 20) {
+        notification.error({ message: 'UID长度必须在3-20个字符之间' })
+        return
+      }
 
-    if (departmentManagement.form.uidError) {
-      notification.error({ message: '管理员UID已存在或格式错误' })
-      return
-    }
+      if (departmentManagement.form.uidError) {
+        notification.error({ message: '管理员UID已存在或格式错误' })
+        return
+      }
 
-    // 验证密码
-    if (!departmentManagement.form.adminPassword) {
-      notification.error({ message: '请输入管理员密码' })
-      return
-    }
+      // 验证密码
+      if (!departmentManagement.form.adminPassword) {
+        notification.error({ message: '请输入管理员密码' })
+        return
+      }
 
-    if (!isPasswordLongEnough(departmentManagement.form.adminPassword)) {
-      notification.error({ message: `密码至少需要 ${MIN_PASSWORD_LENGTH} 个字符` })
-      return
-    }
+      if (!isPasswordLongEnough(departmentManagement.form.adminPassword)) {
+        notification.error({ message: `密码至少需要 ${MIN_PASSWORD_LENGTH} 个字符` })
+        return
+      }
 
-    if (
-      departmentManagement.form.adminPassword !== departmentManagement.form.adminConfirmPassword
-    ) {
-      notification.error({ message: '两次输入的密码不一致' })
-      return
-    }
+      if (
+        departmentManagement.form.adminPassword !== departmentManagement.form.adminConfirmPassword
+      ) {
+        notification.error({ message: '两次输入的密码不一致' })
+        return
+      }
 
-    // 验证手机号
-    if (
-      departmentManagement.form.adminPhone &&
-      !validatePhoneNumber(departmentManagement.form.adminPhone)
-    ) {
-      notification.error({ message: '请输入正确的手机号格式' })
-      return
+      // 验证手机号
+      if (
+        departmentManagement.form.adminPhone &&
+        !validatePhoneNumber(departmentManagement.form.adminPhone)
+      ) {
+        notification.error({ message: '请输入正确的手机号格式' })
+        return
+      }
     }
 
     departmentManagement.loading = true
