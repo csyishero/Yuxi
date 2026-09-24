@@ -7,8 +7,17 @@ export function useAgentRequestQueue({
   getThreadState,
   resetOnGoingConv,
   startRunStream,
-  onStreamError
+  onStreamError,
+  onRunCreated
 }) {
+  // 仅当前页面主动创建并确认进入队列的请求可以触发设备绑定。
+  // 恢复/观察其他页面创建的 Request SSE 必须保持只读，避免抢占 current-device assertion。
+  const runCreatedCallbackRequestIds = new Set()
+
+  const markRunCreatedForCurrentPage = (requestId) => {
+    if (requestId) runCreatedCallbackRequestIds.add(requestId)
+  }
+
   const removeRequestFromQueue = (ts, requestId) => {
     if (!ts || !ts.queuedRequests) return
     ts.queuedRequests = ts.queuedRequests.filter((r) => r.request_id !== requestId)
@@ -41,6 +50,7 @@ export function useAgentRequestQueue({
       return false
     try {
       await agentApi.cancelRequest(requestId)
+      runCreatedCallbackRequestIds.delete(requestId)
       stopRequestStream(threadId, requestId)
       removeRequestFromQueue(ts, requestId)
       if (ts.onGoingConv?.msgChunks) {
@@ -121,6 +131,7 @@ export function useAgentRequestQueue({
           if (queuedRequest) queuedRequest.queue_position = entry.position
         } else if (event === 'run_created' && data) {
           entry.status = 'dispatched'
+          const shouldNotifyRunCreated = runCreatedCallbackRequestIds.delete(requestId)
           if (data.run_id) {
             const request = tsInner.queuedRequests?.find((item) => item.request_id === requestId)
             const requestMessages =
@@ -148,9 +159,13 @@ export function useAgentRequestQueue({
               tsInner.onGoingConv.msgChunks[requestId] = requestMessages
             }
             tsInner.pendingRequestId = requestId
+            if (shouldNotifyRunCreated && typeof onRunCreated === 'function') {
+              void onRunCreated({ threadId, runId: data.run_id, requestId })
+            }
             void startRunStream(threadId, data.run_id, '0-0', { requestId })
           }
         } else if (event === 'cancelled' || event === 'rejected' || event === 'failed') {
+          runCreatedCallbackRequestIds.delete(requestId)
           entry.status = event
           tsInner.isStreaming = false
           tsInner.replyLoadingVisible = false
@@ -214,6 +229,7 @@ export function useAgentRequestQueue({
   }
 
   return {
+    markRunCreatedForCurrentPage,
     startRequestStream,
     stopAllRequestStreams,
     cancelRequest,

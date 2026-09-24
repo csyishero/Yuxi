@@ -35,8 +35,8 @@ x-api-worker-env: &api-worker-env
   YUXI_SKILL_DATA_DIR: /app/skill-sources
   YUXI_SKILL_PROJECTION_DIR: /app/skill-projections
   # 其他环境变量
-  NO_PROXY: localhost,127.0.0.1,milvus,graph,minio,etcd,mineru,paddlex,sandbox-provisioner,api.siliconflow.cn
-  no_proxy: localhost,127.0.0.1,milvus,graph,minio,etcd,mineru,paddlex,sandbox-provisioner,api.siliconflow.cn
+  NO_PROXY: localhost,127.0.0.1,host.docker.internal,browser-gateway,milvus,graph,minio,etcd,mineru,paddlex,sandbox-provisioner,api.siliconflow.cn
+  no_proxy: localhost,127.0.0.1,host.docker.internal,browser-gateway,milvus,graph,minio,etcd,mineru,paddlex,sandbox-provisioner,api.siliconflow.cn
 
 services:
   api:
@@ -72,6 +72,17 @@ services:
     # region api_envs
     environment:
       <<: *api-worker-env
+      # Browser MCP Gateway（只提供给 API 与 Worker）
+      YUXI_BROWSER_GATEWAY_URL: ${YUXI_BROWSER_GATEWAY_URL:-}
+      YUXI_BROWSER_GATEWAY_PUBLIC_URL: ${YUXI_BROWSER_GATEWAY_PUBLIC_URL:-}
+      YUXI_BROWSER_ORIGIN: ${YUXI_BROWSER_ORIGIN:-}
+      YUXI_BROWSER_EXTENSION_ID: ${YUXI_BROWSER_EXTENSION_ID:-}
+      YUXI_BROWSER_GATEWAY_ISSUER: ${YUXI_BROWSER_GATEWAY_ISSUER:-https://yuxi.local}
+      YUXI_BROWSER_GATEWAY_AUDIENCE: ${YUXI_BROWSER_GATEWAY_AUDIENCE:-browser-gateway}
+      YUXI_BROWSER_GATEWAY_KEY_ID: ${YUXI_BROWSER_GATEWAY_KEY_ID:-}
+      YUXI_BROWSER_GATEWAY_PRIVATE_JWK: ${YUXI_BROWSER_GATEWAY_PRIVATE_JWK:-}
+      YUXI_BROWSER_GATEWAY_PRIVATE_JWK_FILE: ${YUXI_BROWSER_GATEWAY_PRIVATE_JWK_FILE:-}
+      YUXI_BROWSER_ASSERTION_TTL_SECONDS: ${YUXI_BROWSER_ASSERTION_TTL_SECONDS:-50}
       YUXI_RUNTIME_DIR: /app/runtime/api
       YUXI_USER_DATA_DIR: /app/user-data
       YUXI_API_PORT: ${YUXI_API_PORT:-5050}
@@ -137,6 +148,17 @@ services:
       - ${YUXI_ENV_FILE:-.env}
     environment:
       <<: *api-worker-env
+      # Browser MCP Gateway（只提供给 API 与 Worker）
+      YUXI_BROWSER_GATEWAY_URL: ${YUXI_BROWSER_GATEWAY_URL:-}
+      YUXI_BROWSER_GATEWAY_PUBLIC_URL: ${YUXI_BROWSER_GATEWAY_PUBLIC_URL:-}
+      YUXI_BROWSER_ORIGIN: ${YUXI_BROWSER_ORIGIN:-}
+      YUXI_BROWSER_EXTENSION_ID: ${YUXI_BROWSER_EXTENSION_ID:-}
+      YUXI_BROWSER_GATEWAY_ISSUER: ${YUXI_BROWSER_GATEWAY_ISSUER:-https://yuxi.local}
+      YUXI_BROWSER_GATEWAY_AUDIENCE: ${YUXI_BROWSER_GATEWAY_AUDIENCE:-browser-gateway}
+      YUXI_BROWSER_GATEWAY_KEY_ID: ${YUXI_BROWSER_GATEWAY_KEY_ID:-}
+      YUXI_BROWSER_GATEWAY_PRIVATE_JWK: ${YUXI_BROWSER_GATEWAY_PRIVATE_JWK:-}
+      YUXI_BROWSER_GATEWAY_PRIVATE_JWK_FILE: ${YUXI_BROWSER_GATEWAY_PRIVATE_JWK_FILE:-}
+      YUXI_BROWSER_ASSERTION_TTL_SECONDS: ${YUXI_BROWSER_ASSERTION_TTL_SECONDS:-50}
       YUXI_RUNTIME_DIR: /app/runtime/worker
       YUXI_USER_DATA_DIR: /app/user-data
       ARQ_MAX_JOBS: ${ARQ_MAX_JOBS:-140}
@@ -193,6 +215,9 @@ services:
       - ${YUXI_ENV_FILE:-.env}
     environment:
       <<: *api-worker-env
+      # env_file 可能包含 Browser 私钥；迁移容器必须显式遮蔽。
+      YUXI_BROWSER_GATEWAY_PRIVATE_JWK: ""
+      YUXI_BROWSER_GATEWAY_PRIVATE_JWK_FILE: ""
       YUXI_RUNTIME_DIR: /app/runtime/storage-migrator
       YUXI_LEGACY_STORAGE_DIR: /app/legacy-saves
       YUXI_USER_DATA_DIR: /app/user-data
@@ -462,6 +487,9 @@ services:
     environment:
       MINERU_MODEL_SOURCE: local
       VLLM_USE_V1: "1"
+      # env_file 可能包含 Browser 私钥；解析容器不需要该凭据。
+      YUXI_BROWSER_GATEWAY_PRIVATE_JWK: ""
+      YUXI_BROWSER_GATEWAY_PRIVATE_JWK_FILE: ""
     entrypoint: mineru-api
     command:
       --host 0.0.0.0

@@ -922,6 +922,7 @@ import {
 import { AUTO_PROJECT_ID } from '@/utils/projectSelection'
 import { createSingleFlight } from '@/utils/singleFlight'
 import { createThreadForContext } from '@/utils/threadCreation'
+import { bindCurrentBrowserToRun } from '@/services/browserExtensionBridge'
 import {
   FILE_TREE_SECTION,
   MESSAGE_DEBUG_SECTION,
@@ -3048,6 +3049,8 @@ const restorePendingInterruptForThread = (threadId) => {
 const resolveAgentSlugForThread = (threadId) =>
   threads.value.find((thread) => thread.id === threadId)?.agent_id || currentAgentId.value
 
+const prepareBrowserRunBinding = ({ runId }) => bindCurrentBrowserToRun(runId)
+
 const { handleStreamChunk } = useAgentStreamHandler({
   getThreadState,
   processApprovalInStream,
@@ -3090,13 +3093,20 @@ const { startRunStream, resumeActiveRunForThread, stopRunStreamSubscription } = 
     chatThreadsStore.setThreadStatus(threadId, 'loading')
   }
 })
-const { stopAllRequestStreams, cancelRequest, resumeQueuedRequests, continueQueue, steerRequest } =
-  useAgentRequestQueue({
-    getThreadState,
-    resetOnGoingConv,
-    startRunStream,
-    onStreamError: () => {}
-  })
+const {
+  markRunCreatedForCurrentPage,
+  stopAllRequestStreams,
+  cancelRequest,
+  resumeQueuedRequests,
+  continueQueue,
+  steerRequest
+} = useAgentRequestQueue({
+  getThreadState,
+  resetOnGoingConv,
+  startRunStream,
+  onStreamError: () => {},
+  onRunCreated: prepareBrowserRunBinding
+})
 
 const handleCancelQueuedRequest = async (requestId) => {
   const threadId = currentChatId.value
@@ -3389,6 +3399,7 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
       }
     }
     if (status === 'queued' || (!runId && status !== 'rejected')) {
+      markRunCreatedForCurrentPage(requestId)
       for (const msg of threadState.onGoingConv.msgChunks[requestId] || []) {
         if (msg.type === 'human') msg.delivery_status = 'queued'
       }
@@ -3421,6 +3432,7 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
         ]
       }
       threadState.pendingRequestId = requestId
+      void prepareBrowserRunBinding({ runId })
       await startRunStream(threadId, runId, 0, { requestId })
     } else {
       throw new Error('创建 run 失败：缺少 run_id')
@@ -3564,6 +3576,7 @@ const handleApprovalWithStream = async (answer) => {
     } catch (error) {
       console.warn('Failed to refresh history before resume stream:', error)
     }
+    void prepareBrowserRunBinding({ runId })
     await startRunStream(threadId, runId, '0-0')
   } catch (error) {
     if (pendingInterrupt) {

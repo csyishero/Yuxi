@@ -20,6 +20,9 @@
       <div v-if="activeTab === 'skills'" class="tab-panel">
         <SkillCardList ref="skillsRef" />
       </div>
+      <div v-if="activeTab === 'browser'" class="tab-panel">
+        <BrowserExtensionPanel ref="browserRef" />
+      </div>
       <div v-if="userStore.isAdmin && activeTab === 'mcp'" class="tab-panel">
         <McpCardList ref="mcpRef" />
       </div>
@@ -35,6 +38,7 @@ import { useRoute, useRouter } from 'vue-router'
 import ToolsCardList from '@/components/extensions/ToolsCardList.vue'
 import McpCardList from '@/components/extensions/McpCardList.vue'
 import SkillCardList from '@/components/extensions/SkillCardList.vue'
+import BrowserExtensionPanel from '@/components/extensions/BrowserExtensionPanel.vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import DataBaseView from '@/views/DataBaseView.vue'
 import { useUserStore } from '@/stores/user'
@@ -47,16 +51,19 @@ const knowledgeRef = ref(null)
 const skillsRef = ref(null)
 const mcpRef = ref(null)
 const toolsRef = ref(null)
+const browserRef = ref(null)
 
 const adminExtensionTabs = computed(() => [
   { key: 'knowledge', label: '知识库' },
   { key: 'skills', label: '技能' },
+  { key: 'browser', label: '浏览器' },
   { key: 'tools', label: '工具' },
   { key: 'mcp', label: 'MCP' }
 ])
 const userExtensionTabs = [
   { key: 'knowledge', label: '知识库' },
-  { key: 'skills', label: '技能' }
+  { key: 'skills', label: '技能' },
+  { key: 'browser', label: '浏览器' }
 ]
 const extensionTabs = computed(() =>
   userStore.isAdmin ? adminExtensionTabs.value : userExtensionTabs
@@ -92,6 +99,7 @@ const activeChildLoading = computed(() => {
     knowledge: knowledgeRef,
     tools: toolsRef,
     skills: skillsRef,
+    browser: browserRef,
     mcp: mcpRef
   }
   const child = refMap[activeTab.value]

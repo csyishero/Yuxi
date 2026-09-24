@@ -22,6 +22,7 @@ def test_filter_disabled_tools_keeps_allowed_tools_order():
         SimpleNamespace(name="present_artifacts"),
         {"name": "ask_user_question"},
         SimpleNamespace(name="install_skill"),
+        SimpleNamespace(name="browser_list_tabs"),
         SimpleNamespace(name="calculator"),
     ]
 
@@ -94,6 +95,7 @@ async def test_subagent_get_info_hides_disabled_tool_options(monkeypatch):
                         {"key": "allowed_tool", "name": "Allowed"},
                         {"key": "ask_user_question", "name": "向用户提问"},
                         {"key": "install_skill", "name": "安装技能"},
+                        {"key": "browser_snapshot", "name": "浏览器快照"},
                     ]
                 }
             },
