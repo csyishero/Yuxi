@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from langchain.tools import tool as langchain_tool
 from langchain_core.tools import ToolException
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 
 from yuxi.agents.toolkits.browser import tools as browser_tools
@@ -36,7 +37,7 @@ def test_browser_tool_schemas_never_expose_identity_fields():
 
 @pytest.mark.asyncio
 async def test_parameterless_browser_tools_keep_injected_runtime(monkeypatch):
-    """空模型会丢弃 ToolRuntime；注册后的无参工具必须保留注入参数。"""
+    """无参工具既要保留 ToolRuntime，也要能为 Run manifest 生成 JSON Schema。"""
     registered = {}
 
     def capture_tool(**kwargs):
@@ -77,7 +78,13 @@ async def test_parameterless_browser_tools_keep_injected_runtime(monkeypatch):
 
     for name in ("browser_whoami", "browser_current_device"):
         instance = registered[name]
-        assert instance.tool_call_schema.model_json_schema().get("properties") == {}
+        assert instance.args == {}
+        visible_schema = instance.tool_call_schema
+        if not isinstance(visible_schema, dict):
+            visible_schema = visible_schema.model_json_schema()
+        assert visible_schema.get("properties") == {}
+        assert instance.get_input_schema().model_json_schema()
+        assert convert_to_openai_tool(instance)["function"]["parameters"]["properties"] == {}
         assert instance._injected_args_keys == frozenset({"runtime"})
         assert await instance.ainvoke({"runtime": tool_runtime}) == name
 

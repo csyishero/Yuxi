@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -44,7 +45,7 @@ def tool(
     config_guide: str = "",
     name_or_callable: str | Callable | None = None,
     description: str | None = None,
-    args_schema: type | None = None,
+    args_schema: type | dict[str, Any] | None = None,
     return_direct: bool = False,
 ):
     """基于 langchain.tool 的拓展装饰器，同时注册元数据

@@ -31,6 +31,13 @@ from yuxi.utils import logger
 _REGISTERED = False
 _IDENTITY_ONLY_TOOL = "browser_whoami"
 _CURRENT_DEVICE_REQUIRED = "CURRENT_DEVICE_REQUIRED"
+# 空的 Pydantic 输入模型会丢弃注入的 ToolRuntime；自动推导模型又会把
+# ToolRuntime 的 Callable 字段带入 JSON Schema。显式 JSON Schema 避开两者。
+_EMPTY_BROWSER_ARGS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+}
 
 
 class BrowserListTabsInput(BaseModel):
@@ -247,14 +254,14 @@ def register_browser_gateway_tools() -> None:
             _browser_whoami,
             "browser_whoami",
             "验证并返回当前 Agent Run 的浏览器身份。身份完全来自运行上下文，不接受模型传入。",
-            None,
+            _EMPTY_BROWSER_ARGS_SCHEMA,
             "浏览器身份",
         ),
         (
             _browser_current_device,
             "browser_current_device",
             "返回当前 Agent Run 已明确绑定的浏览器设备，不会自动选择同账号的其他设备。",
-            None,
+            _EMPTY_BROWSER_ARGS_SCHEMA,
             "当前浏览器",
         ),
         (
