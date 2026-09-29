@@ -18,6 +18,7 @@ _REJECTION_TERMS = (
     "not allowed",
     "not a vlm",
     "not supported",
+    "not a multimodal" ,
     "text-only prompts",
     "unsupported",
 )
