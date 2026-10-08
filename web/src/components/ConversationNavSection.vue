@@ -289,6 +289,8 @@ const renameProject = (project) => {
 }
 
 const confirmDeleteProject = (project) => {
+  let deleteWorkdir = false
+  const isManaged = project.directory_mode === 'managed'
   Modal.confirm({
     title: `删除项目“${project.name}”？`,
     icon: null,
@@ -296,8 +298,18 @@ const confirmDeleteProject = (project) => {
     okText: '删除项目',
     okButtonProps: { danger: true },
     cancelText: '取消',
-    content: '项目中的对话会被删除，项目文件夹和其中的文件会保留。',
-    onOk: () => emit('delete-project', project.id)
+    content: () => h('div', [
+      h('p', '项目中的对话会被删除。默认保留项目文件夹和文件。'),
+      h('p', `项目目录：个人空间/${project.workdir_path}`),
+      ...(isManaged ? [h('label', { class: 'project-delete-files-option' }, [
+        h('input', {
+          type: 'checkbox',
+          onChange: (event) => { deleteWorkdir = event.target.checked }
+        }),
+        ' 同时永久删除项目文件夹和其中的全部文件'
+      ])] : [])
+    ]),
+    onOk: () => emit('delete-project', { projectId: project.id, deleteWorkdir })
   })
 }
 </script>

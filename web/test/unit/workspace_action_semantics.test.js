@@ -17,12 +17,11 @@ test('工作区上传菜单暴露展开状态和菜单语义', () => {
   assert.equal((menu.match(/role="menuitem"/g) || []).length, 2)
 })
 
-test('项目创建目录选择器包含尚未绑定的项目目录', () => {
+test('新项目自动创建专属目录，不提供已有目录选择器', () => {
   const source = readSource('../../src/components/ProjectSelectionSection.vue')
-  const pickerStart = source.indexOf('<WorkspacePathPicker')
-  const picker = source.slice(pickerStart, source.indexOf('/>', pickerStart) + 2)
-
-  assert.match(picker, /include-unbound-project-dirs/)
+  assert.doesNotMatch(source, /<WorkspacePathPicker/)
+  assert.match(source, /创建“项目名_短 ID”专属文件夹/)
+  assert.doesNotMatch(source, /从历史对话添加/)
 })
 
 test('交付物保存使用工作区路径选择器并传递目标目录', () => {

@@ -3,20 +3,22 @@ import { apiDelete, apiGet, apiPost, apiPut, buildQuery } from './base'
 export const projectApi = {
   getProjects: () => apiGet('/api/projects'),
 
-  createProject: ({ requestId, name, mode, path = null }) =>
+  createProject: ({ requestId, name }) =>
     apiPost('/api/projects', {
       request_id: requestId,
       name,
-      workdir: {
-        mode,
-        ...(mode === 'linked' && path ? { path: String(path).replace(/^\/+/, '') } : {})
-      }
+      workdir: { mode: 'managed' }
     }),
 
   renameProject: (projectId, name) => apiPut(`/api/projects/${projectId}`, { name }),
 
-  deleteProject: (projectId) => apiDelete(`/api/projects/${projectId}`),
+  deleteProject: (projectId, { deleteWorkdir = false } = {}) =>
+    apiDelete(`/api/projects/${projectId}?${buildQuery({ delete_workdir: deleteWorkdir })}`),
 
-  getHistoryCandidates: ({ query = '', limit = 20, offset = 0 } = {}) =>
-    apiGet(`/api/projects/history-candidates?${buildQuery({ q: query, limit, offset })}`)
+  getWorkdirDeletion: (projectId) => apiGet(`/api/projects/${projectId}/workdir-deletion`),
+
+  listWorkdirDeletions: () => apiGet('/api/projects/workdir-deletions'),
+
+  retryWorkdirDeletion: (projectId) =>
+    apiPost(`/api/projects/${projectId}/workdir-deletion/retry`, {})
 }

@@ -13,6 +13,7 @@ from yuxi.workspace import paths
         "projects/11111111-1111-4111-8111-111111111111",
         "projects/2026-09-02_14-35-08_a1b2c3d4",
         "projects/2026-09-02_14-35-08_a1b2c3d4-2",
+        "projects/中文项目_a1b2c3d4",
     ],
 )
 def test_normalize_managed_workdir_path_accepts_legacy_and_timestamped_names(value: str):
@@ -69,3 +70,31 @@ def test_allocate_default_user_workdir_path_appends_first_available_suffix(
     )
 
     assert result == "projects/2026-09-02_14-35-08_a1b2c3d4-3"
+
+
+def test_named_managed_workdir_avoids_existing_and_reserved_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(paths, "get_user_data_dir", lambda: tmp_path)
+    paths.ensure_user_workspace("user-1")
+    projects = paths.user_workspace_dir("user-1") / "projects"
+    projects.mkdir()
+    (projects / "客户项目_a1b2c3d4").mkdir()
+
+    result = paths.allocate_named_user_workdir_path(
+        "user-1",
+        "a1b2c3d4-e5f6-4789-8123-456789abcdef",
+        "客户项目",
+        reserved_paths={"projects/客户项目_a1b2c3d4-1"},
+    )
+
+    assert result == "projects/客户项目_a1b2c3d4-2"
+
+
+def test_named_managed_workdir_keeps_timestamp_namespace_unambiguous(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(paths, "get_user_data_dir", lambda: tmp_path)
+    result = paths.allocate_named_user_workdir_path(
+        "user-1",
+        "a1b2c3d4-e5f6-4789-8123-456789abcdef",
+        "2026-02-30_14-35-08",
+    )
+    assert result == "projects/项目-2026-02-30_14-35-08_a1b2c3d4"
+    assert paths.normalize_managed_workdir_path(result) == result

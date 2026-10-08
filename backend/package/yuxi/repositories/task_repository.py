@@ -70,6 +70,36 @@ class TaskRepository:
                 select(TaskRecord).where(*filters).order_by(TaskRecord.created_at.desc(), TaskRecord.id.desc()).limit(1)
             )
 
+    async def list_project_workdir_deletions_for_user(self, uid: str) -> list[TaskRecord]:
+        """仅返回用户每个项目最新且仍需关注的目录清理任务。"""
+        ranked = (
+            select(
+                TaskRecord.id.label("task_id"),
+                func.row_number()
+                .over(
+                    partition_by=TaskRecord.payload["project_id"].as_string(),
+                    order_by=(TaskRecord.created_at.desc(), TaskRecord.id.desc()),
+                )
+                .label("position"),
+            )
+            .where(
+                TaskRecord.type == "project_workdir_delete",
+                TaskRecord.payload["uid"].as_string() == str(uid),
+            )
+            .subquery()
+        )
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(TaskRecord)
+                .join(ranked, TaskRecord.id == ranked.c.task_id)
+                .where(
+                    ranked.c.position == 1,
+                    TaskRecord.status.in_({"pending", "running", "failed", "cancelled"}),
+                )
+                .order_by(TaskRecord.created_at.desc(), TaskRecord.id.desc())
+            )
+            return list(result.scalars().all())
+
     async def list_by_payload_values(
         self,
         *,
@@ -421,7 +451,10 @@ class TaskRepository:
                 (
                     await session.execute(
                         select(TaskRecord.id)
-                        .where(TaskRecord.status.in_(TERMINAL_TASK_STATUSES))
+                        .where(
+                            TaskRecord.status.in_(TERMINAL_TASK_STATUSES),
+                            TaskRecord.type != "project_workdir_delete",
+                        )
                         .order_by(TaskRecord.created_at.desc(), TaskRecord.id.desc())
                         .offset(max(keep, 0))
                     )
@@ -437,6 +470,7 @@ class TaskRepository:
                 delete(TaskRecord).where(
                     TaskRecord.id == task_id,
                     TaskRecord.status.in_(TERMINAL_TASK_STATUSES),
+                    TaskRecord.type != "project_workdir_delete",
                 )
             )
             return bool(result.rowcount)

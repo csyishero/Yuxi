@@ -4,6 +4,8 @@
 类型：feature
 Owner：web/src/components/AgentInputArea.vue
 
+项目新建弹窗的目录选择及历史入口由[新建项目使用专属目录](./2026-10-08-managed-project-lifecycle.md)更新；本文其余输入区布局决定继续适用。
+
 ## 问题
 
 新对话的 Project 选择作为输入框外的独立表单行出现时，割裂了“这些选项属于本次输入上下文”的认知，也让 Project 看起来像唯一且特殊的前置步骤。Project 需要属于聊天输入器的组合上下文，但不能侵入白色正文编辑框。

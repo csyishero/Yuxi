@@ -86,6 +86,11 @@ _TASK_DEFINITIONS = {
             success_function="finish_rag_evaluation_task",
             failure_function="fail_rag_evaluation_task",
         ),
+        TaskDefinition(
+            "project_workdir_delete",
+            "yuxi.services.project_service",
+            "run_project_workdir_delete",
+        ),
     )
 }
 

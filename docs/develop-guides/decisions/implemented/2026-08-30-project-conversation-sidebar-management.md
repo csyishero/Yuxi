@@ -4,6 +4,8 @@
 类型：feature
 Owner：backend/package/yuxi/services/project_service.py
 
+删除时可选择清理独占 managed 目录的规则由[新建项目使用专属目录](./2026-10-08-managed-project-lifecycle.md)更新；本文其余分组与软删除事务事实继续适用。
+
 ## 问题
 
 侧边栏只按最近时间展示 Conversation，用户无法从 Project 归属识别和管理相关对话。Project 已拥有名称、Workdir 与 Conversation 外键，但缺少重命名和删除生命周期；硬删除数据库行会破坏历史归属，删除 Workdir 又会越过 Project 只拥有业务绑定、不拥有目录字节的边界。

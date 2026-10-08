@@ -5,6 +5,7 @@ import errno
 import hashlib
 import os
 import re
+import unicodedata
 import uuid
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -24,6 +25,7 @@ WORKSPACE_AGENT_CONTEXT_FILES = {
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _MANAGED_WORKDIR_NAME_RE = re.compile(r"^(?P<timestamp>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})_[0-9a-f]{8}(?:-[1-9]\d*)?$")
+_NAMED_MANAGED_WORKDIR_RE = re.compile(r"^(.+)_([0-9a-f]{8})(?:-([1-9]\d*))?$")
 _MANAGED_WORKDIR_TIMESTAMP_FORMAT = "%Y-%m-%d_%H-%M-%S"
 WORKDIR_PROJECTS_DIR_NAME = "projects"
 
@@ -64,13 +66,45 @@ def normalize_managed_workdir_path(workdir_path: str) -> str:
     except ValueError:
         match = _MANAGED_WORKDIR_NAME_RE.fullmatch(workdir_name)
         if match is None:
-            raise ValueError(error_message) from None
+            # 时间戳样式只能按旧规则解析，不能被新项目名规则兜底接受。
+            if re.match(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_", workdir_name):
+                raise ValueError(error_message) from None
+            named_match = _NAMED_MANAGED_WORKDIR_RE.fullmatch(workdir_name)
+            if named_match is None or not _is_safe_managed_name(named_match.group(1)):
+                raise ValueError(error_message) from None
+            return pure.as_posix()
         try:
             datetime.strptime(match.group("timestamp"), _MANAGED_WORKDIR_TIMESTAMP_FORMAT)
         except ValueError:
             raise ValueError(error_message) from None
         return pure.as_posix()
     return f"{WORKDIR_PROJECTS_DIR_NAME}/{workdir_id}"
+
+
+def _is_safe_managed_name(name: str) -> bool:
+    """校验可读 managed 目录名部分。"""
+    return (
+        bool(name)
+        and name == name.strip(" .")
+        and name == unicodedata.normalize("NFC", name)
+        and len(name) <= 80
+        and all(char not in '/\\<>:"|?*' and not unicodedata.category(char).startswith("C") for char in name)
+    )
+
+
+def _managed_name_from_project_name(project_name: str) -> str:
+    """从显示名称生成安全的单层目录名。"""
+    normalized = unicodedata.normalize("NFC", project_name)
+    sanitized = "".join(
+        "-" if char in '/\\<>:"|?*' else "" if unicodedata.category(char).startswith("C") else char
+        for char in normalized
+    ).strip(" .")
+    if re.match(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", sanitized):
+        sanitized = f"项目-{sanitized}"
+    sanitized = sanitized[:80].strip(" .") or "未命名项目"
+    while len(sanitized.encode("utf-8")) > 230:
+        sanitized = sanitized[:-1].strip(" .")
+    return sanitized or "未命名项目"
 
 
 def workspace_uid_dirname(uid: str) -> str:
@@ -126,6 +160,26 @@ def allocate_default_user_workdir_path(
         name = base_name if suffix == 0 else f"{base_name}-{suffix}"
         if not _user_workspace_entry_exists(uid, name):
             return f"{WORKDIR_PROJECTS_DIR_NAME}/{name}"
+        suffix += 1
+
+
+def allocate_named_user_workdir_path(
+    uid: str, project_id: str, project_name: str, *, reserved_paths: set[str] | None = None
+) -> str:
+    """为显式 Project 分配项目名加短 ID 的独占 managed 路径。"""
+    canonical_project_id = str(uuid.UUID(str(project_id)))
+    name_part = _managed_name_from_project_name(project_name)
+    base_name = f"{name_part}_{canonical_project_id[:8]}"
+    suffix = 0
+    while True:
+        name = base_name if suffix == 0 else f"{base_name}-{suffix}"
+        path = f"{WORKDIR_PROJECTS_DIR_NAME}/{name}"
+        if (
+            len(name.encode("utf-8")) <= 255
+            and path not in (reserved_paths or set())
+            and not _user_workspace_entry_exists(uid, name)
+        ):
+            return path
         suffix += 1
 
 

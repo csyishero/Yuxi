@@ -1,7 +1,7 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed, provide, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, provide, watch, h } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
-import { message } from 'ant-design-vue'
+import { message, notification } from 'ant-design-vue'
 import {
   BarChart3,
   ClipboardList,
@@ -53,6 +53,122 @@ const settingsInitialTab = ref('')
 const { sidebarCollapsed } = storeToRefs(chatUIStore)
 const conversationSearchOpen = ref(false)
 const projectPendingId = ref(null)
+const workdirDeletionTimers = new Map()
+let workdirDeletionEpoch = 0
+let workdirDeletionDiscoveryTimer = null
+const workdirDeletionStorageKey = (uid) => `yuxi:project-workdir-deletions:${uid}`
+
+const pendingWorkdirDeletions = (uid) => {
+  try {
+    const ids = JSON.parse(localStorage.getItem(workdirDeletionStorageKey(uid)) || '[]')
+    return Array.isArray(ids) ? ids : []
+  } catch {
+    return []
+  }
+}
+
+const savePendingWorkdirDeletions = (uid, ids) => {
+  try {
+    localStorage.setItem(workdirDeletionStorageKey(uid), JSON.stringify(ids))
+  } catch {
+    // 存储不可用时，本页仍继续跟踪清理结果。
+  }
+}
+
+const stopTrackingWorkdirDeletion = (uid, projectId) => {
+  clearTimeout(workdirDeletionTimers.get(projectId))
+  workdirDeletionTimers.delete(projectId)
+  savePendingWorkdirDeletions(uid, pendingWorkdirDeletions(uid).filter((id) => id !== projectId))
+}
+
+const trackWorkdirDeletion = (uid, projectId) => {
+  if (workdirDeletionTimers.has(projectId)) return
+  const epoch = workdirDeletionEpoch
+  const ids = pendingWorkdirDeletions(uid)
+  if (!ids.includes(projectId)) savePendingWorkdirDeletions(uid, [...ids, projectId])
+  const poll = async () => {
+    try {
+      const result = await projectApi.getWorkdirDeletion(projectId)
+      if (epoch !== workdirDeletionEpoch || userStore.uid !== uid) return
+      if (result.status === 'success') {
+        stopTrackingWorkdirDeletion(uid, projectId)
+        message.success('项目文件夹及文件已删除')
+        return
+      }
+      if (result.status === 'failed' || result.status === 'cancelled') {
+        clearTimeout(workdirDeletionTimers.get(projectId))
+        workdirDeletionTimers.delete(projectId)
+        const key = `project-workdir-delete-${projectId}`
+        notification.error({
+          key,
+          message: '项目文件夹清理失败',
+          description: '项目和对话已删除，文件可能仍在原目录。',
+          duration: 0,
+          btn: () => h('a', {
+            onClick: async () => {
+              if (epoch !== workdirDeletionEpoch || userStore.uid !== uid) return
+              try {
+                await projectApi.retryWorkdirDeletion(projectId)
+                if (epoch !== workdirDeletionEpoch || userStore.uid !== uid) return
+                notification.close(key)
+                trackWorkdirDeletion(uid, projectId)
+              } catch (error) {
+                if (epoch === workdirDeletionEpoch && userStore.uid === uid) {
+                  message.error(error?.message || '重试清理失败')
+                }
+              }
+            }
+          }, '重试清理')
+        })
+        return
+      }
+    } catch (error) {
+      if (epoch !== workdirDeletionEpoch || userStore.uid !== uid) return
+      if (error?.status === 404) {
+        stopTrackingWorkdirDeletion(uid, projectId)
+        notification.error({
+          message: '无法查询项目文件夹清理结果',
+          description: '清理记录不存在，请联系管理员检查文件夹。',
+          duration: 0
+        })
+        return
+      }
+      // 网络故障时保留待查询记录，恢复连接后继续展示最终结果。
+    }
+    if (epoch !== workdirDeletionEpoch || userStore.uid !== uid) return
+    workdirDeletionTimers.set(projectId, setTimeout(poll, 4000))
+  }
+  workdirDeletionTimers.set(projectId, setTimeout(poll, 1500))
+}
+
+const discoverWorkdirDeletions = async (uid, epoch) => {
+  try {
+    const tasks = await projectApi.listWorkdirDeletions()
+    if (epoch !== workdirDeletionEpoch || userStore.uid !== uid) return
+    tasks.filter((task) => task.status !== 'success')
+      .forEach((task) => trackWorkdirDeletion(uid, task.project_id))
+  } catch {
+    // 连接恢复后再查，避免丢失跨设备或响应丢失的清理任务。
+  } finally {
+    if (epoch === workdirDeletionEpoch && userStore.uid === uid) {
+      workdirDeletionDiscoveryTimer = setTimeout(() => discoverWorkdirDeletions(uid, epoch), 30000)
+    }
+  }
+}
+
+watch(() => userStore.uid, (uid, previousUid) => {
+  if (previousUid && previousUid !== uid) {
+    workdirDeletionEpoch += 1
+    for (const timer of workdirDeletionTimers.values()) clearTimeout(timer)
+    workdirDeletionTimers.clear()
+  }
+  clearTimeout(workdirDeletionDiscoveryTimer)
+  workdirDeletionDiscoveryTimer = null
+  if (uid) {
+    pendingWorkdirDeletions(uid).forEach((projectId) => trackWorkdirDeletion(uid, projectId))
+    void discoverWorkdirDeletions(uid, workdirDeletionEpoch)
+  }
+}, { immediate: true })
 
 // Provide settings modal methods to child components
 const openSettingsModal = (tab) => {
@@ -118,6 +234,10 @@ const startThreadStatusSync = () => {
 }
 
 onUnmounted(() => {
+  workdirDeletionEpoch += 1
+  clearTimeout(workdirDeletionDiscoveryTimer)
+  for (const timer of workdirDeletionTimers.values()) clearTimeout(timer)
+  workdirDeletionTimers.clear()
   window.removeEventListener('keydown', handleGlobalKeydown)
   if (threadStatusSyncTimer) {
     clearInterval(threadStatusSyncTimer)
@@ -304,19 +424,47 @@ const handleRenameProject = async ({ projectId, name }) => {
   }
 }
 
-const handleDeleteProject = async (projectId) => {
+const removeDeletedProjectFromView = async (projectId) => {
+  const removedThreadIds = chatThreadsStore.removeThreadsByProject(projectId)
+  projectsStore.removeProject(projectId)
+  if (removedThreadIds.includes(route.params.thread_id)) {
+    await router.replace({ name: 'AgentComp' })
+  }
+}
+
+const handleDeleteProject = async ({ projectId, deleteWorkdir = false }) => {
   if (!projectId || projectPendingId.value) return
   projectPendingId.value = projectId
   try {
-    await projectApi.deleteProject(projectId)
-    const removedThreadIds = chatThreadsStore.removeThreadsByProject(projectId)
-    projectsStore.removeProject(projectId)
-    if (removedThreadIds.includes(route.params.thread_id)) {
-      await router.replace({ name: 'AgentComp' })
+    const result = await projectApi.deleteProject(projectId, { deleteWorkdir })
+    await removeDeletedProjectFromView(projectId)
+    if (result.workdir_delete_task_id) {
+      trackWorkdirDeletion(userStore.uid, projectId)
+      message.info('项目和对话已删除，正在清理项目文件夹')
+    } else {
+      message.success('项目及其中对话已删除，项目文件夹已保留')
     }
-    message.success('项目及其中对话已删除，项目文件夹已保留')
   } catch (error) {
-    message.error(error?.message || '删除项目失败')
+    if (deleteWorkdir) {
+      try {
+        const tasks = await projectApi.listWorkdirDeletions()
+        if (tasks.some((task) => task.project_id === projectId)) {
+          await removeDeletedProjectFromView(projectId)
+          trackWorkdirDeletion(userStore.uid, projectId)
+          message.info('项目已删除，正在确认文件夹清理结果')
+          return
+        }
+      } catch {
+        // 仍无法连接服务时保留页面状态，重新登录会恢复任务提醒。
+      }
+    }
+    if (deleteWorkdir && error?.status === 409) {
+      message.error('文件夹仍被其他项目或任务使用，项目未删除')
+    } else if (deleteWorkdir && error?.status === 422) {
+      message.error('此项目关联已有目录，请取消删除文件夹选项')
+    } else {
+      message.error(error?.message || '删除项目失败')
+    }
   } finally {
     projectPendingId.value = null
   }

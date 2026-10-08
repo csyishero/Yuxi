@@ -8,9 +8,11 @@ from server.utils.auth_middleware import get_db, get_required_user
 from yuxi.services.project_service import (
     create_project_view,
     delete_project_view,
-    list_history_candidates_view,
+    get_project_workdir_deletion_view,
+    list_project_workdir_deletions_view,
     list_projects_view,
     rename_project_view,
+    retry_project_workdir_deletion_view,
 )
 from yuxi.storage.postgres.models_business import User
 
@@ -59,7 +61,7 @@ async def create_project(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """独立创建 managed 或 linked Project。"""
+    """创建拥有专属目录的 Project。"""
     return await create_project_view(
         uid=str(current_user.uid),
         request_id=payload.request_id,
@@ -70,16 +72,12 @@ async def create_project(
     )
 
 
-@projects.get("/history-candidates")
-async def list_history_candidates(
-    q: str = Query("", max_length=200),
-    limit: int = Query(20, ge=1, le=100),
-    offset: int = Query(0, ge=0),
+@projects.get("/workdir-deletions")
+async def list_project_workdir_deletions(
     current_user: User = Depends(get_required_user),
-    db: AsyncSession = Depends(get_db),
 ):
-    """列出可作为目录快捷选择的历史 Conversation。"""
-    return await list_history_candidates_view(uid=str(current_user.uid), db=db, query=q, limit=limit, offset=offset)
+    """恢复当前用户的项目文件夹清理状态。"""
+    return await list_project_workdir_deletions_view(uid=str(current_user.uid))
 
 
 @projects.put("/{project_id}")
@@ -96,8 +94,29 @@ async def rename_project(
 @projects.delete("/{project_id}")
 async def delete_project(
     project_id: str,
+    delete_workdir: bool = Query(False),
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """软删除当前用户的 Project 及其中对话。"""
-    return await delete_project_view(uid=str(current_user.uid), project_id=project_id, db=db)
+    """删除 Project；显式要求时异步清理其专属目录。"""
+    return await delete_project_view(
+        uid=str(current_user.uid), project_id=project_id, db=db, delete_workdir=delete_workdir
+    )
+
+
+@projects.get("/{project_id}/workdir-deletion")
+async def get_project_workdir_deletion(
+    project_id: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_project_workdir_deletion_view(uid=str(current_user.uid), project_id=project_id, db=db)
+
+
+@projects.post("/{project_id}/workdir-deletion/retry")
+async def retry_project_workdir_deletion(
+    project_id: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await retry_project_workdir_deletion_view(uid=str(current_user.uid), project_id=project_id, db=db)

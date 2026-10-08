@@ -401,6 +401,48 @@ async def test_heartbeat_error_cancels_handler_as_lost_lease(monkeypatch):
     assert repo.finish_calls == []
 
 
+async def test_heartbeat_keeps_lease_until_cancelled_handler_finishes(monkeypatch):
+    record = make_record(timeout_seconds=1)
+    repo = FakeRepo(record)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+    renew_count = 0
+    original_renew = repo.renew_lease
+
+    async def counted_renew(*args, **kwargs):
+        nonlocal renew_count
+        renew_count += 1
+        return await original_renew(*args, **kwargs)
+
+    async def handler(_context: TaskContext):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release.wait()
+            raise
+
+    repo.renew_lease = counted_renew
+    monkeypatch.setattr(task_service, "TASK_HEARTBEAT_SECONDS", 0.01)
+    monkeypatch.setattr(task_service, "TaskRepository", lambda: repo)
+    monkeypatch.setattr(task_service, "get_task_definition", lambda *_args: FakeDefinition(handler))
+
+    job = asyncio.create_task(process_task({"worker_id": "worker-1"}, record.id))
+    try:
+        await started.wait()
+        record.cancel_requested = 1
+        await asyncio.wait_for(cancelled.wait(), timeout=0.5)
+        await asyncio.sleep(0.04)
+        assert renew_count >= 2
+        assert record.status == "running"
+    finally:
+        release.set()
+    await job
+    assert record.status == "cancelled"
+
+
 async def test_parent_job_cancellation_waits_for_handler_exit(monkeypatch):
     record = make_record()
     repo = FakeRepo(record)

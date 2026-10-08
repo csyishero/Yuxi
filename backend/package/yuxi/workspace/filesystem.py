@@ -313,6 +313,25 @@ class Workspace:
         finally:
             os.close(parent_fd)
 
+    def delete_project_workdir(self, path: str) -> None:
+        """幂等清理 managed 项目目录；只忽略目标目录本身缺失。"""
+        self._require_within(path, "/", allow_root=False)
+        base, parts = self._resolve_path(path)
+        try:
+            parent_fd = self._open_directory(base, parts[:-1])
+        except FileNotFoundError:
+            return
+        try:
+            try:
+                target = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            if not stat.S_ISDIR(target.st_mode):
+                raise PermissionError("project workdir must be a real directory")
+            self._remove_entry(parent_fd, parts[-1], allow_special_entries=True)
+        finally:
+            os.close(parent_fd)
+
     def _open_regular_file(self, path: str, *, writable: bool):
         """固定父目录与最终普通文件，统一拒绝 symlink、目录和特殊文件。"""
         base, parts = self._resolve_path(path)
@@ -361,19 +380,19 @@ class Workspace:
             raise
 
     @classmethod
-    def _remove_entry(cls, parent_fd: int, name: str) -> None:
+    def _remove_entry(cls, parent_fd: int, name: str, *, allow_special_entries: bool = False) -> None:
         item_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if stat.S_ISLNK(item_stat.st_mode):
-            raise PermissionError("symlink paths are not allowed")
         if not stat.S_ISDIR(item_stat.st_mode):
-            if not stat.S_ISREG(item_stat.st_mode):
+            if not allow_special_entries and stat.S_ISLNK(item_stat.st_mode):
+                raise PermissionError("symlink paths are not allowed")
+            if not allow_special_entries and not stat.S_ISREG(item_stat.st_mode):
                 raise PermissionError("only regular files and directories can be deleted")
             os.unlink(name, dir_fd=parent_fd)
             return
         child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
         try:
             for child_name in os.listdir(child_fd):
-                cls._remove_entry(child_fd, child_name)
+                cls._remove_entry(child_fd, child_name, allow_special_entries=allow_special_entries)
         finally:
             os.close(child_fd)
         os.rmdir(name, dir_fd=parent_fd)

@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
-import threading
 import uuid
 
 import pytest
 import pytest_asyncio
-from fastapi import HTTPException
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from test import live_api_cleanup as cleanup_module
 from test.live_api_cleanup import (
     delete_e2e_run_rows,
     delete_test_conversation_resources,
@@ -24,7 +20,6 @@ from test.live_api_cleanup import (
     validate_test_runs_terminal,
     validate_test_workdirs_exclusive,
 )
-from yuxi.services import project_service
 from yuxi.storage.postgres.models_business import (
     AgentRun,
     AgentRunRequest,
@@ -36,7 +31,6 @@ from yuxi.storage.postgres.models_business import (
     ToolCall,
     User,
 )
-from yuxi.workspace.paths import ensure_bound_user_workdir, user_workdir_host_dir
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -491,112 +485,6 @@ async def test_run_guard_rejects_nonterminal_run(cleanup_database):
             await validate_test_runs_terminal({target["thread_id"]})
     finally:
         await _cleanup_seed(session_factory, [target])
-
-
-async def test_resource_cleanup_lock_makes_overlapping_linked_project_revalidate(cleanup_database, monkeypatch):
-    """绑定待清理子目录的 linked Project 必须在删除后重新校验。"""
-
-    session_factory = cleanup_database
-    uid = f"pytest-lock-user-{uuid.uuid4()}"
-    target_thread_id = f"pytest-lock-target-{uuid.uuid4()}"
-    neighbor_thread_id = f"pytest-lock-neighbor-{uuid.uuid4()}"
-    target_project_id = str(uuid.uuid4())
-    neighbor_project_id = str(uuid.uuid4())
-    workdir_path = f"projects/{target_project_id}"
-    linked_workdir_path = f"{workdir_path}/child"
-    ensure_bound_user_workdir(uid, workdir_path)
-    user_workdir_host_dir(uid, workdir_path).joinpath("child").mkdir()
-    async with session_factory() as db:
-        db.add(User(username=uid, uid=uid, password_hash="test"))
-        await db.flush()
-        db.add(
-            Project(
-                id=target_project_id,
-                uid=uid,
-                selection_status="implicit",
-                workdir_path=workdir_path,
-                directory_mode="managed",
-            )
-        )
-        conversation = Conversation(
-            thread_id=target_thread_id,
-            uid=uid,
-            project_id=target_project_id,
-            agent_id="main",
-            title=make_test_conversation_title("workdir-lock"),
-            status="deleted",
-            extra_metadata=make_test_conversation_metadata("workdir-lock"),
-        )
-        db.add(conversation)
-        await db.commit()
-        conversation_id = conversation.id
-
-    creation_result: dict[str, object] = {}
-    lock_attempted = threading.Event()
-    worker_holder: dict[str, threading.Thread] = {}
-    original_lock = project_service._lock_project_workdir_changes
-    original_remove = cleanup_module.remove_test_workdir
-
-    async def observed_lock(**kwargs) -> None:
-        lock_attempted.set()
-        await original_lock(**kwargs)
-
-    monkeypatch.setattr(project_service, "_lock_project_workdir_changes", observed_lock)
-
-    def remove_while_project_waits(_uid: str, _workdir_path: str) -> None:
-        """启动真实 Project 创建，并在其等待路径锁时删除目录。"""
-
-        async def create_linked_project() -> None:
-            engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
-            creator_sessions = async_sessionmaker(engine, expire_on_commit=False)
-            try:
-                async with creator_sessions() as db:
-                    try:
-                        await project_service.create_project_view(
-                            uid=uid,
-                            request_id=neighbor_project_id,
-                            name="neighbor",
-                            directory_mode="linked",
-                            workdir_path=linked_workdir_path,
-                            db=db,
-                        )
-                    except HTTPException as exc:
-                        creation_result["status_code"] = exc.status_code
-                    else:
-                        creation_result["status_code"] = 201
-            finally:
-                await engine.dispose()
-
-        worker = threading.Thread(target=lambda: asyncio.run(create_linked_project()))
-        worker_holder["worker"] = worker
-        worker.start()
-        assert lock_attempted.wait(timeout=3)
-        original_remove(_uid, _workdir_path)
-
-    monkeypatch.setattr("test.live_api_cleanup.remove_test_workdir", remove_while_project_waits)
-    monkeypatch.setattr("test.live_api_cleanup.remove_e2e_thread_storage", lambda _thread_id: None)
-
-    try:
-        await delete_test_conversation_resources(
-            {(uid, workdir_path): {target_project_id}},
-            {target_thread_id},
-            {target_project_id},
-        )
-        worker_holder["worker"].join(timeout=5)
-        assert not worker_holder["worker"].is_alive()
-        assert creation_result == {"status_code": 404}
-
-        async with session_factory() as db:
-            assert await db.get(Conversation, conversation_id) is None
-            assert await db.get(Project, neighbor_project_id) is None
-    finally:
-        async with session_factory() as db:
-            await db.execute(
-                delete(Conversation).where(Conversation.thread_id.in_([target_thread_id, neighbor_thread_id]))
-            )
-            await db.execute(delete(Project).where(Project.id.in_([target_project_id, neighbor_project_id])))
-            await db.execute(delete(User).where(User.uid == uid))
-            await db.commit()
 
 
 async def test_resource_cleanup_reports_file_failure_after_database_commit(cleanup_database, monkeypatch):

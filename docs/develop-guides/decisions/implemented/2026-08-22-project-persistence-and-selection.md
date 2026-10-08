@@ -4,6 +4,8 @@
 类型：feature
 Owner：backend/package/yuxi/services/project_service.py
 
+手动新建目录、历史入口和可选目录清理由[新建项目使用专属目录](./2026-10-08-managed-project-lifecycle.md)更新；本文其余 Project 绑定与 Conversation 事实继续适用。
+
 ## 问题
 
 当前 Conversation 直接保存 `workdir_path`，Web 新建对话总是自动创建匿名 `projects/<uuid>`。该模型可以让多个 Conversation 共享路径，但无法表达可独立创建和命名的 Project、可选择列表、从历史对话复用项目，以及 Project 到用户所选 Workspace 目录的稳定归属。继续把名称和状态放入 Conversation metadata 会让同一 Workdir 的多个 Conversation 形成可漂移副本；让首条 Run 携带 Project 又会与附件、Viewer、Resume 和 SubAgent 建立第二套绑定协议。

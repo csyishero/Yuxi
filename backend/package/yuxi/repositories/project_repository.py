@@ -2,11 +2,11 @@
 
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yuxi.repositories.conversation_repository import INVOCATION_CONVERSATION_SOURCES
-from yuxi.storage.postgres.models_business import Conversation, Project
+from yuxi.storage.postgres.models_business import AgentRun, AgentRunRequest, Conversation, Project
+from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES
 
 
 class ProjectRepository:
@@ -82,24 +82,55 @@ class ProjectRepository:
         )
         return list(result.scalars().all())
 
-    async def list_history_candidates(self, uid: str) -> list[tuple[Conversation, str]]:
-        """列出可解析实际 Workdir 的普通历史对话。"""
-        result = await self.db.execute(
-            select(Conversation, Project.workdir_path)
-            .join(Project, (Project.uid == Conversation.uid) & (Project.id == Conversation.project_id))
-            .where(
-                Conversation.uid == str(uid),
-                Conversation.status == "active",
-                Project.status == "active",
-                (
-                    Conversation.extra_metadata.is_(None)
-                    | Conversation.extra_metadata["source"].as_string().is_(None)
-                    | Conversation.extra_metadata["source"].as_string().notin_(INVOCATION_CONVERSATION_SOURCES)
-                ),
-            )
-            .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
+    async def list_all_workdir_paths_for_user(self, uid: str) -> set[str]:
+        """为新建目录避开已登记但尚未物化的 Project 路径。"""
+        result = await self.db.scalars(select(Project.workdir_path).where(Project.uid == str(uid)))
+        return set(result.all())
+
+    async def list_active_workdir_paths_for_user(self, uid: str) -> set[str]:
+        """返回当前仍能读取目录的 Project 路径。"""
+        result = await self.db.scalars(
+            select(Project.workdir_path).where(Project.uid == str(uid), Project.status == "active")
         )
-        return list(result.all())
+        return set(result.all())
+
+    async def has_other_workdir_overlap(self, project: Project) -> bool:
+        """连已删除记录也纳入检查，避免清理曾被其他项目共享的目录。"""
+        path = project.workdir_path
+        paths = (
+            await self.db.scalars(
+                select(Project.workdir_path).where(Project.uid == project.uid, Project.id != project.id)
+            )
+        ).all()
+        return any(other == path or other.startswith(f"{path}/") or path.startswith(f"{other}/") for other in paths)
+
+    async def has_active_project_work(self, project: Project) -> bool:
+        """清理前阻止未结束的 Run、运行时清理和排队请求。"""
+        conversations = select(Conversation.id).where(
+            Conversation.uid == project.uid, Conversation.project_id == project.id
+        )
+        threads = select(Conversation.thread_id).where(
+            Conversation.uid == project.uid, Conversation.project_id == project.id
+        )
+        active_run = await self.db.scalar(
+            select(
+                exists().where(
+                    AgentRun.uid == project.uid,
+                    or_(AgentRun.conversation_id.in_(conversations), AgentRun.conversation_thread_id.in_(threads)),
+                    or_(AgentRun.status.notin_(TERMINAL_RUN_STATUSES), AgentRun.runtime_cleanup_pending.is_(True)),
+                )
+            )
+        )
+        queued_request = await self.db.scalar(
+            select(
+                exists().where(
+                    AgentRunRequest.uid == project.uid,
+                    AgentRunRequest.conversation_thread_id.in_(threads),
+                    AgentRunRequest.status == "queued",
+                )
+            )
+        )
+        return bool(active_run or queued_request)
 
     async def soft_delete_with_conversations(self, project: Project, *, deleted_at: datetime) -> int:
         """在调用方事务内软删除 Project 及其全部 Conversation。"""

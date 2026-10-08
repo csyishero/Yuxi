@@ -370,7 +370,7 @@ test('四个 API 模块复用查询参数边界并保持 endpoint 问号语义',
     const { getWorkspaceKnowledgeTree } = await server.ssrLoadModule('/src/apis/workspace_api.js')
     const { documentApi } = await server.ssrLoadModule('/src/apis/knowledge_api.js')
 
-    await projectApi.getHistoryCandidates({ query: '', limit: 0, offset: 0 })
+    await projectApi.deleteProject('project-1')
     await searchViewerFiles('thread-1', '')
     await getWorkspaceKnowledgeTree('kb-1', {
       page: 0,
@@ -388,7 +388,7 @@ test('四个 API 模块复用查询参数边界并保持 endpoint 问号语义',
     await documentApi.documentExists('kb-1')
 
     assert.deepEqual(requests, [
-      '/api/projects/history-candidates?limit=0&offset=0',
+      '/api/projects/project-1?delete_workdir=false',
       '/api/viewer/filesystem/search?thread_id=thread-1',
       '/api/workspace/knowledge/tree?kb_id=kb-1&page=0&page_size=false&recursive=false&files_only=false',
       '/api/knowledge/databases/kb-1/documents?page=0&page_size=false',
@@ -419,11 +419,10 @@ test('Project 与 Workspace API 按 xhome 契约构造请求', async () => {
     await projectApi.getProjects()
     await projectApi.createProject({
       requestId: 'request-1',
-      name: '客户交付',
-      mode: 'linked',
-      path: '/clients/acme'
+      name: '客户交付'
     })
-    await projectApi.getHistoryCandidates({ query: '交付', limit: 10, offset: 20 })
+    await projectApi.deleteProject('project-1', { deleteWorkdir: true })
+    await projectApi.listWorkdirDeletions()
     await getWorkspaceTree('/projects')
     await getWorkspaceTree('/projects', false, false, true)
     await createWorkspaceDirectory('/projects', '客户交付')
@@ -432,21 +431,22 @@ test('Project 与 Workspace API 按 xhome 契约构造请求', async () => {
     assert.deepEqual(JSON.parse(requests[1].options.body), {
       request_id: 'request-1',
       name: '客户交付',
-      workdir: { mode: 'linked', path: 'clients/acme' }
+      workdir: { mode: 'managed' }
     })
     assert.equal(
       requests[2].url,
-      '/api/projects/history-candidates?q=%E4%BA%A4%E4%BB%98&limit=10&offset=20'
+      '/api/projects/project-1?delete_workdir=true'
     )
+    assert.equal(requests[3].url, '/api/projects/workdir-deletions')
     assert.equal(
-      requests[3].url,
+      requests[4].url,
       '/api/workspace/tree?path=%2Fprojects&recursive=false&files_only=false'
     )
     assert.equal(
-      requests[4].url,
+      requests[5].url,
       '/api/workspace/tree?path=%2Fprojects&recursive=false&files_only=false&include_unbound_project_dirs=true'
     )
-    assert.deepEqual(JSON.parse(requests[5].options.body), {
+    assert.deepEqual(JSON.parse(requests[6].options.body), {
       parent_path: '/projects',
       name: '客户交付'
     })

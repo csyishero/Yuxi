@@ -3,39 +3,14 @@ from __future__ import annotations
 import uuid
 
 import pytest
-import pytest_asyncio
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
-
-
-@pytest_asyncio.fixture()
-async def scheduled_project_directory(test_client, standard_user):
-    """为定时任务 API 用例创建并清理真实 linked Project 目录。"""
-    headers = standard_user["headers"]
-    directory_name = f"pytest-scheduled-{uuid.uuid4().hex[:10]}"
-    response = await test_client.post(
-        "/api/workspace/directory",
-        headers=headers,
-        json={"parent_path": "/", "name": directory_name},
-    )
-    assert response.status_code == 200, response.text
-    try:
-        yield directory_name
-    finally:
-        response = await test_client.request(
-            "DELETE",
-            "/api/workspace/file",
-            headers=headers,
-            params={"path": directory_name},
-        )
-        assert response.status_code in {200, 404}, response.text
 
 
 async def test_scheduled_task_crud_persists_and_enforces_owner_scope(
     test_client,
     admin_headers,
     standard_user,
-    scheduled_project_directory,
 ):
     """真实 HTTP CRUD 持久化配置，并对其他用户隐藏任务。"""
     owner_headers = standard_user["headers"]
@@ -50,7 +25,7 @@ async def test_scheduled_task_crud_persists_and_enforces_owner_scope(
         json={
             "request_id": f"pytest-scheduled-project-{uuid.uuid4()}",
             "name": "Scheduled API Project",
-            "workdir": {"mode": "linked", "path": scheduled_project_directory},
+            "workdir": {"mode": "managed"},
         },
     )
     assert project_response.status_code == 200, project_response.text

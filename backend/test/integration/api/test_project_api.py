@@ -163,23 +163,38 @@ async def test_default_thread_creates_implicit_project_with_exclusive_binding(te
     assert user_workdir_host_dir(str(row["uid"]), str(row["workdir_path"])).is_dir()
 
 
-async def test_linked_project_and_thread_selection_keep_directory_bytes(
+async def test_new_project_uses_independent_directory_and_rejects_linked_creation(
     test_client,
     admin_headers,
     linked_directory,
 ):
     directory_name = linked_directory
+    linked_request = await test_client.post(
+        "/api/projects",
+        headers=admin_headers,
+        json={
+            "request_id": make_test_resource_id("linked-rejected"),
+            "name": "Linked",
+            "workdir": {"mode": "linked", "path": directory_name},
+        },
+    )
+    assert linked_request.status_code == 422, linked_request.text
+
     project_response = await test_client.post(
         "/api/projects",
         headers=admin_headers,
         json={
             "request_id": make_test_resource_id("linked-project"),
-            "name": "Linked",
-            "workdir": {"mode": "linked", "path": directory_name},
+            "name": "中文新项目",
+            "workdir": {"mode": "managed"},
         },
     )
     assert project_response.status_code == 200, project_response.text
     project = project_response.json()
+    assert project["directory_mode"] == "managed"
+    assert re.fullmatch(rf"projects/中文新项目_{project['id'][:8]}(?:-[1-9]\d*)?", project["workdir_path"])
+    assert project["workdir_path"] != directory_name
+    assert user_workdir_host_dir(project["uid"], project["workdir_path"]).is_dir()
 
     thread_response = await test_client.post(
         "/api/chat/thread",
@@ -194,7 +209,7 @@ async def test_linked_project_and_thread_selection_keep_directory_bytes(
     assert thread_response.status_code == 200, thread_response.text
     thread = thread_response.json()
     assert thread["project_id"] == project["id"]
-    assert thread["workdir_path"] == directory_name
+    assert thread["workdir_path"] == project["workdir_path"]
 
     rebind = await test_client.put(
         f"/api/chat/thread/{thread['id']}",
@@ -222,9 +237,7 @@ async def test_linked_project_and_thread_selection_keep_directory_bytes(
             "workdir": {"mode": "linked", "path": directory_name},
         },
     )
-    assert duplicate.status_code == 200, duplicate.text
-    assert duplicate.json()["id"] != project["id"]
-    assert duplicate.json()["workdir_path"] == directory_name
+    assert duplicate.status_code == 422, duplicate.text
 
     invalid_paths = ["/", "../outside", f"{directory_name}/missing"]
     for path in invalid_paths:
@@ -237,13 +250,134 @@ async def test_linked_project_and_thread_selection_keep_directory_bytes(
                 "workdir": {"mode": "linked", "path": path},
             },
         )
-        assert invalid.status_code in {400, 404}, (path, invalid.text)
+        assert invalid.status_code == 422, (path, invalid.text)
+
+
+async def test_existing_linked_project_remains_visible_but_cannot_delete_directory(
+    test_client,
+    admin_headers,
+    linked_directory,
+):
+    me = await test_client.get("/api/auth/me", headers=admin_headers)
+    assert me.status_code == 200, me.text
+    uid = str(me.json()["uid"])
+    project_id = str(uuid.uuid4())
+    async with _database_connection() as db:
+        await db.execute(
+            "INSERT INTO projects (id, uid, name, selection_status, workdir_path, directory_mode, status) "
+            "VALUES ($1, $2, 'Old linked', 'selectable', $3, 'linked', 'active')",
+            project_id,
+            uid,
+            linked_directory,
+        )
+    try:
+        projects = await test_client.get("/api/projects", headers=admin_headers)
+        assert projects.status_code == 200, projects.text
+        assert any(item["id"] == project_id for item in projects.json())
+
+        marker = user_workdir_host_dir(uid, linked_directory) / "legacy-linked.txt"
+        marker.write_text("legacy linked file", encoding="utf-8")
+        thread = await test_client.post(
+            "/api/chat/thread",
+            headers=admin_headers,
+            json={
+                "agent_id": await _default_agent_slug(test_client, admin_headers),
+                "project_id": project_id,
+                "title": make_test_conversation_title("legacy-linked"),
+                "metadata": make_test_conversation_metadata("legacy-linked"),
+            },
+        )
+        assert thread.status_code == 200, thread.text
+        assert thread.json()["workdir_path"] == linked_directory
+        opened = await test_client.get(
+            "/api/workspace/file", headers=admin_headers, params={"path": f"/{linked_directory}/legacy-linked.txt"}
+        )
+        assert opened.status_code == 200, opened.text
+        assert "legacy linked file" in opened.text
+
+        forbidden = await test_client.delete(
+            f"/api/projects/{project_id}", headers=admin_headers, params={"delete_workdir": True}
+        )
+        assert forbidden.status_code == 422, forbidden.text
+
+        deleted = await test_client.delete(f"/api/projects/{project_id}", headers=admin_headers)
+        assert deleted.status_code == 200, deleted.text
+        directory = await test_client.get(
+            "/api/workspace/tree", headers=admin_headers, params={"path": f"/{linked_directory}"}
+        )
+        assert directory.status_code == 200, directory.text
+    finally:
+        async with _database_connection() as db:
+            await db.execute("DELETE FROM conversations WHERE project_id = $1", project_id)
+            await db.execute("DELETE FROM projects WHERE id = $1", project_id)
+
+
+async def test_explicit_managed_delete_persists_task_and_removes_only_its_directory(
+    test_client,
+    admin_headers,
+):
+    created = await test_client.post(
+        "/api/projects",
+        headers=admin_headers,
+        json={
+            "request_id": make_test_resource_id("managed-delete"),
+            "name": "清理专属目录",
+            "workdir": {"mode": "managed"},
+        },
+    )
+    assert created.status_code == 200, created.text
+    project = created.json()
+    project_id = project["id"]
+    path = project["workdir_path"]
+    directory = user_workdir_host_dir(project["uid"], path)
+    (directory / "marker.txt").write_text("delete me", encoding="utf-8")
+    sibling = directory.parent / f"keep-{uuid.uuid4().hex[:8]}"
+    sibling.mkdir()
+    (sibling / "marker.txt").write_text("keep", encoding="utf-8")
+    task_id = None
+    terminal_status = None
+    try:
+        deleted = await test_client.delete(
+            f"/api/projects/{project_id}", headers=admin_headers, params={"delete_workdir": True}
+        )
+        assert deleted.status_code == 200, deleted.text
+        task_id = deleted.json()["workdir_delete_task_id"]
+        assert task_id
+
+        recovered = await test_client.get("/api/projects/workdir-deletions", headers=admin_headers)
+        assert recovered.status_code == 200, recovered.text
+        assert any(item["project_id"] == project_id and item["task_id"] == task_id for item in recovered.json())
+
+        for _ in range(150):
+            status = await test_client.get(f"/api/projects/{project_id}/workdir-deletion", headers=admin_headers)
+            assert status.status_code == 200, status.text
+            assert status.json()["task_id"] == task_id
+            if status.json()["status"] in {"success", "failed", "cancelled"}:
+                terminal_status = status.json()["status"]
+                break
+            await asyncio.sleep(0.2)
+        assert status.json()["status"] == "success", status.text
+        assert not directory.exists()
+        assert (sibling / "marker.txt").read_text(encoding="utf-8") == "keep"
+    finally:
+        if task_id and terminal_status is not None:
+            async with _database_connection() as db:
+                await db.execute("DELETE FROM tasks WHERE id = $1", task_id)
+        if task_id is None or terminal_status is not None:
+            async with _database_connection() as db:
+                await db.execute("DELETE FROM projects WHERE id = $1", project_id)
+        if directory.exists() and (task_id is None or terminal_status is not None):
+            from yuxi.workspace.filesystem import Workspace
+
+            Workspace(project["uid"]).delete_authorized_path(f"/{path}", root="/")
+        if (sibling / "marker.txt").exists():
+            (sibling / "marker.txt").unlink()
+        sibling.rmdir()
 
 
 async def test_project_rename_and_delete_soft_delete_conversations_but_keep_workdir(
     test_client,
     admin_headers,
-    linked_directory,
     standard_user,
 ):
     project_response = await test_client.post(
@@ -252,16 +386,17 @@ async def test_project_rename_and_delete_soft_delete_conversations_but_keep_work
         json={
             "request_id": make_test_resource_id("managed-lifecycle"),
             "name": "Before rename",
-            "workdir": {"mode": "linked", "path": linked_directory},
+            "workdir": {"mode": "managed"},
         },
     )
     assert project_response.status_code == 200, project_response.text
     project = project_response.json()
+    project_path = project["workdir_path"]
 
     marker_response = await test_client.post(
         "/api/workspace/directory",
         headers=admin_headers,
-        json={"parent_path": f"/{linked_directory}", "name": "keep"},
+        json={"parent_path": f"/{project_path}", "name": "keep"},
     )
     assert marker_response.status_code == 200, marker_response.text
 
@@ -320,7 +455,7 @@ async def test_project_rename_and_delete_soft_delete_conversations_but_keep_work
     marker_read = await test_client.get(
         "/api/workspace/tree",
         headers=admin_headers,
-        params={"path": f"/{linked_directory}", "include_unbound_project_dirs": True},
+        params={"path": f"/{project_path}", "include_unbound_project_dirs": True},
     )
     assert marker_read.status_code == 200, marker_read.text
     assert "keep" in {entry["name"] for entry in marker_read.json()["entries"]}
@@ -350,7 +485,6 @@ async def test_project_rename_and_delete_soft_delete_conversations_but_keep_work
 async def test_project_delete_waits_for_locked_conversation_creation(
     test_client,
     admin_headers,
-    linked_directory,
 ):
     project_response = await test_client.post(
         "/api/projects",
@@ -358,7 +492,7 @@ async def test_project_delete_waits_for_locked_conversation_creation(
         json={
             "request_id": make_test_resource_id("project-delete-race"),
             "name": "Concurrent lifecycle",
-            "workdir": {"mode": "linked", "path": linked_directory},
+            "workdir": {"mode": "managed"},
         },
     )
     assert project_response.status_code == 200, project_response.text

@@ -12,7 +12,7 @@
         </ActionTrigger>
       </template>
       <div class="project-dropdown-panel">
-        <template v-if="dropdownView === 'projects'">
+        <template>
           <label class="project-search">
             <Search :size="14" aria-hidden="true" />
             <input
@@ -80,56 +80,6 @@
               <FolderPlus :size="14" />
               <span>新建项目</span>
             </button>
-            <button type="button" @click="openHistoryView">
-              <History :size="14" />
-              <span>从历史对话添加</span>
-              <ChevronRight :size="14" class="project-action-chevron" />
-            </button>
-          </div>
-        </template>
-
-        <template v-else>
-          <div class="history-search-row">
-            <button type="button" aria-label="返回项目列表" @click="closeHistoryView">
-              <ArrowLeft :size="15" />
-            </button>
-            <label class="project-search">
-              <Search :size="14" aria-hidden="true" />
-              <input
-                ref="historySearchInput"
-                v-model="historyQuery"
-                type="search"
-                placeholder="搜索历史对话"
-                aria-label="搜索历史对话"
-                @input="handleHistorySearchChange"
-              />
-            </label>
-          </div>
-          <div class="history-option-list" aria-label="选择历史对话">
-            <div v-if="loadingHistory" class="history-loading">
-              <a-spin />
-            </div>
-            <template v-else>
-              <button
-                v-for="candidate in historyCandidates"
-                :key="candidate.thread_id"
-                type="button"
-                class="history-option"
-                @click="selectHistoryDirectory(candidate)"
-              >
-                <MessageSquare :size="14" class="history-option-icon" />
-                <span :title="candidate.title">{{ candidate.title || '未命名对话' }}</span>
-                <time
-                  v-if="formatRelativeTime(candidate.updated_at)"
-                  :datetime="candidate.updated_at"
-                >
-                  {{ formatRelativeTime(candidate.updated_at) }}
-                </time>
-              </button>
-              <div v-if="!historyCandidates.length" class="history-empty">
-                {{ historyError || '没有可添加的历史对话' }}
-              </div>
-            </template>
           </div>
         </template>
       </div>
@@ -139,7 +89,7 @@
   <a-modal
     v-model:open="createModalOpen"
     title="新建项目"
-    width="640px"
+    width="440px"
     ok-text="创建并选择"
     cancel-text="取消"
     :confirm-loading="creatingProject"
@@ -158,15 +108,9 @@
         />
       </label>
 
-      <div class="project-form-field">
-        <span>项目目录</span>
-        <WorkspacePathPicker
-          v-model="linkedPath"
-          :active="createModalOpen"
-          :disabled="creatingProject"
-          include-unbound-project-dirs
-        />
-      </div>
+      <p class="project-directory-hint">
+        系统会在个人工作区的 projects/ 下创建“项目名_短 ID”专属文件夹。已有对话和文件不会移入。
+      </p>
     </div>
   </a-modal>
 </template>
@@ -177,21 +121,10 @@ import ActionTrigger from '@/components/common/ActionTrigger.vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { storeToRefs } from 'pinia'
-import {
-  ArrowLeft,
-  Check,
-  ChevronRight,
-  FolderClosed,
-  FolderPlus,
-  FolderX,
-  History,
-  MessageSquare,
-  Search
-} from '@lucide/vue'
+import { Check, FolderClosed, FolderPlus, FolderX, Search } from '@lucide/vue'
 import { projectApi } from '@/apis/project_api'
-import WorkspacePathPicker from '@/components/WorkspacePathPicker.vue'
 import { useProjectsStore } from '@/stores/projects'
-import { AUTO_PROJECT_ID, filterProjects, formatRelativeTime } from '@/utils/projectSelection'
+import { AUTO_PROJECT_ID, filterProjects } from '@/utils/projectSelection'
 
 const props = defineProps({
   upward: { type: Boolean, default: false },
@@ -208,20 +141,11 @@ const { projects, isLoading: loadingProjects, error: projectsError } = storeToRe
 const dropdownOpen = ref(false)
 const projectQuery = ref('')
 const projectSearchInput = ref(null)
-const historySearchInput = ref(null)
-const dropdownView = ref('projects')
 const createModalOpen = ref(false)
 const creatingProject = ref(false)
 const projectName = ref('')
 const projectCreationRequestId = ref('')
-const linkedPath = ref('')
-const historyQuery = ref('')
-const historyCandidates = ref([])
-const loadingHistory = ref(false)
-const historyError = ref('')
-let historySearchTimer = null
 let projectSearchFocusTimer = null
-let historyRequestVersion = 0
 
 const requestId = () =>
   typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -231,7 +155,7 @@ const requestId = () =>
 const getErrorMessage = (error, fallback) =>
   error?.response?.data?.detail || error?.message || fallback
 
-const canCreateProject = computed(() => Boolean(projectName.value.trim() && linkedPath.value))
+const canCreateProject = computed(() => Boolean(projectName.value.trim()))
 const isAutoOrEmpty = computed(() => !props.modelValue || props.modelValue === AUTO_PROJECT_ID)
 const currentProject = computed(() =>
   projects.value.find((project) => project.id === props.modelValue)
@@ -243,8 +167,8 @@ const currentProjectHint = computed(() => {
   if (isAutoOrEmpty.value) {
     return props.allowAuto ? '不使用项目（发送时创建独立目录）' : '请选择任务使用的项目'
   }
-  if (currentProject.value?.directory_mode === 'linked') return '个人空间已有目录'
-  return '系统管理目录'
+  if (currentProject.value?.workdir_path) return `项目目录：/${currentProject.value.workdir_path}`
+  return '项目目录'
 })
 const filteredProjects = computed(() => filterProjects(projects.value, projectQuery.value))
 
@@ -268,11 +192,10 @@ const loadProjects = async () => {
   }
 }
 
-const openCreateModal = (selectedPath = '') => {
+const openCreateModal = () => {
   dropdownOpen.value = false
   projectName.value = ''
   projectCreationRequestId.value = requestId()
-  linkedPath.value = selectedPath
   createModalOpen.value = true
 }
 
@@ -282,88 +205,35 @@ const handleCreateProject = async () => {
   try {
     const project = await projectApi.createProject({
       requestId: projectCreationRequestId.value,
-      name: projectName.value.trim(),
-      mode: 'linked',
-      path: linkedPath.value
+      name: projectName.value.trim()
     })
     addAndSelectProject(project)
     createModalOpen.value = false
     message.success('项目已创建')
   } catch (error) {
-    message.error(getErrorMessage(error, '项目创建失败'))
+    message.error(
+      error?.status === 409
+        ? '已有项目关联 projects 上层目录，删除旧项目后再创建'
+        : getErrorMessage(error, '项目创建失败')
+    )
   } finally {
     creatingProject.value = false
   }
-}
-
-const openHistoryView = () => {
-  dropdownView.value = 'history'
-  historyQuery.value = ''
-  void loadHistoryCandidates()
-}
-
-const closeHistoryView = () => {
-  dropdownView.value = 'projects'
-  historyQuery.value = ''
-}
-
-const loadHistoryCandidates = async () => {
-  const requestVersion = ++historyRequestVersion
-  const requestedQuery = historyQuery.value.trim()
-  loadingHistory.value = true
-  historyError.value = ''
-  try {
-    const response = await projectApi.getHistoryCandidates({ query: requestedQuery, limit: 20 })
-    if (requestVersion !== historyRequestVersion) return
-    historyCandidates.value = response.items
-  } catch (error) {
-    if (requestVersion !== historyRequestVersion) return
-    historyCandidates.value = []
-    historyError.value = getErrorMessage(error, '历史对话加载失败')
-  } finally {
-    if (requestVersion === historyRequestVersion) loadingHistory.value = false
-  }
-}
-
-const handleHistorySearchChange = () => {
-  historyRequestVersion += 1
-  loadingHistory.value = false
-  if (historySearchTimer) clearTimeout(historySearchTimer)
-  historySearchTimer = setTimeout(() => void loadHistoryCandidates(), 250)
-}
-
-const selectHistoryDirectory = (candidate) => {
-  const path = candidate.workdir_path.replace(/^\/+|\/+$/g, '')
-  const workdirPath = path ? `/${path}` : ''
-  if (!workdirPath) {
-    message.error('该历史对话没有可用目录')
-    return
-  }
-  openCreateModal(workdirPath)
 }
 
 watch(dropdownOpen, (open) => {
   if (projectSearchFocusTimer) clearTimeout(projectSearchFocusTimer)
   if (!open) {
     projectQuery.value = ''
-    dropdownView.value = 'projects'
-    historyQuery.value = ''
     return
   }
   void loadProjects()
   projectSearchFocusTimer = setTimeout(() => projectSearchInput.value?.focus(), 120)
 })
-watch(dropdownView, (view) => {
-  if (!dropdownOpen.value) return
-  if (projectSearchFocusTimer) clearTimeout(projectSearchFocusTimer)
-  const target = view === 'history' ? historySearchInput : projectSearchInput
-  projectSearchFocusTimer = setTimeout(() => target.value?.focus(), 120)
-})
 onMounted(() => {
   if (props.eagerLoad && !projectsStore.hasLoaded && !loadingProjects.value) void loadProjects()
 })
 onUnmounted(() => {
-  if (historySearchTimer) clearTimeout(historySearchTimer)
   if (projectSearchFocusTimer) clearTimeout(projectSearchFocusTimer)
 })
 </script>
@@ -416,8 +286,7 @@ onUnmounted(() => {
   padding: 4px 6px;
 }
 
-.project-loading,
-.history-loading {
+.project-loading {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -450,9 +319,7 @@ onUnmounted(() => {
   background: var(--gray-50);
 }
 
-.project-option:focus-visible,
-.history-option:focus-visible,
-.history-search-row > button:focus-visible {
+.project-option:focus-visible {
   outline: 2px solid var(--main-color);
   outline-offset: 2px;
 }
@@ -522,44 +389,6 @@ onUnmounted(() => {
   color: var(--gray-1000);
 }
 
-.project-action-chevron {
-  margin-left: auto;
-  color: var(--color-text-tertiary);
-}
-
-.history-search-row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 4px 6px;
-}
-
-.history-search-row > button {
-  display: inline-flex;
-  flex: 0 0 auto;
-  width: 26px;
-  height: 26px;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-}
-
-.history-search-row > button:hover {
-  background: var(--gray-50);
-  color: var(--color-text);
-}
-
-.history-search-row .project-search {
-  flex: 1;
-  min-width: 0;
-  margin: 0;
-}
-
 .project-empty {
   padding: 14px 8px 12px;
   color: var(--color-text-secondary);
@@ -603,73 +432,10 @@ onUnmounted(() => {
   font-weight: 500;
 }
 
-.history-option-list {
-  display: flex;
-  min-height: 140px;
-  max-height: 240px;
-  flex-direction: column;
-  overflow-y: auto;
-  border-top: 1px solid var(--gray-100);
-  background: var(--gray-0);
-  padding: 2px 4px;
-}
-
-.history-option {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  min-width: 0;
-  min-height: 28px;
-  padding: 4px 6px;
-  border: 0;
-  border-bottom: 1px solid var(--gray-100);
-  background: transparent;
-  color: var(--color-text);
-  cursor: pointer;
-  text-align: left;
-}
-
-.history-option:last-child {
-  border-bottom: 0;
-}
-
-.history-option:hover:not(:disabled) {
-  background: var(--gray-50);
-}
-
-.history-option:disabled {
-  cursor: wait;
-  opacity: 0.55;
-}
-
-.history-option > span {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
-}
-
-.history-option-icon {
-  flex: 0 0 auto;
-  color: var(--color-text-tertiary);
-}
-
-.history-option time {
-  flex: 0 0 auto;
-  color: var(--color-text-tertiary);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.history-empty {
-  margin: auto;
-  padding: 16px;
+.project-directory-hint {
+  margin: 0;
   color: var(--color-text-secondary);
   font-size: 12px;
-  text-align: center;
 }
 
 @media (max-width: 768px) {

@@ -355,6 +355,7 @@ class Tasker:
 
 async def _heartbeat_task(context: TaskContext, execution: asyncio.Task[Any]) -> None:
     repo = TaskRepository()
+    cancel_dispatched = False
     while not execution.done():
         await asyncio.sleep(TASK_HEARTBEAT_SECONDS)
         if execution.done():
@@ -376,10 +377,10 @@ async def _heartbeat_task(context: TaskContext, execution: asyncio.Task[Any]) ->
             context._request_cancel("lease_lost")
             execution.cancel()
             return
-        if cancel_requested:
+        if cancel_requested and not cancel_dispatched:
             context._request_cancel("cancelled")
             execution.cancel()
-            return
+            cancel_dispatched = True
 
 
 async def _finish_task_failure(
