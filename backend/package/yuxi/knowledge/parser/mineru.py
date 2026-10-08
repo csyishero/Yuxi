@@ -124,7 +124,8 @@ class MinerUParser(BaseDocumentProcessor):
 
         data = {
             "lang_list": params.get("lang_list", ["ch"]),
-            "backend": params.get("backend", "hybrid-auto-engine"),
+            # "backend": params.get("backend", "hybrid-auto-engine"),
+            "backend": params.get("backend", "pipeline"),
             "parse_method": params.get("parse_method", "auto"),
             "formula_enable": params.get("formula_enable", True),
             "table_enable": params.get("table_enable", True),

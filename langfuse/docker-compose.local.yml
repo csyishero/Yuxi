@@ -1,0 +1,28 @@
+# Local Yuxi integration override.
+# Keep Langfuse dependencies private: Yuxi already owns the usual Postgres,
+# Redis, MinIO and ClickHouse host ports. Only the browser UI is exposed.
+services:
+  langfuse-worker:
+    ports: !reset []
+    environment:
+      DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres"
+      DIRECT_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres"
+
+  langfuse-web:
+    ports: !override
+      - "127.0.0.1:3001:3000"
+    environment:
+      DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres"
+      DIRECT_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres"
+
+  clickhouse:
+    ports: !reset []
+
+  minio:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  postgres:
+    ports: !reset []

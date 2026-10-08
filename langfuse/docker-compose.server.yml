@@ -1,0 +1,27 @@
+# Server deployment override for the Yuxi integration.
+# Keep Langfuse dependencies private and expose only the Web/API service.
+services:
+  langfuse-worker:
+    ports: !reset []
+    environment:
+      DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres"
+      DIRECT_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres"
+
+  langfuse-web:
+    ports: !override
+      - "0.0.0.0:3001:3000"
+    environment:
+      DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres"
+      DIRECT_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres"
+
+  clickhouse:
+    ports: !reset []
+
+  minio:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  postgres:
+    ports: !reset []
