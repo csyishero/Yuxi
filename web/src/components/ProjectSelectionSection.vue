@@ -12,76 +12,74 @@
         </ActionTrigger>
       </template>
       <div class="project-dropdown-panel">
-        <template>
-          <label class="project-search">
-            <Search :size="14" aria-hidden="true" />
-            <input
-              ref="projectSearchInput"
-              v-model="projectQuery"
-              type="search"
-              placeholder="搜索项目"
-              aria-label="搜索项目"
-            />
-          </label>
+        <label class="project-search">
+          <Search :size="14" aria-hidden="true" />
+          <input
+            ref="projectSearchInput"
+            v-model="projectQuery"
+            type="search"
+            placeholder="搜索项目"
+            aria-label="搜索项目"
+          />
+        </label>
 
-          <div class="project-option-list" aria-label="选择项目">
-            <div v-if="loadingProjects" class="project-loading">
-              <a-spin />
-            </div>
-            <template v-else>
-              <button
-                v-if="allowAuto"
-                type="button"
-                class="project-option"
-                :class="{ selected: !modelValue || modelValue === AUTO_PROJECT_ID }"
-                :aria-pressed="!modelValue || modelValue === AUTO_PROJECT_ID"
-                @click="selectProject(AUTO_PROJECT_ID)"
-              >
-                <span class="project-option-icon"><FolderX :size="15" /></span>
-                <span class="project-option-body">
-                  <strong>不使用项目</strong>
-                </span>
-                <Check
-                  v-if="!modelValue || modelValue === AUTO_PROJECT_ID"
-                  :size="14"
-                  class="project-option-check"
-                />
-              </button>
-
-              <button
-                v-for="project in filteredProjects"
-                :key="project.id"
-                type="button"
-                class="project-option"
-                :class="{ selected: modelValue === project.id }"
-                :aria-pressed="modelValue === project.id"
-                @click="selectProject(project.id)"
-              >
-                <span class="project-option-icon"><FolderClosed :size="15" /></span>
-                <span class="project-option-body">
-                  <strong :title="project.name">{{ project.name }}</strong>
-                </span>
-                <Check v-if="modelValue === project.id" :size="14" class="project-option-check" />
-              </button>
-
-              <div v-if="!filteredProjects.length" class="project-empty">
-                {{ projectQuery ? '没有匹配的项目' : '暂无已有项目' }}
-              </div>
-            </template>
+        <div class="project-option-list" aria-label="选择项目">
+          <div v-if="loadingProjects" class="project-loading">
+            <a-spin />
           </div>
-
-          <div v-if="projectsError" class="project-error" role="alert">
-            <span>{{ projectsError }}</span>
-            <button type="button" @click="loadProjects">重新加载</button>
-          </div>
-
-          <div class="project-dropdown-actions">
-            <button type="button" @click="openCreateModal()">
-              <FolderPlus :size="14" />
-              <span>新建项目</span>
+          <template v-else>
+            <button
+              v-if="allowAuto"
+              type="button"
+              class="project-option"
+              :class="{ selected: !modelValue || modelValue === AUTO_PROJECT_ID }"
+              :aria-pressed="!modelValue || modelValue === AUTO_PROJECT_ID"
+              @click="selectProject(AUTO_PROJECT_ID)"
+            >
+              <span class="project-option-icon"><FolderX :size="15" /></span>
+              <span class="project-option-body">
+                <strong>不使用项目</strong>
+              </span>
+              <Check
+                v-if="!modelValue || modelValue === AUTO_PROJECT_ID"
+                :size="14"
+                class="project-option-check"
+              />
             </button>
-          </div>
-        </template>
+
+            <button
+              v-for="project in filteredProjects"
+              :key="project.id"
+              type="button"
+              class="project-option"
+              :class="{ selected: modelValue === project.id }"
+              :aria-pressed="modelValue === project.id"
+              @click="selectProject(project.id)"
+            >
+              <span class="project-option-icon"><FolderClosed :size="15" /></span>
+              <span class="project-option-body">
+                <strong :title="project.name">{{ project.name }}</strong>
+              </span>
+              <Check v-if="modelValue === project.id" :size="14" class="project-option-check" />
+            </button>
+
+            <div v-if="!filteredProjects.length" class="project-empty">
+              {{ projectQuery ? '没有匹配的项目' : '暂无已有项目' }}
+            </div>
+          </template>
+        </div>
+
+        <div v-if="projectsError" class="project-error" role="alert">
+          <span>{{ projectsError }}</span>
+          <button type="button" @click="loadProjects">重新加载</button>
+        </div>
+
+        <div class="project-dropdown-actions">
+          <button type="button" @click="openCreateModal()">
+            <FolderPlus :size="14" />
+            <span>新建项目</span>
+          </button>
+        </div>
       </div>
     </ActionDropdown>
   </section>
