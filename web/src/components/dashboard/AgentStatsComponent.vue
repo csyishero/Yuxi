@@ -37,12 +37,11 @@
         </div>
       </a-col>
     </a-row>
-
   </a-card>
 </template>
 
 <script setup>
-import { ref, onMounted, watch, nextTick, computed } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue'
 import * as echarts from '@/utils/dashboardCharts'
 import { getColorByIndex } from '@/utils/chartColors'
 import { useThemeStore } from '@/stores/theme'
@@ -73,6 +72,8 @@ const props = defineProps({
 // Chart refs
 const conversationToolChartRef = ref(null)
 let conversationToolChart = null
+let resizeObserver = null
+let disposed = false
 
 // 计算属性
 const totalConversations = computed(() => {
@@ -91,12 +92,8 @@ const resolveAgentName = (agentId) => agentNames.value[agentId] || agentId
 
 // 初始化对话数和工具调用数合并图表
 const initConversationToolChart = () => {
-  if (
-    !conversationToolChartRef.value ||
-    (!props.agentStats?.agent_conversation_counts?.length &&
-      !props.agentStats?.agent_tool_usage?.length)
-  )
-    return
+  const element = conversationToolChartRef.value
+  if (disposed || props.loading || !element || !element.clientWidth || !element.clientHeight) return
 
   // 如果已存在图表实例，先销毁
   if (conversationToolChart) {
@@ -106,8 +103,8 @@ const initConversationToolChart = () => {
 
   conversationToolChart = echarts.init(conversationToolChartRef.value)
 
-  const conversationData = props.agentStats.agent_conversation_counts || []
-  const toolData = props.agentStats.agent_tool_usage || []
+  const conversationData = props.agentStats?.agent_conversation_counts || []
+  const toolData = props.agentStats?.agent_tool_usage || []
 
   // 获取所有智能体ID并按对话数+工具调用数排序，取前3个
   const allAgentStats = {}
@@ -156,9 +153,9 @@ const initConversationToolChart = () => {
     },
     grid: {
       left: '3%',
-      right: '15%',
+      right: 12,
       bottom: '3%',
-      top: '10%',
+      top: 40,
       containLabel: true
     },
     xAxis: {
@@ -171,8 +168,12 @@ const initConversationToolChart = () => {
       },
       axisLabel: {
         color: getCSSVariable('--gray-500'),
-        interval: 0
-        // rotate: 45
+        interval: 0,
+        width: Math.max(
+          32,
+          Math.floor((element.clientWidth - 70) / Math.max(topAgentIds.length, 1)) - 12
+        ),
+        overflow: 'truncate'
       }
     },
     yAxis: {
@@ -236,55 +237,32 @@ const initConversationToolChart = () => {
   conversationToolChart.setOption(option)
 }
 
-// 更新图表
-const updateCharts = () => {
-  nextTick(() => {
-    initConversationToolChart()
-  })
+// loading 会替换卡片内容，重新绑定实际节点；隐藏时等待尺寸恢复。
+const updateCharts = async () => {
+  await nextTick()
+  if (disposed) return
+  resizeObserver?.disconnect()
+  conversationToolChart?.dispose()
+  conversationToolChart = null
+  const element = conversationToolChartRef.value
+  if (!element || props.loading) return
+  resizeObserver = new ResizeObserver(initConversationToolChart)
+  resizeObserver.observe(element)
+  initConversationToolChart()
 }
 
-// 监听数据变化
-watch(
-  () => props.agentStats,
-  () => {
-    updateCharts()
-  },
-  { deep: true }
-)
-
-// 窗口大小变化时重新调整图表
-const handleResize = () => {
-  if (conversationToolChart) conversationToolChart.resize()
-}
-
-onMounted(() => {
-  updateCharts()
-  window.addEventListener('resize', handleResize)
+watch([() => props.agentStats, () => props.loading, () => themeStore.isDark], updateCharts, {
+  deep: true
 })
+onMounted(updateCharts)
 
-// 监听主题变化，重新渲染图表
-watch(
-  () => themeStore.isDark,
-  () => {
-    if (props.agentStats && conversationToolChart) {
-      nextTick(() => {
-        updateCharts()
-      })
-    }
-  }
-)
-
-// 组件卸载时清理
 const cleanup = () => {
-  window.removeEventListener('resize', handleResize)
-  if (conversationToolChart) {
-    conversationToolChart.dispose()
-    conversationToolChart = null
-  }
+  disposed = true
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  conversationToolChart?.dispose()
+  conversationToolChart = null
 }
-
-// 导出清理函数供父组件调用
-defineExpose({
-  cleanup
-})
+onBeforeUnmount(cleanup)
+defineExpose({ cleanup })
 </script>
