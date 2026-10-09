@@ -214,49 +214,54 @@ class ThreadAnalyticsResponse(BaseModel):
 
 @dashboard.get("/stats")
 async def get_dashboard_stats(
+    scope: Literal["all", "current"] = "all",
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_superadmin_user),
 ):
     """获取基础统计指标（超级管理员权限）。"""
-    return await DashboardService(db).get_basic_stats()
+    return await DashboardService(db, scope=scope).get_basic_stats()
 
 
 @dashboard.get("/stats/users", response_model=UserActivityStats)
 async def get_user_activity_stats(
+    scope: Literal["all", "current"] = "all",
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_superadmin_user),
 ):
     """获取用户活动统计（超级管理员权限）。"""
-    return UserActivityStats(**await DashboardService(db).get_user_activity_stats())
+    return UserActivityStats(**await DashboardService(db, scope=scope).get_user_activity_stats())
 
 
 @dashboard.get("/stats/tools", response_model=ToolCallStats)
 async def get_tool_call_stats(
+    scope: Literal["all", "current"] = "all",
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_superadmin_user),
 ):
     """获取工具调用统计（超级管理员权限）。"""
-    return ToolCallStats(**await DashboardService(db).get_tool_call_stats())
+    return ToolCallStats(**await DashboardService(db, scope=scope).get_tool_call_stats())
 
 
 @dashboard.get("/stats/agents", response_model=AgentAnalytics)
 async def get_agent_analytics(
+    scope: Literal["all", "current"] = "all",
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_superadmin_user),
 ):
     """获取智能体分析（超级管理员权限）。"""
-    return AgentAnalytics(**await DashboardService(db).get_agent_analytics())
+    return AgentAnalytics(**await DashboardService(db, scope=scope).get_agent_analytics())
 
 
 @dashboard.get("/stats/calls/timeseries", response_model=TimeSeriesStats)
 async def get_call_timeseries_stats(
     type: Literal["models", "agents", "tokens", "tools"] = "models",
     time_range: Literal["14hours", "14days", "14weeks"] = "14days",
+    scope: Literal["all", "current"] = "all",
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_superadmin_user),
 ):
     """获取调用分析时间序列统计（超级管理员权限）。"""
-    data = await DashboardService(db).get_call_timeseries(
+    data = await DashboardService(db, scope=scope).get_call_timeseries(
         metric_type=type,
         time_range=time_range,
     )
@@ -272,11 +277,12 @@ async def get_thread_analytics_stats(
     project_id: str | None = None,
     status: Literal["active", "archived", "deleted", "subagent", "all"] = "all",
     search: Annotated[str | None, Query(max_length=255)] = None,
+    scope: Literal["all", "current"] = "all",
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_superadmin_user),
 ):
     """获取会话多维分析统计（超级管理员权限）。"""
-    data = await DashboardService(db).get_thread_analytics(
+    data = await DashboardService(db, scope=scope).get_thread_analytics(
         time_range=time_range,
         agent_id=agent_id,
         include_subagents=include_subagents,
@@ -292,20 +298,22 @@ async def get_thread_analytics_stats(
 async def get_all_feedbacks(
     rating: str | None = None,
     agent_id: str | None = None,
+    scope: Literal["all", "current"] = "all",
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_superadmin_user),
 ):
     """获取所有反馈记录（超级管理员权限）。"""
-    return await DashboardService(db).get_feedbacks(rating=rating, agent_id=agent_id)
+    return await DashboardService(db, scope=scope).get_feedbacks(rating=rating, agent_id=agent_id)
 
 
 @dashboard.get("/conversations/options", response_model=ConversationFilterOptionsResponse)
 async def get_conversation_filter_options(
+    scope: Literal["all", "current"] = "all",
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_superadmin_user),
 ):
     """获取会话审计用户与 Agent 筛选项（超级管理员权限）。"""
-    return await DashboardService(db).get_conversation_filter_options()
+    return await DashboardService(db, scope=scope).get_conversation_filter_options()
 
 
 @dashboard.get("/conversations", response_model=ConversationListResponse)
@@ -319,11 +327,12 @@ async def get_all_conversations(
     include_subagents: bool = True,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
+    scope: Literal["all", "current"] = "all",
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_superadmin_user),
 ):
     """获取所有对话（超级管理员权限）。"""
-    return await DashboardService(db).list_conversations(
+    return await DashboardService(db, scope=scope).list_conversations(
         uid=uid,
         agent_id=agent_id,
         status=status,
@@ -339,11 +348,12 @@ async def get_all_conversations(
 @dashboard.get("/conversations/{thread_id}", response_model=ConversationDetailResponse)
 async def get_conversation_detail(
     thread_id: str,
+    scope: Literal["all", "current"] = "all",
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_superadmin_user),
 ):
     """获取指定对话详情（超级管理员权限）。"""
-    data = await DashboardService(db).get_conversation_detail(thread_id)
+    data = await DashboardService(db, scope=scope).get_conversation_detail(thread_id)
     if not data:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return data

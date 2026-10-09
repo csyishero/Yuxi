@@ -4,7 +4,7 @@
       <DashboardMetricCard
         :icon="Users"
         :value="formatNumber(userStats?.total_users)"
-        label="累计用户"
+        :label="scope === 'all' ? '累计用户' : '当前用户'"
         tone="info"
         compact
       />
@@ -30,7 +30,9 @@
           <span class="chart-title">活跃度分布</span>
           <span class="chart-subtitle">近 120 天</span>
         </div>
-        <span class="chart-hint">按用户消息发生日统计，包含已注销用户</span>
+        <span class="chart-hint"
+          >按用户消息发生日统计{{ scope === 'all' ? '，包含已注销用户' : '，仅当前有效记录' }}</span
+        >
       </div>
       <DashboardActivityHeatmap :data="userStats?.daily_active_users" :loading="loading" />
     </div>
@@ -44,6 +46,7 @@ import DashboardActivityHeatmap from './DashboardActivityHeatmap.vue'
 import DashboardMetricCard from './DashboardMetricCard.vue'
 
 defineProps({
+  scope: { type: String, default: 'all' },
   userStats: {
     type: Object,
     default: () => ({})

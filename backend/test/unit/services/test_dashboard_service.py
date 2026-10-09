@@ -694,3 +694,84 @@ async def test_unstarted_requests_do_not_make_recorded_usage_incomplete(dashboar
     item = (await DashboardService(dashboard_db).list_conversations(project_id="p-2"))["items"][0]
     assert item["total_tokens"] == 42
     assert item["token_usage_complete"] is True
+
+
+async def test_current_scope_matches_usage_lists_and_preserves_inventory(dashboard_db):
+    """当前范围排除失效归属，归档与子会话仍有效，库存不受切换影响。"""
+    current = DashboardService(dashboard_db, scope="current")
+    history = DashboardService(dashboard_db)
+    stats = await current.get_basic_stats()
+    assert stats["total_conversations"] == 4
+    assert stats["total_messages"] == 4
+    assert stats["feedback_stats"] == {"total_feedbacks": 1, "satisfaction_rate": 100.0}
+    assert stats["current_resources"] == (await history.get_basic_stats())["current_resources"]
+    assert (await current.get_tool_call_stats())["total_calls"] == 1
+    assert len(await current.get_feedbacks()) == 1
+    assert (await current.get_user_activity_stats())["total_users"] == 3
+    assert (await history.get_user_activity_stats())["total_users"] == 4
+    listing = await current.list_conversations(limit=20)
+    assert listing["total"] == 4
+    assert any(item["status"] == "archived" for item in listing["items"])
+    assert (await current.get_thread_analytics(time_range="all", include_subagents=True))["summary"][
+        "total_threads"
+    ] == 4
+    assert (await current.list_conversations(status="deleted"))["total"] == 0
+    assert (await current.get_thread_analytics(time_range="all", status="deleted"))["summary"]["total_threads"] == 0
+    assert await current.get_conversation_detail("thread-deleted") is None
+    assert await history.get_conversation_detail("thread-deleted") is not None
+    options = await current.get_conversation_filter_options()
+    assert all(not item["is_deleted"] for group in options.values() for item in group)
+    assert "removed-agent" not in (await current.get_agent_analytics())["agent_names"]
+
+
+@pytest.mark.parametrize("dimension", ["conversation", "project", "user", "agent"])
+async def test_current_scope_rejects_each_invalid_owner(dashboard_db, dimension):
+    """独立使每种归属失效，历史仍保留，当前列表和使用量同步移除。"""
+    from sqlalchemy import select
+
+    current = DashboardService(dashboard_db, scope="current")
+    history = DashboardService(dashboard_db)
+    baseline = await history.get_basic_stats()
+    if dimension == "conversation":
+        row = await dashboard_db.scalar(select(Conversation).where(Conversation.thread_id == "thread-102"))
+        row.status = "deleted"
+    elif dimension == "project":
+        row = await dashboard_db.get(Project, "p-2")
+        row.status = "deleted"
+    elif dimension == "user":
+        row = await dashboard_db.scalar(select(User).where(User.uid == "uid-bob"))
+        row.is_deleted = 1
+    else:
+        row = await dashboard_db.scalar(select(Agent).where(Agent.slug == "agent-coder"))
+        await dashboard_db.delete(row)
+    await dashboard_db.commit()
+    assert await current.get_conversation_detail("thread-102") is None
+    assert (await current.list_conversations(project_id="p-2"))["total"] == 0
+    assert (await current.get_tool_call_stats())["total_calls"] == 0
+    assert (await current.get_basic_stats())["total_messages"] == 2
+    after = await history.get_basic_stats()
+    for key in ("total_conversations", "total_messages", "feedback_stats"):
+        assert after[key] == baseline[key]
+
+
+async def test_current_feedback_excludes_deleted_author_consistently(dashboard_db):
+    """其他已注销用户留下的反馈在当前概览、列表和智能体满意度中一致排除。"""
+    from sqlalchemy import select
+
+    message_id = await dashboard_db.scalar(
+        select(Message.id)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(Conversation.thread_id == "thread-101", Message.role == "assistant")
+    )
+    dashboard_db.add(MessageFeedback(message_id=message_id, uid="uid-deleted", rating="dislike"))
+    await dashboard_db.commit()
+    current = DashboardService(dashboard_db, scope="current")
+    assert (await current.get_basic_stats())["feedback_stats"] == {
+        "total_feedbacks": 1,
+        "satisfaction_rate": 100.0,
+    }
+    assert len(await current.get_feedbacks()) == 1
+    rates = (await current.get_agent_analytics())["agent_satisfaction_rates"]
+    helper = next(item for item in rates if item["agent_id"] == "agent-helper")
+    assert helper["total_feedbacks"] == 1 and helper["satisfaction_rate"] == 100.0
+    assert len(await DashboardService(dashboard_db).get_feedbacks()) == 3

@@ -167,7 +167,9 @@
         <div class="explorer-title-group">
           <span class="explorer-title">全平台会话审计</span>
           <span class="explorer-subtitle"
-            >图表与明细共享筛选；包含已删除记录。消息和用量按所选周期统计，详情展示完整会话。</span
+            >图表与明细共享筛选；{{
+              scope === 'all' ? '包含已删除记录' : '仅当前有效记录'
+            }}。消息和用量按所选周期统计，详情展示完整会话。</span
           >
         </div>
 
@@ -191,10 +193,12 @@
             class="filter-select status-filter"
             @change="handleSearch"
           >
-            <a-select-option value="all">全部状态（含已删除）</a-select-option>
+            <a-select-option value="all">{{
+              scope === 'all' ? '全部状态（含已删除）' : '全部有效状态'
+            }}</a-select-option>
             <a-select-option value="active">未归档</a-select-option>
             <a-select-option value="archived">已归档</a-select-option>
-            <a-select-option value="deleted">已删除</a-select-option>
+            <a-select-option v-if="scope === 'all'" value="deleted">已删除</a-select-option>
             <a-select-option value="subagent">子智能体会话</a-select-option>
           </a-select>
 
@@ -394,11 +398,12 @@
     </div>
 
     <!-- 会话详情抽屉 -->
-    <ThreadDetailDrawer ref="detailDrawerRef" />
+    <ThreadDetailDrawer :scope="scope" ref="detailDrawerRef" />
   </div>
 </template>
 
 <script setup>
+const props = defineProps({ scope: { type: String, default: 'all' } })
 import { formatTokenUsage } from '@/utils/dashboard'
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import * as echarts from '@/utils/dashboardCharts'
@@ -493,6 +498,7 @@ const loadData = async (requestedIncludeSubagents = includeSubagents.value) => {
   loading.value = true
   try {
     const res = await dashboardApi.getThreadStats({
+      scope: props.scope,
       timeRange: timeRange.value,
       includeSubagents: requestedIncludeSubagents,
       agentId: selectedAgentId.value,
@@ -527,7 +533,7 @@ const toggleSubagents = () => {
 
 const loadFilterOptions = async () => {
   try {
-    filterOptions.value = await dashboardApi.getConversationFilterOptions()
+    filterOptions.value = await dashboardApi.getConversationFilterOptions(props.scope)
   } catch (err) {
     console.error('加载会话筛选项失败:', err)
   }
@@ -539,6 +545,7 @@ const loadConversations = async () => {
   try {
     const offset = (tablePagination.value.current - 1) * tablePagination.value.pageSize
     const res = await dashboardApi.getConversations({
+      scope: props.scope,
       status: selectedStatus.value,
       search: appliedSearchKeyword.value || undefined,
       agent_id: selectedAgentId.value,
@@ -824,6 +831,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  ++latestStatsRequest
+  ++latestConversationRequest
   cleanup()
 })
 

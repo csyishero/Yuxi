@@ -119,7 +119,7 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { onUnmounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { LikeOutlined, DislikeOutlined, ClockCircleOutlined } from '@ant-design/icons-vue'
 import { dashboardApi } from '@/apis/dashboard_api'
@@ -137,6 +137,7 @@ const CONFIG = {
 
 // Props
 const props = defineProps({
+  scope: { type: String, default: 'all' },
   agentId: {
     type: String,
     default: null
@@ -200,24 +201,32 @@ const toggleConversationExpand = (feedbackId) => {
 }
 
 // 加载反馈列表
+let disposed = false
+onUnmounted(() => {
+  disposed = true
+})
+
 const loadFeedbacks = async () => {
   loadingFeedbacks.value = true
   try {
     const params = {
+      scope: props.scope,
       rating: feedbackFilter.value === 'all' ? undefined : feedbackFilter.value,
       agent_id: props.agentId || undefined
     }
 
     const response = await dashboardApi.getFeedbacks(params)
+    if (disposed) return
     feedbacks.value = response
     // 重置展开状态
     expandedStates.value.clear()
   } catch (error) {
+    if (disposed) return
     console.error('加载反馈列表失败:', error)
     message.error('加载反馈列表失败，请稍后重试')
     feedbacks.value = []
   } finally {
-    loadingFeedbacks.value = false
+    if (!disposed) loadingFeedbacks.value = false
   }
 }
 

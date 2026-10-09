@@ -320,6 +320,7 @@ async function auditLoader() {
     return new Promise((resolve, reject) => pending.push({ resolve, reject }))
   }
   const state = {
+    props: { scope: 'all' },
     includeSubagents: ref(true),
     timeRange: ref('7days'),
     selectedAgentId: ref('agent'),
@@ -335,10 +336,16 @@ async function auditLoader() {
     tablePagination: ref({ current: 1, pageSize: 10, total: 0 }),
     filterOptions: ref({})
   }
+  let unmount
+  const notices = []
   const actions = runInNewContext(
-    `${source.slice(source.indexOf('const loadData ='), source.indexOf('const resetFilters ='))}\n({loadData, loadConversations})`,
+    `${source.match(/onUnmounted\(\(\) => \{[\s\S]*?\n\}\)/)[0]};\n${source.slice(source.indexOf('const loadData ='), source.indexOf('const resetFilters ='))}\n({loadData, loadConversations})`,
     {
       ...state,
+      onUnmounted: (callback) => {
+        unmount = callback
+      },
+      cleanup() {},
       latestStatsRequest: 0,
       latestConversationRequest: 0,
       nextTick: async () => {},
@@ -347,11 +354,15 @@ async function auditLoader() {
       depthChart: null,
       agentChart: null,
       dashboardApi: { getThreadStats: read('stats'), getConversations: read('list') },
-      message: { error() {} },
+      message: {
+        error(text) {
+          notices.push(text)
+        }
+      },
       console: { error() {} }
     }
   )
-  return { ...actions, state, calls, pending }
+  return { ...actions, state, calls, pending, unmount, notices }
 }
 
 test('审计快速切换筛选后迟到响应不能覆盖新图表和明细', async () => {
@@ -403,4 +414,41 @@ test('尚未提交的新关键词不会改变分页查询的已应用条件', as
   assert.equal(loader.calls[0].params.offset, 10)
   loader.pending[0].resolve({ items: [], total: 0 })
   await page
+})
+
+test('统计范围贯穿使用量、调用、反馈、列表和详情，知识库存保持当前值', async () => {
+  await withServer(async (server) => {
+    const requests = []
+    globalThis.fetch = async (input) => {
+      requests.push(new URL(String(input), 'http://localhost'))
+      return jsonResponse({})
+    }
+    await prepareStores(server)
+    const { dashboardApi } = await server.ssrLoadModule('/src/apis/dashboard_api.js')
+    await dashboardApi.getAllStats('current')
+    await dashboardApi.getCallTimeseries('tokens', '14days', 'current')
+    await dashboardApi.getThreadStats({ scope: 'current' })
+    await dashboardApi.getConversations({ scope: 'current' })
+    await dashboardApi.getConversationDetail('thread-example', 'current')
+    await dashboardApi.getConversationFilterOptions('current')
+    await dashboardApi.getFeedbacks({ scope: 'current' })
+    assert.equal(requests.length, 11)
+    for (const url of requests) {
+      assert.equal(
+        url.searchParams.get('scope'),
+        url.pathname.endsWith('/knowledge') ? null : 'current'
+      )
+    }
+  })
+})
+
+test('卸载旧范围后，迟到的会话统计和明细错误不污染当前页面', async () => {
+  const loader = await auditLoader()
+  const stats = loader.loadData(),
+    list = loader.loadConversations()
+  loader.unmount()
+  loader.pending[0].reject(new Error('old scope stats'))
+  loader.pending[1].reject(new Error('old scope list'))
+  await Promise.all([stats, list])
+  assert.deepEqual(loader.notices, [])
 })

@@ -5,6 +5,9 @@ import { apiAdminGet } from './base'
  * 用于超级管理员查看系统概览、调用监控与会话深度分析
  */
 
+// 历史范围沿用默认请求，当前范围显式传给后端。
+const scopeQuery = (scope) => (scope === 'current' ? '?scope=current' : '')
+
 export const dashboardApi = {
   /**
    * 获取所有对话记录
@@ -19,6 +22,7 @@ export const dashboardApi = {
    */
   getConversations: (params = {}) => {
     const queryParams = new URLSearchParams()
+    if (params.scope) queryParams.append('scope', params.scope)
     if (params.uid) queryParams.append('uid', params.uid)
     if (params.agent_id) queryParams.append('agent_id', params.agent_id)
     if (params.status) queryParams.append('status', params.status)
@@ -37,8 +41,8 @@ export const dashboardApi = {
    * 获取会话审计筛选选项
    * @returns {Promise<Object>} - 用户与智能体选项
    */
-  getConversationFilterOptions: () => {
-    return apiAdminGet('/api/dashboard/conversations/options')
+  getConversationFilterOptions: (scope = 'all') => {
+    return apiAdminGet(`/api/dashboard/conversations/options${scopeQuery(scope)}`)
   },
 
   /**
@@ -46,16 +50,16 @@ export const dashboardApi = {
    * @param {string} threadId - 对话线程ID
    * @returns {Promise<Object>} - 对话详情
    */
-  getConversationDetail: (threadId) => {
-    return apiAdminGet(`/api/dashboard/conversations/${threadId}`)
+  getConversationDetail: (threadId, scope = 'all') => {
+    return apiAdminGet(`/api/dashboard/conversations/${threadId}${scopeQuery(scope)}`)
   },
 
   /**
    * 获取Dashboard基础统计信息
    * @returns {Promise<Object>} - 统计信息
    */
-  getStats: () => {
-    return apiAdminGet('/api/dashboard/stats')
+  getStats: (scope = 'all') => {
+    return apiAdminGet(`/api/dashboard/stats${scopeQuery(scope)}`)
   },
 
   /**
@@ -67,6 +71,7 @@ export const dashboardApi = {
    */
   getFeedbacks: (params = {}) => {
     const queryParams = new URLSearchParams()
+    if (params.scope) queryParams.append('scope', params.scope)
     if (params.rating && params.rating !== 'all') queryParams.append('rating', params.rating)
     if (params.agent_id) queryParams.append('agent_id', params.agent_id)
 
@@ -77,16 +82,16 @@ export const dashboardApi = {
    * 获取用户活跃度统计
    * @returns {Promise<Object>} - 用户活跃度统计信息
    */
-  getUserStats: () => {
-    return apiAdminGet('/api/dashboard/stats/users')
+  getUserStats: (scope = 'all') => {
+    return apiAdminGet(`/api/dashboard/stats/users${scopeQuery(scope)}`)
   },
 
   /**
    * 获取工具调用统计
    * @returns {Promise<Object>} - 工具调用统计信息
    */
-  getToolStats: () => {
-    return apiAdminGet('/api/dashboard/stats/tools')
+  getToolStats: (scope = 'all') => {
+    return apiAdminGet(`/api/dashboard/stats/tools${scopeQuery(scope)}`)
   },
 
   /**
@@ -101,8 +106,8 @@ export const dashboardApi = {
    * 获取AI智能体分析数据
    * @returns {Promise<Object>} - AI智能体分析信息
    */
-  getAgentStats: () => {
-    return apiAdminGet('/api/dashboard/stats/agents')
+  getAgentStats: (scope = 'all') => {
+    return apiAdminGet(`/api/dashboard/stats/agents${scopeQuery(scope)}`)
   },
 
   /**
@@ -115,6 +120,7 @@ export const dashboardApi = {
    */
   getThreadStats: (params = {}) => {
     const queryParams = new URLSearchParams()
+    if (params.scope) queryParams.append('scope', params.scope)
     if (params.timeRange) queryParams.append('time_range', params.timeRange)
     if (params.agentId) queryParams.append('agent_id', params.agentId)
     if (params.includeSubagents !== undefined)
@@ -131,13 +137,13 @@ export const dashboardApi = {
    * 批量获取系统概览所有统计数据（并行请求）
    * @returns {Promise<Object>} - 所有统计数据
    */
-  getAllStats: async () => {
+  getAllStats: async (scope = 'all') => {
     try {
       const requests = {
-        basic: apiAdminGet('/api/dashboard/stats'),
-        users: apiAdminGet('/api/dashboard/stats/users'),
-        tools: apiAdminGet('/api/dashboard/stats/tools'),
-        agents: apiAdminGet('/api/dashboard/stats/agents'),
+        basic: apiAdminGet(`/api/dashboard/stats${scopeQuery(scope)}`),
+        users: apiAdminGet(`/api/dashboard/stats/users${scopeQuery(scope)}`),
+        tools: apiAdminGet(`/api/dashboard/stats/tools${scopeQuery(scope)}`),
+        agents: apiAdminGet(`/api/dashboard/stats/agents${scopeQuery(scope)}`),
         knowledge: apiAdminGet('/api/dashboard/stats/knowledge')
       }
 
@@ -158,7 +164,9 @@ export const dashboardApi = {
    * @param {string} timeRange - 时间范围 (14hours/14days/14weeks)
    * @returns {Promise<Object>} - 时间序列统计数据
    */
-  getCallTimeseries: (type = 'models', timeRange = '14days') => {
-    return apiAdminGet(`/api/dashboard/stats/calls/timeseries?type=${type}&time_range=${timeRange}`)
+  getCallTimeseries: (type = 'models', timeRange = '14days', scope = 'all') => {
+    return apiAdminGet(
+      `/api/dashboard/stats/calls/timeseries?type=${type}&time_range=${timeRange}${scope === 'current' ? '&scope=current' : ''}`
+    )
   }
 }

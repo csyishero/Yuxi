@@ -32,7 +32,9 @@
 
       <div class="call-scope-note">
         <span
-          >包含已删除记录；按实际执行时间统计。模型调用为已记录次数，工具调用为已完成执行。</span
+          >{{
+            scope === 'all' ? '包含已删除记录' : '仅当前有效记录'
+          }}；按实际执行时间统计。模型调用为已记录次数，工具调用为已完成执行。</span
         >
         <span v-if="isTokenView">Token 按执行开始时间归属，仅含已记录用量。</span>
         <span v-if="isTokenView && callStatsData?.incomplete_usage_runs" role="status">
@@ -64,6 +66,7 @@ function getCSSVariable(variableName, element = document.documentElement) {
 }
 
 const props = defineProps({
+  scope: { type: String, default: 'all' },
   loading: { type: Boolean, default: false }
 })
 
@@ -133,7 +136,11 @@ const loadCallStats = async () => {
   callStatsLoading.value = true
   callStatsError.value = false
   try {
-    const response = await dashboardApi.getCallTimeseries(callDataType.value, callTimeRange.value)
+    const response = await dashboardApi.getCallTimeseries(
+      callDataType.value,
+      callTimeRange.value,
+      props.scope
+    )
     if (requestId !== latestCallRequest) return
     callStatsData.value = response
     await nextTick()

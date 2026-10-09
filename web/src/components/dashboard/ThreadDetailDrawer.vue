@@ -197,8 +197,9 @@
 </template>
 
 <script setup>
+const props = defineProps({ scope: { type: String, default: 'all' } })
 import { formatTokenUsage } from '@/utils/dashboard'
-import { ref } from 'vue'
+import { ref, onUnmounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { User, Bot, Wrench, Cpu } from '@lucide/vue'
 import { dashboardApi } from '@/apis/dashboard_api'
@@ -211,6 +212,11 @@ const expandedTools = ref(new Set())
 
 const drawerWidth = 'min(720px, 100vw)'
 
+let disposed = false
+onUnmounted(() => {
+  disposed = true
+})
+
 const open = async (threadId) => {
   if (!threadId) return
   visible.value = true
@@ -219,14 +225,16 @@ const open = async (threadId) => {
   expandedTools.value.clear()
 
   try {
-    const data = await dashboardApi.getConversationDetail(threadId)
+    const data = await dashboardApi.getConversationDetail(threadId, props.scope)
+    if (disposed) return
     detail.value = data
   } catch (err) {
+    if (disposed) return
     console.error('获取会话详情失败:', err)
     message.error('获取会话详情失败')
     visible.value = false
   } finally {
-    loading.value = false
+    if (!disposed) loading.value = false
   }
 }
 

@@ -1,6 +1,12 @@
 <template>
   <div class="stats-overview-container">
-    <p class="scope-note">历史累计 · 包含已删除会话、项目及已注销用户的留存记录</p>
+    <p class="scope-note">
+      {{
+        scope === 'all'
+          ? '历史累计 · 包含已删除会话、项目及已注销用户的留存记录'
+          : '当前有效记录 · 排除已删除会话、项目、已注销用户和已移除智能体的记录'
+      }}
+    </p>
     <DashboardMetricGrid>
       <DashboardMetricCard
         :icon="MessageCircle"
@@ -80,6 +86,7 @@ import DashboardMetricCard from './DashboardMetricCard.vue'
 import DashboardMetricGrid from './DashboardMetricGrid.vue'
 
 const props = defineProps({
+  scope: { type: String, default: 'all' },
   basicStats: {
     type: Object,
     default: () => ({})

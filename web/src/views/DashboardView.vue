@@ -54,25 +54,49 @@
       </template>
     </PageHeader>
 
-    <StatsOverviewComponent
-      v-if="overviewActivated"
-      v-show="activeTab === 'overview'"
-      :basic-stats="basicStats"
-      @open-feedback="handleOpenFeedback"
-    />
+    <div class="scope-controls">
+      <span>统计范围</span>
+      <a-segmented v-model:value="dataScope" :options="scopeOptions" aria-label="统计范围" />
+      <span class="scope-description">{{
+        dataScope === 'all'
+          ? '包含已删除记录，便于查看完整历史'
+          : '仅统计当前有效归属的记录；归档会话仍计入'
+      }}</span>
+    </div>
+
+    <a-alert
+      v-if="activeTab === 'overview' && overviewError"
+      :message="overviewError"
+      type="warning"
+      show-icon
+    >
+      <template #action
+        ><a-button size="small" :loading="loading" @click="loadAllStats">重试</a-button></template
+      >
+    </a-alert>
+    <a-spin v-if="overviewActivated" v-show="activeTab === 'overview'" :spinning="loading">
+      <StatsOverviewComponent
+        v-if="loading || Object.keys(basicStats).length"
+        :basic-stats="basicStats"
+        :scope="dataScope"
+        @open-feedback="handleOpenFeedback"
+      />
+    </a-spin>
 
     <!-- Tab 1: 系统概览主要内容区域 -->
-    <div
-      v-if="overviewActivated"
-      v-show="activeTab === 'overview'"
-      class="dashboard-grid"
-    >
+    <div v-if="overviewActivated" v-show="activeTab === 'overview'" class="dashboard-grid">
       <!-- 调用统计模块 - 占据2x1网格 -->
-      <CallStatsComponent :loading="loading" ref="callStatsRef" />
+      <CallStatsComponent
+        :key="dataScope"
+        :scope="dataScope"
+        :loading="loading"
+        ref="callStatsRef"
+      />
 
       <!-- 用户活跃度分析 - 占据1x1网格 -->
       <div class="grid-item user-stats">
         <UserStatsComponent
+          :scope="dataScope"
           :user-stats="allStatsData?.users"
           :loading="loading"
           ref="userStatsRef"
@@ -109,11 +133,11 @@
 
     <!-- Tab 2: 会话（Thread）多维分析试点 -->
     <div v-if="threadActivated" v-show="activeTab === 'threads'" class="thread-tab-container">
-      <ThreadStatsComponent ref="threadStatsRef" />
+      <ThreadStatsComponent :key="dataScope" :scope="dataScope" ref="threadStatsRef" />
     </div>
 
     <!-- 反馈模态框 -->
-    <FeedbackModalComponent ref="feedbackModal" />
+    <FeedbackModalComponent :key="dataScope" :scope="dataScope" ref="feedbackModal" />
   </div>
 </template>
 
@@ -145,6 +169,12 @@ const dashboardTabs = [
   { key: 'overview', label: '系统概览' },
   { key: 'threads', label: '会话分析' }
 ]
+const dataScope = ref('all')
+const scopeOptions = [
+  { label: '全部历史', value: 'all' },
+  { label: '当前有效记录', value: 'current' }
+]
+let latestOverviewRequest = 0
 const normalizeTab = (tab) => (tab === 'threads' ? 'threads' : 'overview')
 const activeTab = ref(normalizeTab(route.query.tab))
 const overviewActivated = ref(activeTab.value === 'overview')
@@ -170,6 +200,7 @@ const allStatsData = ref({
 
 const loading = ref(false)
 const overviewLoaded = ref(false)
+const overviewError = ref('')
 
 // 子组件引用
 const callStatsRef = ref(null)
@@ -182,9 +213,13 @@ const threadStatsRef = ref(null)
 // 加载概览统计数据
 const loadAllStats = async () => {
   if (overviewLoaded.value) return
+  const requestId = ++latestOverviewRequest
+  const scope = dataScope.value
   loading.value = true
+  overviewError.value = ''
   try {
-    const response = await dashboardApi.getAllStats()
+    const response = await dashboardApi.getAllStats(scope)
+    if (requestId !== latestOverviewRequest) return
 
     basicStats.value = response.basic
     allStatsData.value = {
@@ -195,20 +230,33 @@ const loadAllStats = async () => {
     }
     overviewLoaded.value = true
   } catch (error) {
+    if (requestId !== latestOverviewRequest) return
     console.error('加载统计数据失败:', error)
     try {
-      const basicResponse = await dashboardApi.getStats()
+      const basicResponse = await dashboardApi.getStats(scope)
+      if (requestId !== latestOverviewRequest) return
       basicStats.value = basicResponse
-      overviewLoaded.value = true
-      message.warning('详细统计暂不可用，当前仅显示基础指标')
+      overviewError.value = '详细统计暂不可用，当前仅显示基础指标'
+      message.warning(overviewError.value)
     } catch (basicError) {
+      if (requestId !== latestOverviewRequest) return
       console.error('加载基础统计数据失败:', basicError)
-      message.error('无法加载统计数据')
+      overviewError.value = '无法加载当前统计范围的数据，请重试'
+      message.error(overviewError.value)
     }
   } finally {
-    loading.value = false
+    if (requestId === latestOverviewRequest) loading.value = false
   }
 }
+
+watch(dataScope, () => {
+  ++latestOverviewRequest
+  overviewLoaded.value = false
+  overviewError.value = ''
+  basicStats.value = {}
+  allStatsData.value = { users: null, tools: null, knowledge: null, agents: null }
+  if (overviewActivated.value) loadAllStats()
+})
 
 // 切换 Tab 处理
 const handleTabChange = async ({ key }) => {
@@ -278,6 +326,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  ++latestOverviewRequest
   cleanupCharts()
 })
 </script>
@@ -287,6 +336,18 @@ onUnmounted(() => {
   background-color: var(--gray-25);
   min-height: calc(100vh - 64px);
   overflow-x: hidden;
+}
+
+.scope-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 16px var(--page-padding);
+}
+.scope-description {
+  color: var(--gray-500);
+  font-size: 12px;
 }
 
 .header-context {

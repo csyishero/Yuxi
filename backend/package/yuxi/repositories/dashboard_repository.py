@@ -27,8 +27,23 @@ from yuxi.utils.datetime_utils import UTC, format_utc_datetime, utc_now
 class DashboardRepository:
     """集中封装 Dashboard 的跨表统计查询与读模型聚合。"""
 
-    def __init__(self, db_session: AsyncSession):
+    def __init__(self, db_session: AsyncSession, *, scope: str = "all"):
         self.db_session = db_session
+        self.scope = scope
+
+    def _scope_filter(self, conversation_id=Conversation.id):
+        """统一当前有效归属；全部历史不按当前对象状态过滤。"""
+        if self.scope == "all":
+            return True
+        valid = (
+            select(Conversation.id)
+            .join(Project, (Project.id == Conversation.project_id) & (Project.uid == Conversation.uid))
+            .join(User, User.uid == Conversation.uid)
+            .join(Agent, Agent.slug == Conversation.agent_id)
+            .where(Conversation.status != "deleted", Project.status == "active", User.is_deleted == 0)
+            .correlate(None)
+        )
+        return conversation_id.in_(valid)
 
     @staticmethod
     def _time_group_format(column: Any, time_range: str) -> Any:
@@ -120,8 +135,8 @@ class DashboardRepository:
             .subquery()
         )
 
-    @staticmethod
     def _audit_filters(
+        self,
         *,
         start=None,
         end=None,
@@ -133,7 +148,7 @@ class DashboardRepository:
         include_subagents=True,
     ):
         """列表和图表共享归属与时间筛选，删除不丢失历史。"""
-        filters = []
+        filters = [self._scope_filter()]
         for value, column in (
             (uid, Conversation.uid),
             (agent_id, Conversation.agent_id),
@@ -282,6 +297,7 @@ class DashboardRepository:
                 select(Conversation.uid, User.username, User.avatar, User.is_deleted)
                 .select_from(Conversation)
                 .outerjoin(User, Conversation.uid == User.uid)
+                .where(self._scope_filter())
                 .distinct()
             )
         ).all()
@@ -290,6 +306,7 @@ class DashboardRepository:
                 select(Conversation.agent_id, Agent.name, Agent.icon)
                 .select_from(Conversation)
                 .outerjoin(Agent, Conversation.agent_id == Agent.slug)
+                .where(self._scope_filter())
                 .distinct()
             )
         ).all()
@@ -315,7 +332,21 @@ class DashboardRepository:
         ]
         users.sort(key=lambda item: (item["is_deleted"], item["username"].lower()))
         agents.sort(key=lambda item: (item["is_deleted"], item["agent_name"].lower()))
-        projects = (await self.db_session.execute(select(Project).order_by(Project.created_at.desc()))).scalars().all()
+        projects = (
+            (
+                await self.db_session.execute(
+                    select(Project)
+                    .where(
+                        Project.id.in_(select(Conversation.project_id).where(self._scope_filter()))
+                        if self.scope == "current"
+                        else True
+                    )
+                    .order_by(Project.created_at.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
         return {
             "users": users,
             "agents": agents,
@@ -331,7 +362,7 @@ class DashboardRepository:
             ],
         }
 
-    async def get_conversation_audit_metadata(self, conversation: Conversation) -> dict[str, Any]:
+    async def get_conversation_audit_metadata(self, conversation: Conversation) -> dict[str, Any] | None:
         """读取会话关联用户与 Agent 的当前审计状态。"""
         row = (
             await self.db_session.execute(
@@ -340,9 +371,11 @@ class DashboardRepository:
                 .outerjoin(User, Conversation.uid == User.uid)
                 .outerjoin(Agent, Conversation.agent_id == Agent.slug)
                 .outerjoin(Project, Conversation.project_id == Project.id)
-                .where(Conversation.id == conversation.id)
+                .where(Conversation.id == conversation.id, self._scope_filter())
             )
-        ).one()
+        ).one_or_none()
+        if row is None:
+            return None
         user, agent, project = row
         return {
             "project_id": conversation.project_id,
@@ -369,7 +402,7 @@ class DashboardRepository:
                 select(day.label("date"), func.count(distinct(Conversation.uid)).label("active_users"))
                 .select_from(Message)
                 .join(Conversation, Message.conversation_id == Conversation.id)
-                .where(Message.role == "user", Message.created_at.between(start, end))
+                .where(self._scope_filter(), Message.role == "user", Message.created_at.between(start, end))
                 .group_by(day)
             )
         ).all()
@@ -384,11 +417,20 @@ class DashboardRepository:
                 )
                 .select_from(Message)
                 .join(Conversation, Message.conversation_id == Conversation.id)
-                .where(Message.role == "user", Message.created_at.between(end - timedelta(days=30), end))
+                .where(
+                    self._scope_filter(),
+                    Message.role == "user",
+                    Message.created_at.between(end - timedelta(days=30), end),
+                )
             )
         ).one()
         return {
-            "total_users": int(await self.db_session.scalar(select(func.count(User.id))) or 0),
+            "total_users": int(
+                await self.db_session.scalar(
+                    select(func.count(User.id)).where(User.is_deleted == 0 if self.scope == "current" else True)
+                )
+                or 0
+            ),
             "active_users_24h": int(totals[1]),
             "active_users_30d": int(totals[0]),
             "daily_active_users": [
@@ -400,8 +442,7 @@ class DashboardRepository:
             ],
         }
 
-    @staticmethod
-    def _tool_executions():
+    def _tool_executions(self):
         """已完成工具以 lifecycle 开始时间归属，旧记录保留原始时间。"""
         tool_id = Message.extra_metadata["compatibility_tool_call_id"].as_integer()
         audit = (
@@ -417,8 +458,9 @@ class DashboardRepository:
                 ToolCall.status,
                 func.coalesce(audit.c.started_at, ToolCall.created_at).label("created_at"),
             )
+            .join(Message, Message.id == ToolCall.message_id)
             .outerjoin(audit, audit.c.tool_id == ToolCall.id)
-            .where(ToolCall.status.in_(("success", "error")))
+            .where(ToolCall.status.in_(("success", "error")), self._scope_filter(Message.conversation_id))
             .subquery()
         )
 
@@ -474,7 +516,7 @@ class DashboardRepository:
     async def get_agent_analytics(self) -> dict[str, Any]:
         """汇总包含已移除智能体的历史使用情况。"""
         agents = list((await self.db_session.execute(select(Agent).order_by(Agent.name.asc()))).scalars().all())
-        valid_filters = []
+        valid_filters = [self._scope_filter()]
 
         conversation_rows = (
             await self.db_session.execute(
@@ -500,6 +542,9 @@ class DashboardRepository:
                 .outerjoin(Agent, Conversation.agent_id == Agent.slug)
                 .where(
                     *valid_filters,
+                    MessageFeedback.uid.in_(select(User.uid).where(User.is_deleted == 0).correlate(None))
+                    if self.scope == "current"
+                    else True,
                     or_(Message.message_type.is_(None), Message.message_type.notin_(AUDIT_MESSAGE_TYPES)),
                 )
                 .group_by(Conversation.agent_id)
@@ -514,7 +559,7 @@ class DashboardRepository:
                 .join(Conversation, Message.conversation_id == Conversation.id)
                 .outerjoin(User, Conversation.uid == User.uid)
                 .outerjoin(Agent, Conversation.agent_id == Agent.slug)
-                .where(ToolCall.status.in_(("success", "error")))
+                .where(*valid_filters, ToolCall.status.in_(("success", "error")))
                 .group_by(Conversation.agent_id)
             )
         ).all()
@@ -550,14 +595,24 @@ class DashboardRepository:
 
     async def get_basic_stats(self) -> dict[str, Any]:
         """分别读取历史累计事实与当前可用资源。"""
-        total_conversations = await self.db_session.scalar(select(func.count(Conversation.id)))
+        total_conversations = await self.db_session.scalar(
+            select(func.count(Conversation.id)).where(self._scope_filter())
+        )
         visible_message = or_(Message.message_type.is_(None), Message.message_type.notin_(AUDIT_MESSAGE_TYPES))
-        total_messages = await self.db_session.scalar(select(func.count(Message.id)).where(visible_message))
+        total_messages = await self.db_session.scalar(
+            select(func.count(Message.id)).where(visible_message, self._scope_filter(Message.conversation_id))
+        )
         feedback = (
             await self.db_session.execute(
                 select(func.count(MessageFeedback.id), func.sum(case((MessageFeedback.rating == "like", 1), else_=0)))
                 .join(Message, MessageFeedback.message_id == Message.id)
-                .where(visible_message)
+                .where(
+                    visible_message,
+                    self._scope_filter(Message.conversation_id),
+                    MessageFeedback.uid.in_(select(User.uid).where(User.is_deleted == 0))
+                    if self.scope == "current"
+                    else True,
+                )
             )
         ).one()
         current_users = await self.db_session.scalar(select(func.count(User.id)).where(User.is_deleted == 0))
@@ -599,6 +654,10 @@ class DashboardRepository:
             .outerjoin(User, MessageFeedback.uid == User.uid)
             .outerjoin(Agent, Conversation.agent_id == Agent.slug)
             .where(
+                self._scope_filter(),
+                MessageFeedback.uid.in_(select(User.uid).where(User.is_deleted == 0).correlate(None))
+                if self.scope == "current"
+                else True,
                 or_(Message.message_type.is_(None), Message.message_type.notin_(AUDIT_MESSAGE_TYPES)),
             )
         )
@@ -636,7 +695,7 @@ class DashboardRepository:
                 select(
                     group.label("date"), AgentRun.agent_slug.label("category"), func.count(AgentRun.id).label("count")
                 )
-                .where(event_time.between(start, end))
+                .where(self._scope_filter(AgentRun.conversation_id), event_time.between(start, end))
                 .group_by(group, AgentRun.agent_slug)
             )
             rows = (await self.db_session.execute(query)).all()
@@ -650,6 +709,7 @@ class DashboardRepository:
                 await self.db_session.execute(
                     select(group.label("date"), category.label("category"), func.count(Message.id).label("count"))
                     .where(
+                        self._scope_filter(Message.conversation_id),
                         Message.role == "assistant",
                         event_time.between(start, end),
                         or_(
@@ -688,7 +748,9 @@ class DashboardRepository:
                                     0,
                                 ).label("count"),
                             )
-                            .where(executed, event_time.between(start, end))
+                            .where(
+                                self._scope_filter(AgentRun.conversation_id), executed, event_time.between(start, end)
+                            )
                             .group_by(group)
                         )
                     ).all()
@@ -696,6 +758,7 @@ class DashboardRepository:
             incomplete = int(
                 await self.db_session.scalar(
                     select(func.count(AgentRun.id)).where(
+                        self._scope_filter(AgentRun.conversation_id),
                         executed,
                         event_time.between(start, end),
                         or_(

@@ -68,9 +68,11 @@ async def test_dashboard_rejects_invalid_query_ranges(test_client, admin_headers
         await test_client.get("/api/dashboard/stats/threads?time_range=365days", headers=admin_headers),
         await test_client.get("/api/dashboard/conversations?limit=0", headers=admin_headers),
         await test_client.get("/api/dashboard/conversations?offset=-1", headers=admin_headers),
+        await test_client.get("/api/dashboard/stats?scope=invalid", headers=admin_headers),
+        await test_client.get("/api/dashboard/conversations?scope=invalid", headers=admin_headers),
     ]
 
-    assert [response.status_code for response in responses] == [422, 422, 422]
+    assert [response.status_code for response in responses] == [422, 422, 422, 422, 422]
 
 
 async def test_agent_stats_http_omits_removed_top_performers_contract(test_client, admin_headers):
@@ -400,11 +402,18 @@ async def test_dashboard_history_survives_lifecycle_changes(test_client, admin_h
             assert before["summary"]["total_messages"] == 2
             assert before["summary"]["total_tokens"] == 30
             assert before["summary"]["token_usage_complete"] is True
+            assert (await read("stats/threads", {**filters, "scope": "current"}))["summary"] == before["summary"]
+            assert (await read("stats", {"scope": "current"}))["current_resources"] == (await read("stats"))[
+                "current_resources"
+            ]
+            current_tokens_before = await read("stats/calls/timeseries", {"type": "tokens", "scope": "current"})
             totals = {}
             for kind, expected in [("agents", 2), ("models", 2), ("tools", 2)]:
                 series = await read("stats/calls/timeseries", {"type": kind, "time_range": "14days"})
                 totals[kind] = sum(bucket["data"].get(marker, 0) for bucket in series["data"])
                 assert totals[kind] == expected
+                current_series = await read("stats/calls/timeseries", {"type": kind, "scope": "current"})
+                assert sum(bucket["data"].get(marker, 0) for bucket in current_series["data"]) == expected
                 assert series["total_count"] == sum(bucket["total"] for bucket in series["data"])
             tokens_before = await read("stats/calls/timeseries", {"type": "tokens", "time_range": "14days"})
 
@@ -412,6 +421,25 @@ async def test_dashboard_history_survives_lifecycle_changes(test_client, admin_h
             user.is_deleted = 1
             await db.delete(agent)
             await db.commit()
+            assert (await read("stats/threads", {**filters, "scope": "current"}))["summary"]["total_threads"] == 0
+            assert (await read("conversations", {**filters, "scope": "current", "status": "deleted"}))["total"] == 0
+            current_detail = await test_client.get(
+                f"/api/dashboard/conversations/{marker}", headers=admin_headers, params={"scope": "current"}
+            )
+            assert current_detail.status_code == 404
+            current_options = await read("conversations/options", {"scope": "current"})
+            assert all(item["project_id"] != marker for item in current_options["projects"])
+            for kind in totals:
+                series = await read("stats/calls/timeseries", {"type": kind, "scope": "current"})
+                assert sum(bucket["data"].get(marker, 0) for bucket in series["data"]) == 0
+            assert (await read("stats/calls/timeseries", {"type": "tokens", "scope": "current"}))[
+                "total_count"
+            ] == current_tokens_before["total_count"] - 30
+            assert (await read("stats", {"scope": "current"}))["current_resources"] == (await read("stats"))[
+                "current_resources"
+            ]
+            for path in ("stats/users", "stats/tools", "stats/agents", "feedbacks"):
+                await read(path, {"scope": "current"})
             after = await read("stats/threads", filters)
             assert before["summary"] == after["summary"]
             assert before["daily_trends"] == after["daily_trends"]

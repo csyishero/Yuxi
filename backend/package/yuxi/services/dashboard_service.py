@@ -15,9 +15,9 @@ from yuxi.utils.datetime_utils import format_utc_datetime
 class DashboardService:
     """封装 Dashboard 统计读模型、会话查询、反馈列表与时间序列分析。"""
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, *, scope: str = "all"):
         self.db = db
-        self.repo = DashboardRepository(db)
+        self.repo = DashboardRepository(db, scope=scope)
         self.conv_repo = ConversationRepository(db)
 
     async def get_basic_stats(self) -> dict[str, Any]:
@@ -121,8 +121,10 @@ class DashboardService:
         if not conversation:
             return None
 
-        messages = await self.conv_repo.get_messages(conversation.id)
         audit_metadata = await self.repo.get_conversation_audit_metadata(conversation)
+        if audit_metadata is None:
+            return None
+        messages = await self.conv_repo.get_messages(conversation.id)
         message_list = []
         for message in messages:
             message_data = {
