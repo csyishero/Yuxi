@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yuxi.storage.postgres.models_business import AgentRun, AgentRunRequest, Conversation, Project
+from yuxi.storage.postgres.models_business import AgentRun, AgentRunRequest, Conversation, Project, SubagentThread
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES
 
 
@@ -150,6 +150,22 @@ class ProjectRepository:
             )
         )
         return bool(active_run or queued_request)
+
+    async def is_sole_root_conversation(self, project: Project, thread_id: str) -> bool:
+        """只允许唯一普通会话提升项目，持久子会话关系不构成第二个入口。"""
+        child = exists().where(SubagentThread.child_conversation_id == Conversation.id)
+        roots = list(
+            (
+                await self.db.scalars(
+                    select(Conversation.thread_id).where(
+                        Conversation.project_id == project.id,
+                        Conversation.status != "subagent",
+                        ~child,
+                    )
+                )
+            ).all()
+        )
+        return roots == [thread_id]
 
     async def has_exclusive_conversation(self, project: Project, thread_id: str) -> bool:
         """确认目录仅绑定指定会话，历史会话也计入共享关系。"""

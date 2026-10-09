@@ -91,6 +91,8 @@ Yuxi 只交付完整知识能力路径。API 始终注册 `external_kb`、`knowl
 9. 前端在排队阶段消费 Request SSE，派发后切换到 Run SSE，并根据数据库状态处理断线恢复和终态补偿。
 10. Conversation 保存不可变 `project_id`，每个 Project 一期绑定一个 `workdir_path`。v0.7.1 Conversation 在一次性迁移中直接获得 implicit Project，不形成 Conversation 路径中间态。新建可选择 Project 使用 `projects/<项目名>_<project-id-prefix>[-N]` 专属 managed 目录；implicit Project 使用 `projects/YYYY-MM-DD_HH-MM-SS_<project-id-prefix>[-N]`，既有 `projects/<uuid>` 继续有效。存量 linked Project 可继续使用已有目录，但公开新建入口不再接受 linked。selectable Project 支持重命名且不移动目录；删除在同一事务中软删除 Project 与全部 Conversation，默认保留 Workdir，显式选择时仅对无同路径/下层共享绑定且无活动执行的 managed 目录登记持久清理任务；严格上层绑定不拥有子目录，服务在上层 Project 与 Conversation 准入锁内检查未完成工作后允许清理。Workspace tree 展示 `/projects` 下 selectable Project 的现存目录子树，包括软删除项目的留存目录；隐藏 implicit 与尚未归属 Project 的匿名目录。已删除的 `projects` 容器根绑定不扩大匿名目录可见性。`yuxi.workspace` 唯一拥有宿主路径和 fd-relative 文件访问，统一 Workdir resolver 通过 Project 为 Viewer、附件、Artifact、Run 和 SubAgent 提供同一持久路径。Agent Backend 单独把该路径映射为 `/home/gem/user-data/...` runtime 路径。目录的持久 POSIX 字节是 Agent 文件、附件、Viewer 和 artifact 的实时事实源，`uploads/outputs` 只是按需创建的目录约定。Run 终态清理 runtime 进程但保留 Workdir。
 
+独立 implicit managed 对话可通过“转为项目”原地提升为 selectable Project：保留项目 ID、会话归属和目录路径，只更新名称与可见性；服务在用户目录锁、Project 锁与 Conversation 锁下验证独立普通会话、目录所有权和工作占用，重复转换返回同一项目。旧 linked、共用普通会话和无效目录拒绝转换，子会话保持原项目归属。
+
 无项目会话删除默认保留 Workdir。用户显式选择清理时，服务在用户目录锁、Project 锁和 Conversation 锁内确认会话独占 implicit managed Project，然后复用持久目录清理任务；项目内会话不能单独清理共享目录。文件清理状态和失败重试由 Project 清理接口提供。
 
 审批或人机输入产生的 resume 请求会从 LangGraph checkpoint 恢复，并创建新的 AgentRun；它不重新进入普通消息 FIFO 接入流程。

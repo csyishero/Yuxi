@@ -27,6 +27,6 @@ Owner：backend/package/yuxi/repositories/dashboard_repository.py
 - 前端 lint、生产构建、文档构建与链接检查通过；工程契约单测 62 项通过，契约检查保留 4 项既有决策元数据及失效 Owner 问题。
 - Not run：真实浏览器页面、浅深色和响应式截图。当前任务先前的浏览器自动审批限制阻止页面操作，接口和组件测试不代表视觉验收通过。
 
-## 风险
+## 后果
 
 current 表示当前有效对象的历史使用，不等于正在运行。删除和注销会改变 current 数字，all 保持历史口径。

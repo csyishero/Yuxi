@@ -54,8 +54,7 @@
                     </button>
                     <span
                       v-if="
-                        group.threadStatus === 'loading' &&
-                        !isProjectExpanded(group.project.id)
+                        group.threadStatus === 'loading' && !isProjectExpanded(group.project.id)
                       "
                       class="project-status project-status-loading"
                       role="status"
@@ -122,6 +121,8 @@
                         @delete-chat="$emit('delete-chat', $event)"
                         @rename-chat="$emit('rename-chat', $event)"
                         @toggle-pin="$emit('toggle-pin', $event)"
+                        @promote-chat="confirmPromoteChat"
+                        @open-project="openChatProject"
                       />
                       <button
                         v-if="group.hasMore"
@@ -164,6 +165,8 @@
                   @delete-chat="$emit('delete-chat', $event)"
                   @rename-chat="$emit('rename-chat', $event)"
                   @toggle-pin="$emit('toggle-pin', $event)"
+                  @promote-chat="confirmPromoteChat"
+                  @open-project="openChatProject"
                 />
                 <div v-if="!otherConversations.length" class="list-state">暂无对话历史</div>
               </template>
@@ -203,6 +206,7 @@ import CollapseTransition from '@/components/common/CollapseTransition.vue'
 import { buildProjectConversationGroups } from '@/utils/projectConversationGroups'
 
 const props = defineProps({
+  promoteConversation: { type: Function, required: true },
   currentChatId: { type: String, default: null },
   chatsList: { type: Array, default: () => [] },
   projects: { type: Array, default: () => [] },
@@ -237,7 +241,8 @@ const groupedNavigation = computed(() =>
 )
 const projectGroups = computed(() =>
   groupedNavigation.value.groups.map((group) => {
-    const visibleCount = projectVisibleCounts.value[group.project.id] ?? INITIAL_PROJECT_CONVERSATIONS
+    const visibleCount =
+      projectVisibleCounts.value[group.project.id] ?? INITIAL_PROJECT_CONVERSATIONS
     return {
       ...group,
       visibleCount,
@@ -259,6 +264,58 @@ const toggleProject = (projectId) => {
   if (next.has(projectId)) next.delete(projectId)
   else next.add(projectId)
   expandedProjects.value = next
+}
+
+const openChatProject = (chat) => {
+  projectsExpanded.value = true
+  expandedProjects.value = new Set([...expandedProjects.value, chat.project_id])
+  emit('select-chat', chat.id)
+}
+
+const confirmPromoteChat = (chat) => {
+  if (!chat.can_delete_workdir) {
+    Modal.info({
+      title: '暂不支持直接转换',
+      content: '此历史对话未使用独立托管目录。原对话和文件保持原样，请在新项目中按需导入文件。',
+      centered: true
+    })
+    return
+  }
+  let name = chat.title || ''
+  Modal.confirm({
+    title: '将此对话转为项目',
+    icon: null,
+    centered: true,
+    okText: '转为项目',
+    cancelText: '取消',
+    content: h('div', [
+      h('input', {
+        value: name,
+        maxlength: 100,
+        class: 'rename-conversation-input',
+        'aria-label': '项目名称',
+        onInput: (event) => {
+          name = event.target.value
+        }
+      }),
+      h('p', { style: { wordBreak: 'break-all' } }, `保留目录：个人空间/${chat.workdir_path}`),
+      h('p', '此对话将归入项目。文件原地保留，不复制、不移动，后续项目内的对话共用此目录。')
+    ]),
+    onOk: async () => {
+      if (!name.trim()) {
+        message.warning('项目名称不能为空')
+        throw new Error('项目名称不能为空')
+      }
+      try {
+        const project = await props.promoteConversation(chat.id, name.trim())
+        openChatProject({ ...chat, project_id: project.id })
+        message.success('对话已归入项目，文件保留在原目录')
+      } catch (error) {
+        message.error(error?.message || '转为项目失败，请重试')
+        throw error
+      }
+    }
+  })
 }
 
 const renameProject = (project) => {

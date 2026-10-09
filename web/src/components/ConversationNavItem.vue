@@ -47,6 +47,13 @@
             >
               {{ chat.is_pinned ? '取消置顶' : '置顶' }}
             </a-menu-item>
+            <a-menu-item
+              key="project"
+              :icon="h(FolderPlus, { size: 14 })"
+              @click.stop="$emit(nested ? 'open-project' : 'promote-chat', chat)"
+            >
+              {{ nested ? '打开所属项目' : '转为项目' }}
+            </a-menu-item>
             <a-menu-item key="rename" :icon="h(SquarePen, { size: 14 })" @click.stop="renameChat">
               重命名
             </a-menu-item>
@@ -73,7 +80,7 @@
 <script setup>
 import { h } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { Loader2, MoreVertical, Pin, PinOff, SquarePen, Trash2 } from '@lucide/vue'
+import { FolderPlus, Loader2, MoreVertical, Pin, PinOff, SquarePen, Trash2 } from '@lucide/vue'
 
 const props = defineProps({
   chat: { type: Object, required: true },
@@ -81,7 +88,14 @@ const props = defineProps({
   nested: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['select-chat', 'delete-chat', 'rename-chat', 'toggle-pin'])
+const emit = defineEmits([
+  'select-chat',
+  'delete-chat',
+  'rename-chat',
+  'toggle-pin',
+  'promote-chat',
+  'open-project'
+])
 
 const confirmDeleteChat = () => {
   let deleteWorkdir = false

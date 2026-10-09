@@ -310,7 +310,10 @@ test('普通用户修改本人密码只调用当前账户密码接口', async ()
 
 test('账户设置通过按钮打开修改密码弹窗并在确认时提交', async () => {
   const source = await import('node:fs/promises').then((fs) =>
-    fs.readFile(new URL('../../src/components/AccountSettingsComponent.vue', import.meta.url), 'utf8')
+    fs.readFile(
+      new URL('../../src/components/AccountSettingsComponent.vue', import.meta.url),
+      'utf8'
+    )
   )
 
   assert.equal(source.includes('@click="openPasswordModal"'), true)
@@ -433,10 +436,7 @@ test('Project 与 Workspace API 按 xhome 契约构造请求', async () => {
       name: '客户交付',
       workdir: { mode: 'managed' }
     })
-    assert.equal(
-      requests[2].url,
-      '/api/projects/project-1?delete_workdir=true'
-    )
+    assert.equal(requests[2].url, '/api/projects/project-1?delete_workdir=true')
     assert.equal(requests[3].url, '/api/projects/workdir-deletions')
     assert.equal(
       requests[4].url,
@@ -488,6 +488,34 @@ test('目录删除显示固定业务冲突，未知响应和其他接口保持�
     const overlap = '项目目录与其他项目共用或重叠，不能删除文件夹'
     const running = '项目中仍有运行或排队的任务，请结束后重试'
     const cases = [
+      [
+        '/api/projects/from-conversation/example',
+        'POST',
+        409,
+        '原对话目录不存在或不可用，未转换项目',
+        '原对话目录不存在或不可用，未转换项目'
+      ],
+      [
+        '/api/projects/from-conversation/example',
+        'POST',
+        422,
+        '旧共用或非独立目录不支持直接转为项目',
+        '旧共用或非独立目录不支持直接转为项目'
+      ],
+      [
+        '/api/projects/from-conversation/example',
+        'POST',
+        409,
+        'secret-response',
+        '请求冲突，请刷新后重试'
+      ],
+      [
+        '/api/projects/from-conversation/example',
+        'GET',
+        409,
+        '原对话目录不存在或不可用，未转换项目',
+        '请求冲突，请刷新后重试'
+      ],
       ['/api/chat/thread/example?delete_workdir=true', 'DELETE', 409, overlap, overlap],
       ['/api/projects/example?delete_workdir=true', 'DELETE', 409, running, running],
       [
@@ -543,7 +571,8 @@ test('文件预览 API 绕过 HTTP 缓存读取当前字节', async () => {
       await workspace.getWorkspaceKnowledgeFileContent('kb', 'file'),
       await viewer.getViewerFileContent('thread', '/report.txt'),
       await threadApi.previewThreadArtifact('thread', '/home/gem/user-data/report.txt')
-    ]) assert.equal(await response.text(), 'fresh')
+    ])
+      assert.equal(await response.text(), 'fresh')
     assert.equal(calls.length, 4)
     assert.ok(calls.every((call) => call.cache === 'no-store'))
   })

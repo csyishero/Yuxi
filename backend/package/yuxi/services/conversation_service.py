@@ -151,7 +151,7 @@ async def create_thread_view(
             if not normalized_request_id:
                 raise
             project = await project_repo.get_by_idempotency_key(f"thread:{normalized_request_id}", str(current_uid))
-            if project is None or project.selection_status != "implicit":
+            if project is None or project.status != "active":
                 raise HTTPException(status_code=409, detail="request_id 已用于其他 Conversation 创建意图")
     try:
         conversation = await conv_repo.add_conversation(
@@ -551,7 +551,11 @@ def _require_matching_thread_creation_intent(
     same_project_intent = (
         conversation.project_id == project_id
         if project_id
-        else project is not None and project.selection_status == "implicit"
+        else project.selection_status == "implicit"
+        or (
+            bool(getattr(conversation, "creation_request_id", None))
+            and getattr(project, "idempotency_key", None) == f"thread:{conversation.creation_request_id}"
+        )
     )
     if conversation.agent_id != agent_slug or not same_project_intent:
         raise HTTPException(status_code=409, detail="request_id 已用于其他 Conversation 创建意图")

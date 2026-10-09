@@ -68,6 +68,14 @@ const DIRECTORY_DELETE_ERRORS = new Set([
   '项目内的对话不能单独删除共享文件夹'
 ])
 
+const PROJECT_PROMOTION_ERRORS = new Set([
+  '旧共用或非独立目录不支持直接转为项目',
+  '此目录存在其他普通会话，或当前是子会话，不能直接转为项目',
+  '目录存在共享绑定或其他任务占用，不能直接转为项目',
+  '对话仍有运行、排队或清理任务，请结束后再转为项目',
+  '原对话目录不存在或不可用，未转换项目'
+])
+
 function publicErrorMessage(url, status, headers, requiresAuth, options, errorData) {
   const path = safeRequestMetadata(url, {}).path
   if (
@@ -78,6 +86,13 @@ function publicErrorMessage(url, status, headers, requiresAuth, options, errorDa
   ) {
     return errorData.detail
   }
+  if (
+    options?.method?.toUpperCase() === 'POST' &&
+    /^\/api\/projects\/from-conversation\/[^/]+\/?$/.test(path) &&
+    [409, 422].includes(status) &&
+    PROJECT_PROMOTION_ERRORS.has(errorData?.detail)
+  )
+    return errorData.detail
   if (status === 400) return '请求参数错误'
   if (status === 401) {
     if (requiresAuth) return '登录已过期，请重新登录'

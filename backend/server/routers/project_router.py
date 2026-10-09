@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.utils.auth_middleware import get_db, get_required_user
 from yuxi.services.project_service import (
     create_project_view,
+    promote_conversation_project_view,
     delete_project_view,
     get_project_workdir_deletion_view,
     list_project_workdir_deletions_view,
@@ -69,6 +70,19 @@ async def create_project(
         directory_mode=payload.workdir.mode,
         workdir_path=payload.workdir.path,
         db=db,
+    )
+
+
+@projects.post("/from-conversation/{thread_id}")
+async def promote_conversation_project(
+    thread_id: str,
+    payload: ProjectUpdate,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """将独立对话原地转为可见项目，重复请求返回同一项目。"""
+    return await promote_conversation_project_view(
+        uid=str(current_user.uid), thread_id=thread_id, name=payload.name, db=db
     )
 
 

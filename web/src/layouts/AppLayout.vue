@@ -434,6 +434,19 @@ const handleTogglePinChat = async (threadId) => {
   }
 }
 
+const handlePromoteConversation = async (threadId, name) => {
+  const uid = userStore.uid
+  const project = await projectApi.promoteConversation(threadId, name)
+  if (uid !== userStore.uid) throw new Error('登录用户已变化，请重新打开项目列表')
+  projectsStore.upsertProject(project)
+  for (const thread of threads.value) {
+    if (thread.project_id === project.id) {
+      chatThreadsStore.upsertThread({ ...thread, can_delete_workdir: false })
+    }
+  }
+  return project
+}
+
 const handleRenameProject = async ({ projectId, name }) => {
   if (!projectId || projectPendingId.value) return
   projectPendingId.value = projectId
@@ -606,6 +619,7 @@ provide('settingsModal', {
       </div>
       <div class="fill">
         <ConversationNavSection
+          :promote-conversation="handlePromoteConversation"
           v-if="!sidebarCollapsed"
           class="sidebar-conversations"
           :current-chat-id="activeConversationThreadId"

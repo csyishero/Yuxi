@@ -10,6 +10,9 @@ export const projectApi = {
       workdir: { mode: 'managed' }
     }),
 
+  promoteConversation: (threadId, name) =>
+    apiPost(`/api/projects/from-conversation/${encodeURIComponent(threadId)}`, { name }),
+
   renameProject: (projectId, name) => apiPut(`/api/projects/${projectId}`, { name }),
 
   deleteProject: (projectId, { deleteWorkdir = false } = {}) =>

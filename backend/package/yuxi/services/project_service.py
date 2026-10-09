@@ -23,6 +23,7 @@ from yuxi.workspace.paths import (
     normalize_managed_workdir_path,
 )
 from yuxi.workspace.filesystem import Workspace
+from yuxi.workspace.workdir import Workdir
 
 MAX_PROJECT_NAME_LENGTH = 255
 
@@ -162,6 +163,52 @@ async def list_projects_view(*, uid: str, db) -> list[dict]:
     return [project.to_dict() for project in projects]
 
 
+async def promote_conversation_project_view(*, uid: str, thread_id: str, name: str, db) -> dict:
+    """将当前用户独立对话的隐藏项目原地提升，保留全部路径与归属。"""
+    normalized_name = _normalize_project_name(name, required=True)
+    await _lock_project_workdir_changes(db=db, uid=str(uid))
+    conversations = ConversationRepository(db)
+    conversation = await conversations.get_conversation_by_thread_id(thread_id)
+    if conversation is None or conversation.uid != str(uid):
+        raise HTTPException(status_code=404, detail="对话不存在")
+    repository = ProjectRepository(db)
+    project = await repository.lock_active_for_user(conversation.project_id, str(uid))
+    conversation = await conversations.lock_conversation_by_thread_id(thread_id)
+    if project is None or conversation is None or conversation.status == "deleted":
+        raise HTTPException(status_code=404, detail="对话或项目已删除")
+    if project.selection_status == "selectable":
+        return project.to_dict()
+    if not await repository.is_sole_root_conversation(project, thread_id):
+        raise HTTPException(status_code=409, detail="此目录存在其他普通会话，或当前是子会话，不能直接转为项目")
+    if project.directory_mode != "managed" or not _is_owned_managed_directory(project):
+        raise HTTPException(status_code=422, detail="旧共用或非独立目录不支持直接转为项目")
+    if await repository.has_other_workdir_overlap(project):
+        raise HTTPException(status_code=409, detail="目录存在共享绑定或其他任务占用，不能直接转为项目")
+    if await repository.has_active_project_work(project):
+        raise HTTPException(status_code=409, detail="对话仍有运行、排队或清理任务，请结束后再转为项目")
+    try:
+        Workdir.open_existing(str(uid), project.workdir_path)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail="原对话目录不存在或不可用，未转换项目") from exc
+    project.name = normalized_name
+    project.selection_status = "selectable"
+    project.updated_at = utc_now_naive()
+    await db.commit()
+    return project.to_dict()
+
+
+def _is_owned_managed_directory(project: Project) -> bool:
+    """验证路径使用该 Project 的专属目录标识，不读取或修改文件。"""
+    try:
+        normalized_path = normalize_managed_workdir_path(project.workdir_path)
+    except ValueError:
+        return False
+    directory_name = normalized_path.split("/", 1)[1]
+    return directory_name == project.id or bool(
+        re.search(rf"_{re.escape(project.id[:8])}(?:-[1-9]\d*)?$", directory_name)
+    )
+
+
 async def rename_project_view(*, uid: str, project_id: str, name: str, db) -> dict:
     """重命名当前用户的 selectable Project。"""
     normalized_name = _normalize_project_name(name, required=True)
@@ -180,12 +227,7 @@ async def rename_project_view(*, uid: str, project_id: str, name: str, db) -> di
 async def _validate_managed_directory_deletion(*, project: Project, repository: ProjectRepository) -> None:
     if project.directory_mode != "managed":
         raise HTTPException(status_code=422, detail="关联已有目录的项目不能删除文件夹")
-    try:
-        normalized_path = normalize_managed_workdir_path(project.workdir_path)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail="项目目录不符合安全清理规则") from exc
-    directory_name = normalized_path.split("/", 1)[1]
-    if directory_name != project.id and not re.search(rf"_{re.escape(project.id[:8])}(?:-[1-9]\d*)?$", directory_name):
+    if not _is_owned_managed_directory(project):
         raise HTTPException(status_code=409, detail="项目目录与项目 ID 不匹配，不能删除文件夹")
     if await repository.has_other_workdir_overlap(project):
         raise HTTPException(status_code=409, detail="项目目录与其他项目共用或重叠，不能删除文件夹")
