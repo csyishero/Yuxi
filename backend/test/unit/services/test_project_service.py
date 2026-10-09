@@ -311,7 +311,7 @@ async def test_rename_project_rejects_blank_name_before_write():
 
 
 async def test_delete_project_soft_deletes_all_conversations_in_one_commit(monkeypatch):
-    project = SimpleNamespace(id="project-1")
+    project = SimpleNamespace(id="project-1", uid="user-1")
     calls = []
 
     class _ProjectRepository:
@@ -331,6 +331,11 @@ async def test_delete_project_soft_deletes_all_conversations_in_one_commit(monke
 
     result = await svc.delete_project_view(uid="user-1", project_id="project-1", db=db)
 
-    assert result == {"message": "删除成功", "deleted_conversations": 3, "workdir_delete_task_id": None}
+    assert result == {
+        "message": "删除成功",
+        "project_id": "project-1",
+        "deleted_conversations": 3,
+        "workdir_delete_task_id": None,
+    }
     assert calls[0][0] is project
     assert db.commits == 1

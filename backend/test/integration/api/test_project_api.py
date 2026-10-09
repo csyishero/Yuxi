@@ -336,23 +336,95 @@ async def test_existing_linked_project_remains_visible_but_cannot_delete_directo
             await db.execute("DELETE FROM projects WHERE id = $1", project_id)
 
 
+@pytest.mark.parametrize("use_project", [False, True])
+async def test_thread_delete_preserves_files_by_default_and_rejects_project_cleanup(
+    test_client, admin_headers, use_project
+):
+    project_id = None
+    if use_project:
+        response = await test_client.post(
+            "/api/projects",
+            headers=admin_headers,
+            json={"request_id": str(uuid.uuid4()), "name": "共享目录", "workdir": {"mode": "managed"}},
+        )
+        assert response.status_code == 200, response.text
+        project_id = response.json()["id"]
+    response = await test_client.post(
+        "/api/chat/thread",
+        headers=admin_headers,
+        json={
+            "agent_id": await _default_agent_slug(test_client, admin_headers),
+            "project_id": project_id,
+            "title": make_test_conversation_title("keep-thread-files"),
+            "metadata": make_test_conversation_metadata("keep-thread-files"),
+        },
+    )
+    assert response.status_code == 200, response.text
+    thread = response.json()
+    directory = user_workdir_host_dir(thread["uid"], thread["workdir_path"])
+    (directory / "marker.txt").write_text("keep", encoding="utf-8")
+    try:
+        response = await test_client.delete(
+            f"/api/chat/thread/{thread['id']}",
+            headers=admin_headers,
+            params={"delete_workdir": True} if use_project else {},
+        )
+        assert response.status_code == (422 if use_project else 200), response.text
+        assert thread["can_delete_workdir"] is (not use_project)
+        assert (directory / "marker.txt").read_text(encoding="utf-8") == "keep"
+        async with _database_connection() as db:
+            row = await db.fetchrow(
+                "SELECT c.status AS conversation_status, p.status AS project_status "
+                "FROM conversations c JOIN projects p ON p.id = c.project_id WHERE c.thread_id = $1",
+                thread["id"],
+            )
+        assert row["conversation_status"] == ("active" if use_project else "deleted")
+        assert row["project_status"] == "active"
+    finally:
+        async with _database_connection() as db:
+            await db.execute(
+                "DELETE FROM conversation_stats WHERE conversation_id IN "
+                "(SELECT id FROM conversations WHERE thread_id = $1)",
+                thread["id"],
+            )
+            await db.execute("DELETE FROM conversations WHERE thread_id = $1", thread["id"])
+            await db.execute("DELETE FROM projects WHERE id = $1", thread["project_id"])
+        from yuxi.workspace.filesystem import Workspace
+
+        Workspace(thread["uid"]).delete_authorized_path(f"/{thread['workdir_path']}", root="/")
+
+
+@pytest.mark.parametrize("standalone", [False, True])
 async def test_explicit_managed_delete_persists_task_and_removes_only_its_directory(
     test_client,
     admin_headers,
     deleted_projects_parent,
+    standalone,
 ):
-    created = await test_client.post(
-        "/api/projects",
-        headers=admin_headers,
-        json={
-            "request_id": make_test_resource_id("managed-delete"),
-            "name": "清理专属目录",
-            "workdir": {"mode": "managed"},
-        },
-    )
+    if standalone:
+        created = await test_client.post(
+            "/api/chat/thread",
+            headers=admin_headers,
+            json={
+                "agent_id": await _default_agent_slug(test_client, admin_headers),
+                "title": make_test_conversation_title("standalone-delete-files"),
+                "metadata": make_test_conversation_metadata("standalone-delete-files"),
+            },
+        )
+    else:
+        created = await test_client.post(
+            "/api/projects",
+            headers=admin_headers,
+            json={
+                "request_id": make_test_resource_id("managed-delete"),
+                "name": "清理专属目录",
+                "workdir": {"mode": "managed"},
+            },
+        )
     assert created.status_code == 200, created.text
     project = created.json()
-    project_id = project["id"]
+    project_id = project["project_id"] if standalone else project["id"]
+    endpoint = f"/api/chat/thread/{project['id']}" if standalone else f"/api/projects/{project_id}"
     path = project["workdir_path"]
     directory = user_workdir_host_dir(project["uid"], path)
     (directory / "marker.txt").write_text("delete me", encoding="utf-8")
@@ -362,16 +434,27 @@ async def test_explicit_managed_delete_persists_task_and_removes_only_its_direct
     task_id = None
     terminal_status = None
     try:
-        deleted = await test_client.delete(
-            f"/api/projects/{project_id}", headers=admin_headers, params={"delete_workdir": True}
-        )
+        deleted = await test_client.delete(endpoint, headers=admin_headers, params={"delete_workdir": True})
         assert deleted.status_code == 200, deleted.text
         task_id = deleted.json()["workdir_delete_task_id"]
         assert task_id
+        if standalone:
+            assert project["can_delete_workdir"] is True
+            async with _database_connection() as db:
+                row = await db.fetchrow(
+                    "SELECT c.status AS conversation_status, p.status AS project_status "
+                    "FROM conversations c JOIN projects p ON p.id = c.project_id WHERE c.thread_id = $1",
+                    project["id"],
+                )
+            assert row["conversation_status"] == row["project_status"] == "deleted"
 
         recovered = await test_client.get("/api/projects/workdir-deletions", headers=admin_headers)
         assert recovered.status_code == 200, recovered.text
-        assert any(item["project_id"] == project_id and item["task_id"] == task_id for item in recovered.json())
+        if not any(item["project_id"] == project_id and item["task_id"] == task_id for item in recovered.json()):
+            finished = await test_client.get(f"/api/projects/{project_id}/workdir-deletion", headers=admin_headers)
+            assert finished.status_code == 200, finished.text
+            assert finished.json()["task_id"] == task_id
+            assert finished.json()["status"] == "success"
 
         for _ in range(150):
             status = await test_client.get(f"/api/projects/{project_id}/workdir-deletion", headers=admin_headers)
@@ -390,6 +473,12 @@ async def test_explicit_managed_delete_persists_task_and_removes_only_its_direct
                 await db.execute("DELETE FROM tasks WHERE id = $1", task_id)
         if task_id is None or terminal_status is not None:
             async with _database_connection() as db:
+                await db.execute(
+                    "DELETE FROM conversation_stats WHERE conversation_id IN "
+                    "(SELECT id FROM conversations WHERE project_id = $1)",
+                    project_id,
+                )
+                await db.execute("DELETE FROM conversations WHERE project_id = $1", project_id)
                 await db.execute("DELETE FROM projects WHERE id = $1", project_id)
         if directory.exists() and (task_id is None or terminal_status is not None):
             from yuxi.workspace.filesystem import Workspace

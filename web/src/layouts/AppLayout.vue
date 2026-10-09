@@ -90,9 +90,10 @@ const trackWorkdirDeletion = (uid, projectId) => {
     try {
       const result = await projectApi.getWorkdirDeletion(projectId)
       if (epoch !== workdirDeletionEpoch || userStore.uid !== uid) return
+      await removeDeletedProjectFromView(projectId)
       if (result.status === 'success') {
         stopTrackingWorkdirDeletion(uid, projectId)
-        message.success('项目文件夹及文件已删除')
+        message.success('文件夹及其中的文件已删除')
         return
       }
       if (result.status === 'failed' || result.status === 'cancelled') {
@@ -101,8 +102,8 @@ const trackWorkdirDeletion = (uid, projectId) => {
         const key = `project-workdir-delete-${projectId}`
         notification.error({
           key,
-          message: '项目文件夹清理失败',
-          description: '项目和对话已删除，文件可能仍在原目录。',
+          message: '文件夹清理失败',
+          description: '删除操作已提交，文件可能仍在原目录。',
           duration: 0,
           btn: () => h('a', {
             onClick: async () => {
@@ -127,7 +128,7 @@ const trackWorkdirDeletion = (uid, projectId) => {
       if (error?.status === 404) {
         stopTrackingWorkdirDeletion(uid, projectId)
         notification.error({
-          message: '无法查询项目文件夹清理结果',
+          message: '无法查询文件夹清理结果',
           description: '清理记录不存在，请联系管理员检查文件夹。',
           duration: 0
         })
@@ -376,15 +377,38 @@ const handleSearchSelectFile = (entry) => {
   router.push({ name: 'WorkspaceComp', query: { open: entry.path } })
 }
 
-const handleDeleteChat = async (threadId) => {
+const handleDeleteChat = async ({ threadId, deleteWorkdir = false }) => {
   if (!threadId) return
+  const thread = threads.value.find((item) => item.id === threadId)
   try {
-    await chatThreadsStore.deleteThread(threadId)
+    const result = await chatThreadsStore.deleteThread(threadId, { deleteWorkdir })
     if (route.params.thread_id === threadId) {
       await router.replace({ name: 'AgentComp' })
     }
+    if (result?.workdir_delete_task_id) {
+      trackWorkdirDeletion(userStore.uid, result.project_id)
+      message.info('对话已删除，正在清理会话文件夹')
+    } else {
+      message.success('对话已删除，文件夹已保留')
+    }
   } catch (error) {
-    console.warn('删除对话失败:', error)
+    if (deleteWorkdir && thread?.project_id) {
+      try {
+        await projectApi.getWorkdirDeletion(thread.project_id)
+        chatThreadsStore.removeThread(threadId)
+        if (route.params.thread_id === threadId) await router.replace({ name: 'AgentComp' })
+        trackWorkdirDeletion(userStore.uid, thread.project_id)
+        message.info('对话已删除，正在确认文件夹清理结果')
+        return
+      } catch (lookupError) {
+        if ((!error?.status || error.status >= 500) && (!lookupError?.status || lookupError.status >= 500)) {
+          trackWorkdirDeletion(userStore.uid, thread.project_id)
+          message.info('暂时无法确认删除结果，连接恢复后会继续查询')
+          return
+        }
+      }
+    }
+    message.error(error?.message || '删除对话失败')
   }
 }
 
@@ -426,7 +450,7 @@ const handleRenameProject = async ({ projectId, name }) => {
 
 const removeDeletedProjectFromView = async (projectId) => {
   const removedThreadIds = chatThreadsStore.removeThreadsByProject(projectId)
-  projectsStore.removeProject(projectId)
+  if (projects.value.some((project) => project.id === projectId)) projectsStore.removeProject(projectId)
   if (removedThreadIds.includes(route.params.thread_id)) {
     await router.replace({ name: 'AgentComp' })
   }

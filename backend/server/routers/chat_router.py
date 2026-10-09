@@ -179,6 +179,7 @@ class ThreadResponse(BaseModel):
     is_pinned: bool = False
     project_id: str | None = None
     workdir_path: str
+    can_delete_workdir: bool = False
     created_at: str
     updated_at: str
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -335,10 +336,15 @@ async def search_threads(
 
 @chat.delete("/thread/{thread_id}")
 async def delete_thread(
-    thread_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_required_user)
+    thread_id: str,
+    delete_workdir: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_required_user),
 ):
-    """删除对话线程 (使用新存储系统)"""
-    return await delete_thread_view(thread_id=thread_id, db=db, current_uid=str(current_user.uid))
+    """删除对话，可选清理无项目会话的专属文件夹。"""
+    return await delete_thread_view(
+        thread_id=thread_id, db=db, current_uid=str(current_user.uid), delete_workdir=delete_workdir
+    )
 
 
 class ThreadUpdate(BaseModel):

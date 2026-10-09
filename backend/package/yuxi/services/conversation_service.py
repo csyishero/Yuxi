@@ -11,15 +11,15 @@ from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import INVOCATION_CONVERSATION_SOURCES, ConversationRepository
 from yuxi.repositories.project_repository import ProjectRepository
 from yuxi.services.attachment_service import serialize_attachment
-from yuxi.services.project_service import create_implicit_project
+from yuxi.services.project_service import create_implicit_project, delete_implicit_project_view
 from yuxi.services.workdir_service import (
     ensure_conversation_workdir_available,
-    resolve_conversation_workdir_path,
     workdir_binding_from_project,
 )
 from yuxi.storage.postgres.models_business import (
     AGENT_RUN_TERMINAL_STATUSES,
     AgentRun,
+    Project,
     User,
     build_agent_run_timing,
 )
@@ -122,7 +122,7 @@ async def create_thread_view(
                 existing,
                 thread_status="done",
                 db=db,
-                workdir_path=workdir_binding.workdir_path,
+                project=existing_project,
             )
 
     thread_id = str(uuid.uuid4())
@@ -210,7 +210,7 @@ async def create_thread_view(
         conversation,
         thread_status="done",
         db=db,
-        workdir_path=workdir_binding.workdir_path,
+        project=project,
     )
 
 
@@ -244,7 +244,7 @@ async def list_threads_view(
                 conv.last_viewed_run_id,
             ),
             db=db,
-            workdir_path=conv.project.workdir_path,
+            project=conv.project,
         )
         for conv in conversations
     ]
@@ -310,9 +310,15 @@ async def delete_thread_view(
     thread_id: str,
     db: AsyncSession,
     current_uid: str,
+    delete_workdir: bool = False,
 ) -> dict:
+    """删除会话，显式要求时清理其独占的 implicit managed 文件夹。"""
     conv_repo = ConversationRepository(db)
-    await require_user_conversation(conv_repo, thread_id, str(current_uid))
+    conversation = await require_user_conversation(conv_repo, thread_id, str(current_uid))
+    if delete_workdir:
+        return await delete_implicit_project_view(
+            uid=str(current_uid), project_id=conversation.project_id, thread_id=thread_id, db=db
+        )
     deleted = await conv_repo.delete_conversation(thread_id, soft_delete=True)
     if not deleted:
         raise HTTPException(status_code=404, detail="对话线程不存在")
@@ -510,16 +516,12 @@ async def _serialize_thread(
     *,
     thread_status: str,
     db,
-    workdir_path: str | None = None,
+    project: Project | None = None,
 ) -> dict:
-    """序列化线程，列表调用方可传入已联查的 Project Workdir。"""
-    resolved_workdir_path = workdir_path
-    if resolved_workdir_path is None:
-        resolved_workdir_path = await resolve_conversation_workdir_path(
-            conversation=conversation,
-            uid=str(conversation.uid),
-            db=db,
-        )
+    """序列化线程，列表调用方复用已联查的 Project。"""
+    if project is None:
+        project = await ProjectRepository(db).get_for_user(conversation.project_id, str(conversation.uid))
+    binding = workdir_binding_from_project(conversation=conversation, uid=str(conversation.uid), project=project)
     return {
         "id": conversation.thread_id,
         "uid": conversation.uid,
@@ -527,7 +529,8 @@ async def _serialize_thread(
         "title": conversation.title,
         "is_pinned": bool(conversation.is_pinned),
         "project_id": conversation.project_id,
-        "workdir_path": resolved_workdir_path,
+        "workdir_path": binding.workdir_path,
+        "can_delete_workdir": project.selection_status == "implicit" and project.directory_mode == "managed",
         "created_at": conversation.created_at.isoformat(),
         "updated_at": conversation.updated_at.isoformat(),
         "metadata": conversation.extra_metadata or {},

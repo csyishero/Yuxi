@@ -9,6 +9,7 @@ import uuid
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
+from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.repositories.project_repository import ProjectRepository
 from yuxi.repositories.task_repository import TaskRepository
 from yuxi.services.task_service import Tasker, TaskContext
@@ -201,13 +202,41 @@ async def delete_project_view(*, uid: str, project_id: str, db, delete_workdir: 
     if project is None:
         raise HTTPException(status_code=404, detail="Project 不存在")
 
+    return await _delete_locked_project(project=project, repository=repository, db=db, delete_workdir=delete_workdir)
+
+
+async def delete_implicit_project_view(*, uid: str, project_id: str, thread_id: str, db) -> dict:
+    """删除独占 implicit Project 的会话，并登记文件夹清理任务。"""
+    await _lock_project_workdir_changes(db=db, uid=str(uid))
+    repository = ProjectRepository(db)
+    project = await repository.lock_active_for_user(project_id, str(uid))
+    if project is None:
+        raise HTTPException(status_code=404, detail="对话文件夹所属项目不存在")
+    if project.selection_status != "implicit":
+        raise HTTPException(status_code=422, detail="项目内的对话不能单独删除共享文件夹")
+    conversation = await ConversationRepository(db).lock_conversation_by_thread_id(thread_id)
+    if (
+        conversation is None
+        or conversation.uid != str(uid)
+        or conversation.project_id != project.id
+        or conversation.status == "deleted"
+    ):
+        raise HTTPException(status_code=404, detail="对话线程不存在")
+    if not await repository.has_exclusive_conversation(project, thread_id):
+        raise HTTPException(status_code=409, detail="文件夹仍被其他会话使用，请取消删除文件夹选项")
+    return await _delete_locked_project(project=project, repository=repository, db=db, delete_workdir=True)
+
+
+async def _delete_locked_project(*, project: Project, repository: ProjectRepository, db, delete_workdir: bool) -> dict:
+    """在调用方持有项目锁时提交删除事实，再投递目录清理任务。"""
+    uid = str(project.uid)
     task = None
     tasker = Tasker()
     if delete_workdir:
         await _validate_managed_directory_deletion(project=project, repository=repository)
         task = await tasker.create_in_session(
             db,
-            name=f"清理项目文件夹：{project.name}",
+            name="清理对话文件夹" if project.selection_status == "implicit" else f"清理项目文件夹：{project.name}",
             task_type="project_workdir_delete",
             payload={"uid": str(uid), "project_id": project.id},
         )
@@ -221,6 +250,7 @@ async def delete_project_view(*, uid: str, project_id: str, db, delete_workdir: 
         await tasker.publish(task)
     return {
         "message": "删除成功",
+        "project_id": project.id,
         "deleted_conversations": deleted_conversations,
         "workdir_delete_task_id": task.id if task else None,
     }
@@ -263,7 +293,7 @@ async def retry_project_workdir_deletion_view(*, uid: str, project_id: str, db) 
     tasker = Tasker()
     task = await tasker.create_in_session(
         db,
-        name=f"重试清理项目文件夹：{project.name}",
+        name="重试清理对话文件夹" if project.selection_status == "implicit" else f"重试清理项目文件夹：{project.name}",
         task_type="project_workdir_delete",
         payload={"uid": str(uid), "project_id": project.id},
     )

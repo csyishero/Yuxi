@@ -13,7 +13,7 @@
       :aria-current="currentChatId === chat.id ? 'page' : undefined"
       @click="$emit('select-chat', chat.id)"
       @dblclick.stop="renameChat"
-      @click.middle="$emit('delete-chat', chat.id)"
+      @click.middle="confirmDeleteChat"
     >
       <span class="conversation-title">{{ chat.title || '新的对话' }}</span>
       <span class="actions-mask"></span>
@@ -53,7 +53,7 @@
             <a-menu-item
               key="delete"
               :icon="h(Trash2, { size: 14 })"
-              @click.stop="$emit('delete-chat', chat.id)"
+              @click.stop="confirmDeleteChat"
             >
               删除
             </a-menu-item>
@@ -82,6 +82,34 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['select-chat', 'delete-chat', 'rename-chat', 'toggle-pin'])
+
+const confirmDeleteChat = () => {
+  let deleteWorkdir = false
+  const canDeleteWorkdir = props.chat.can_delete_workdir === true
+  Modal.confirm({
+    title: `删除对话“${props.chat.title || '新的对话'}”？`,
+    icon: null,
+    centered: true,
+    okText: '删除对话',
+    cancelText: '取消',
+    okButtonProps: { danger: true },
+    content: () => h('div', [
+      h('p', '对话记录将被删除，默认保留文件夹及其中的文件。'),
+      ...(canDeleteWorkdir ? [
+        h('p', { style: { wordBreak: 'break-all' } }, `文件夹：${props.chat.workdir_path}`),
+        h('label', [
+          h('input', {
+            type: 'checkbox',
+            onChange: (event) => { deleteWorkdir = event.target.checked }
+          }),
+          ' 同时永久删除会话文件夹和其中的全部文件'
+        ]),
+        h('p', '文件删除后无法恢复。')
+      ] : [])
+    ]),
+    onOk: () => emit('delete-chat', { threadId: props.chat.id, deleteWorkdir })
+  })
+}
 
 const renameChat = () => {
   let newTitle = props.chat.title || ''

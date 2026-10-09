@@ -145,6 +145,13 @@ class ProjectRepository:
         )
         return bool(active_run or queued_request)
 
+    async def has_exclusive_conversation(self, project: Project, thread_id: str) -> bool:
+        """确认目录仅绑定指定会话，历史会话也计入共享关系。"""
+        threads = (
+            await self.db.scalars(select(Conversation.thread_id).where(Conversation.project_id == project.id))
+        ).all()
+        return threads == [thread_id]
+
     async def soft_delete_with_conversations(self, project: Project, *, deleted_at: datetime) -> int:
         """在调用方事务内软删除 Project 及其全部 Conversation。"""
         result = await self.db.execute(

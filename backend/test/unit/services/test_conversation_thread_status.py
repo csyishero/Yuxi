@@ -121,10 +121,10 @@ async def test_list_threads_view_uses_joined_projects_without_per_thread_lookup(
     await _seed_conversation(session, thread_id="thread-two")
     await session.commit()
 
-    async def reject_individual_lookup(**_kwargs):
+    async def reject_individual_lookup(*_args, **_kwargs):
         raise AssertionError("线程列表不应逐条查询 Project")
 
-    monkeypatch.setattr(svc, "resolve_conversation_workdir_path", reject_individual_lookup)
+    monkeypatch.setattr(svc.ProjectRepository, "get_for_user", reject_individual_lookup)
 
     items = await svc.list_threads_view(db=session, current_uid="user-1", agent_slug=None, limit=100)
 

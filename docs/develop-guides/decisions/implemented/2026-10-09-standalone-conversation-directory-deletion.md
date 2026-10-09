@@ -1,0 +1,31 @@
+# 无项目会话的可选文件夹清理
+
+状态：implemented
+类型：feature
+Owner：backend/package/yuxi/services/conversation_service.py
+
+## 问题
+
+用户删除无项目会话时无法选择清理其独立文件夹。此类会话由 implicit Project 持有 managed 目录；项目内会话则共享 selectable Project 的目录，不能随单个会话删除。
+
+## 决策
+
+删除会话默认保留文件。仅 implicit managed Project 独占的会话允许显式选择清理目录，后端复用 Project 的目录校验、持久任务、事务提交后投递、worker 二次校验与失败重试。会话和 implicit Project 在同一事务中标记删除。前端显示未勾选的文件夹清理选项及目标目录，并通过既有清理状态接口恢复结果；删除响应丢失时直接查询该目录的最新清理任务，包括已完成任务。
+
+Conversation service 拥有用户授权和删除入口，Project service 与 repository 拥有目录锁、会话独占检查和持久任务提交，既有 worker 拥有最终文件副作用。会话响应提供目录清理能力提示，最终授权和安全判断在服务端执行。
+
+## 替代方案
+
+- 所有会话均支持删除目录：项目内会话共享目录，会影响其他会话。
+- 同步删除目录：无法复用持久任务的失败恢复和 worker 校验。
+- 保持手动清理：用户需要自行定位匿名会话目录。
+
+## 后果
+
+历史共享或 linked 目录继续拒绝清理。文件清理可能晚于会话删除完成，必须展示持久任务的最终结果。界面提示不代替后端授权和目录保护。
+
+## 验证
+
+后端单元测试覆盖默认保留、显式清理意图、其他用户、selectable、linked、同项目共享、路径重叠和活动 Run。前端测试覆盖默认未勾选、显式选择、无能力时隐藏选项，以及响应丢失后的完成状态恢复。
+
+隔离 PostgreSQL、Redis 和真实 HTTP 服务执行 API 回归用例，通过 ARQ 消费正式注册的清理 handler，并回读 Project、Conversation、Task 和文件字节，确认独立会话目录删除、兄弟目录保留以及项目内会话拒绝清理。前端 lint 与生产构建通过；真实交互页面尚未验证。

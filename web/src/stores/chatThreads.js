@@ -141,21 +141,18 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     }
   }
 
-  const deleteThread = async (threadId) => {
+  const deleteThread = async (threadId, options = {}) => {
     if (!threadId) return
+    const result = await threadApi.deleteThread(threadId, options)
+    removeThread(threadId)
+    return result
+  }
 
-    try {
-      await threadApi.deleteThread(threadId)
-      threads.value = threads.value.filter((thread) => thread.id !== threadId)
-      // 线程已删除，同步清理其输入草稿
-      threadDraftStore.remove(threadId)
-      if (currentThreadId.value === threadId) {
-        setCurrentThreadId(null)
-      }
-    } catch (error) {
-      console.error('Failed to delete thread:', error)
-      handleChatError(error, 'delete')
-      throw error
+  const removeThread = (threadId) => {
+    threads.value = threads.value.filter((thread) => thread.id !== threadId)
+    threadDraftStore.remove(threadId)
+    if (currentThreadId.value === threadId) {
+      setCurrentThreadId(null)
     }
   }
 
@@ -220,6 +217,7 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     loadMoreThreads,
     createThread,
     deleteThread,
+    removeThread,
     removeThreadsByProject,
     updateThread
   }

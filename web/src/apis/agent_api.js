@@ -347,7 +347,8 @@ export const threadApi = {
    * @param {string} threadId - 对话线程ID
    * @returns {Promise} - 删除结果
    */
-  deleteThread: (threadId) => apiDelete(`/api/chat/thread/${threadId}`),
+  deleteThread: (threadId, { deleteWorkdir = false } = {}) =>
+    apiDelete(`/api/chat/thread/${threadId}?delete_workdir=${deleteWorkdir}`),
 
   /**
    * 获取线程附件列表
