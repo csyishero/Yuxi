@@ -11,6 +11,8 @@
       :full-height="true"
       :editable="editable"
       :saving="saving"
+      :refreshable="true"
+      @refresh="$emit('refresh')"
       container-class="workspace-preview-container"
       content-class="workspace-preview-content"
       @close="$emit('close')"
@@ -40,7 +42,7 @@ defineProps({
   saving: { type: Boolean, default: false }
 })
 
-defineEmits(['close', 'save'])
+defineEmits(['close', 'save', 'refresh'])
 </script>
 
 <style scoped lang="less">

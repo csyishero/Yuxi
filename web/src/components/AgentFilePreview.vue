@@ -17,6 +17,17 @@
       </div>
       <div class="modal-actions">
         <button
+          v-if="refreshable && filePath"
+          type="button"
+          class="modal-action-btn"
+          :disabled="refreshDisabled"
+          :title="refreshTitle"
+          aria-label="刷新文件预览"
+          @click="requestRefresh"
+        >
+          <RotateCw :size="16" :class="{ 'preview-spinner': currentStatus === 'loading' }" />
+        </button>
+        <button
           v-if="canEdit && editMode !== 'edit'"
           class="modal-action-btn"
           @click="startEditing"
@@ -241,6 +252,17 @@
     <Teleport to="body">
       <div v-if="fullscreenPreviewVisible && file" class="fullscreen-preview-overlay">
         <div class="fullscreen-preview-actions">
+          <button
+            v-if="refreshable && filePath"
+            type="button"
+            class="modal-action-btn fullscreen-action-btn"
+            :disabled="refreshDisabled"
+            :title="refreshTitle"
+            aria-label="刷新文件预览"
+            @click="requestRefresh"
+          >
+            <RotateCw :size="16" :class="{ 'preview-spinner': currentStatus === 'loading' }" />
+          </button>
           <div v-if="isHtmlFile" class="preview-mode-switch fullscreen-preview-switch">
             <button
               class="preview-mode-btn"
@@ -368,6 +390,7 @@ import {
   LoaderCircle,
   Maximize,
   PanelRight,
+  RotateCw,
   FilePen,
   Save,
   X,
@@ -418,6 +441,10 @@ const props = defineProps({
   showHeader: {
     type: Boolean,
     default: true
+  },
+  refreshable: {
+    type: Boolean,
+    default: false
   },
   showDownload: {
     type: Boolean,
@@ -474,7 +501,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['close', 'download', 'save'])
+const emit = defineEmits(['close', 'download', 'save', 'refresh'])
 
 const themeStore = useThemeStore()
 const closeTitle = computed(() =>
@@ -505,6 +532,18 @@ const currentErrorMessage = computed(() => {
 })
 const htmlPreviewMode = ref('render')
 const editMode = ref('preview')
+const refreshDisabled = computed(() =>
+  currentStatus.value === 'loading' || props.saving || editMode.value === 'edit'
+)
+const refreshTitle = computed(() => {
+  if (editMode.value === 'edit') return '请先保存或取消编辑'
+  return currentStatus.value === 'loading' ? '正在刷新文件预览' : '刷新文件预览'
+})
+/** 仅在预览可重新读取且没有编辑操作时请求刷新。 */
+const requestRefresh = () => {
+  if (!props.refreshable || !props.filePath || refreshDisabled.value) return
+  emit('refresh')
+}
 const draftContent = ref('')
 const fullscreenPreviewVisible = ref(false)
 const htmlPreviewRenderKey = ref(0)

@@ -522,3 +522,29 @@ test('目录删除显示固定业务冲突，未知响应和其他接口保持�
     }
   })
 })
+
+test('文件预览 API 绕过 HTTP 缓存读取当前字节', async () => {
+  await withServer(async (server) => {
+    setActivePinia(createPinia())
+    const { useUserStore } = await server.ssrLoadModule('/src/stores/user.js')
+    const user = useUserStore()
+    user.token = 'test-token'
+    user.userId = 1
+    const calls = []
+    globalThis.fetch = async (url, options) => {
+      calls.push({ url, cache: options.cache })
+      return new Response('fresh', { headers: { 'content-type': 'text/plain' } })
+    }
+    const workspace = await server.ssrLoadModule('/src/apis/workspace_api.js')
+    const viewer = await server.ssrLoadModule('/src/apis/viewer_filesystem.js')
+    const { threadApi } = await server.ssrLoadModule('/src/apis/agent_api.js')
+    for (const response of [
+      await workspace.getWorkspaceFileContent('/report.txt'),
+      await workspace.getWorkspaceKnowledgeFileContent('kb', 'file'),
+      await viewer.getViewerFileContent('thread', '/report.txt'),
+      await threadApi.previewThreadArtifact('thread', '/home/gem/user-data/report.txt')
+    ]) assert.equal(await response.text(), 'fresh')
+    assert.equal(calls.length, 4)
+    assert.ok(calls.every((call) => call.cache === 'no-store'))
+  })
+})

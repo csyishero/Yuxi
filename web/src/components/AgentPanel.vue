@@ -203,6 +203,8 @@
           :showClose="false"
           :showDownload="true"
           :showFullscreen="true"
+          :refreshable="true"
+          @refresh="refreshActivePreview"
           @download="downloadFile"
         />
         <div v-else class="preview-empty">正在加载文件内容...</div>
@@ -279,6 +281,7 @@ import MessageDebugPanel from '@/components/MessageDebugPanel.vue'
 import {
   createFilesystemRefreshGate,
   expandedKeysAfterFilesystemRefresh,
+  invalidatePreviewCacheEntryBeforeReload,
   reloadPreviewAfterOrderedCacheEntryInvalidation,
   replacePreviewCacheEntryIfCurrent,
   refreshExpandedTree,
@@ -810,6 +813,18 @@ const prunePreviewCache = (activeKey) => {
     if (entry.file?.previewUrl) window.URL.revokeObjectURL(entry.file.previewUrl)
     props.previewCache.delete(key)
   }
+}
+
+/** 使当前文件缓存失效，再通过原加载器读取最新内容。 */
+const refreshActivePreview = async () => {
+  if (!props.activePreviewPath || currentFile.value?.loading) return
+  const cacheKey = activePreviewTab.value?.workspace
+    ? workspacePreviewCacheKey(props.activePreviewPath)
+    : previewCacheKey(props.activePreviewPath)
+  invalidatePreviewCacheEntryBeforeReload(
+    props.previewCache, cacheKey, window.URL.revokeObjectURL.bind(window.URL)
+  )
+  await loadActivePreview()
 }
 
 const loadActivePreview = async ({ baseFileOverride = null } = {}) => {

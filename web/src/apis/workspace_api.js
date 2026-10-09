@@ -17,7 +17,7 @@ export const getWorkspaceTree = (
 
 export const getWorkspaceFileContent = (path) => {
   const query = buildQuery({ path })
-  return apiGet(`/api/workspace/file?${query}`, {}, true, 'blob')
+  return apiGet(`/api/workspace/file?${query}`, { cache: 'no-store' }, true, 'blob')
 }
 
 export const getWorkspaceKnowledgeTree = (kbId, params = {}) => {
@@ -35,7 +35,7 @@ export const getWorkspaceKnowledgeTree = (kbId, params = {}) => {
 
 export const getWorkspaceKnowledgeFileContent = (kbId, fileId) => {
   const query = buildQuery({ kb_id: kbId, file_id: fileId })
-  return apiGet(`/api/workspace/knowledge/file?${query}`, {}, true, 'blob')
+  return apiGet(`/api/workspace/knowledge/file?${query}`, { cache: 'no-store' }, true, 'blob')
 }
 
 export const downloadWorkspaceKnowledgeFile = (kbId, fileId, variant = 'original') => {

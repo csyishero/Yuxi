@@ -120,6 +120,7 @@
                 :saving="savingPreviewFile"
                 @close="closePreview"
                 @save="handleSavePreviewFile"
+                @refresh="refreshSelectedPreview"
               />
             </aside>
           </Transition>
@@ -200,6 +201,8 @@
         :full-height="true"
         :editable="activeSourceKey === 'personal'"
         :saving="savingPreviewFile"
+        :refreshable="true"
+        @refresh="refreshSelectedPreview"
         container-class="workspace-modal-preview-container"
         content-class="workspace-modal-preview-content"
         @close="closePreview"
@@ -429,6 +432,17 @@ const showPreviewError = (requestId, entry, error, logMessage, userMessage) => {
 const finishPreviewRequest = (requestId) => {
   if (previewRequestId.value === requestId) {
     loadingPreview.value = false
+  }
+}
+
+/** 按当前文件来源重新读取预览，避免重复加载或打断保存。 */
+const refreshSelectedPreview = async () => {
+  const entry = selectedEntry.value
+  if (!entry || loadingPreview.value || savingPreviewFile.value) return
+  if (entry.source === 'knowledge') {
+    await loadKnowledgePreview(entry)
+  } else {
+    await loadWorkspacePreview(entry)
   }
 }
 

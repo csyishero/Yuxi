@@ -387,7 +387,7 @@ export const threadApi = {
   previewThreadArtifact: (threadId, path) =>
     apiGet(
       `${threadApi.getThreadArtifactUrl(threadId, path, false)}?preview=true`,
-      {},
+      { cache: 'no-store' },
       true,
       'blob'
     ),
