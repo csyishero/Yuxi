@@ -1016,3 +1016,54 @@ async def test_managed_cleanup_serializes_active_ancestor_admission(project_life
         await incoming.execute(text("SET LOCAL lock_timeout = '2s'"))
         assert await acquire_admission(incoming) is not None
         await incoming.rollback()
+
+
+@pytest.mark.parametrize("delete_workdir", [None, False])
+async def test_deleted_project_retained_files_remain_in_personal_space(test_client, admin_headers, delete_workdir):
+    """默认及显式保留目录后，普通个人空间列表与文件读取均保留字节。"""
+    response = await test_client.post(
+        "/api/projects",
+        headers=admin_headers,
+        json={"request_id": str(uuid.uuid4()), "name": "保留文件可见", "workdir": {"mode": "managed"}},
+    )
+    assert response.status_code == 200, response.text
+    project = response.json()
+    path = project["workdir_path"]
+    directory = user_workdir_host_dir(project["uid"], path)
+    marker = directory / "keep.txt"
+    marker.write_text("retained bytes", encoding="utf-8")
+    try:
+        deleted = await test_client.delete(
+            f"/api/projects/{project['id']}",
+            headers=admin_headers,
+            params={} if delete_workdir is None else {"delete_workdir": delete_workdir},
+        )
+        assert deleted.status_code == 200, deleted.text
+        assert deleted.json()["workdir_delete_task_id"] is None
+        for root, expected in [("/projects", f"/{path}/"), (f"/{path}", f"/{path}/keep.txt")]:
+            tree = await test_client.get("/api/workspace/tree", headers=admin_headers, params={"path": root})
+            assert tree.status_code == 200, tree.text
+            assert expected in {entry["path"] for entry in tree.json()["entries"]}
+        opened = await test_client.get(
+            "/api/workspace/file", headers=admin_headers, params={"path": f"/{path}/keep.txt"}
+        )
+        assert opened.status_code == 200, opened.text
+        assert "retained bytes" in opened.text
+        assert marker.read_text(encoding="utf-8") == "retained bytes"
+        projects = await test_client.get("/api/projects", headers=admin_headers)
+        assert project["id"] not in {item["id"] for item in projects.json()}
+        async with _database_connection() as db:
+            assert await db.fetchval("SELECT status FROM projects WHERE id = $1", project["id"]) == "deleted"
+            assert (
+                await db.fetchval(
+                    "SELECT count(*) FROM tasks WHERE type = 'project_workdir_delete' AND payload->>'project_id' = $1",
+                    project["id"],
+                )
+                == 0
+            )
+    finally:
+        async with _database_connection() as db:
+            await db.execute("DELETE FROM projects WHERE id = $1", project["id"])
+        from yuxi.workspace.filesystem import Workspace
+
+        Workspace(project["uid"]).delete_authorized_path(f"/{path}", root="/")

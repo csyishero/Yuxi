@@ -69,14 +69,16 @@ class ProjectRepository:
         )
         return list(result.scalars().all())
 
-    async def list_selectable_workdir_paths_for_user(self, uid: str) -> list[str]:
-        """列出用户已选择 Project 的去重 Workdir 路径。"""
+    async def list_workspace_project_paths_for_user(self, uid: str) -> list[str]:
+        """列出个人空间可见的项目目录，包括已删除项目的留存子目录。"""
         result = await self.db.execute(
             select(Project.workdir_path)
             .where(
                 Project.uid == str(uid),
                 Project.selection_status == "selectable",
-                Project.status == "active",
+                Project.status.in_(["active", "deleted"]),
+                # 已删除的容器根绑定不再让所有匿名会话目录可见。
+                or_(Project.status == "active", Project.workdir_path != "projects"),
             )
             .distinct()
         )

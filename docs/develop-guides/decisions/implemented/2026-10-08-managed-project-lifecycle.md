@@ -14,7 +14,7 @@ Owner：backend/package/yuxi/services/project_service.py
 
 “从历史对话添加”入口退出新建流程。新项目不复制、不移动旧对话和旧文件；历史对话留在原 Project 和目录。
 
-删除 Project 默认在同一事务中软删除它与全部 Conversation，并保留文件。用户明确勾选永久删除时，仅允许 managed Project 登记持久 `project_workdir_delete` 任务。提交后发布任务；worker 在用户级目录锁内再次验证目录属于该 Project、没有其他 Project 的同路径或下层绑定、没有排队请求或未完成 Run，然后使用 no-follow 文件操作删除目录。旧项目仅绑定目标目录的严格上层时，不论是否删除，只要没有仍在运行、排队或待清理的工作，就不阻挡 managed 子目录清理；同目录、下层绑定继续阻止清理。检查与文件清理期间持有上层 Project 和 Conversation 锁，防止并发准入任务。上层可见性与子目录归属的取舍见[managed 子目录按独立归属清理](./2026-10-09-managed-child-directory-ownership.md)。取消或超时发生在文件线程执行期间时，worker 等待线程结束才释放目录锁并记录终态。任务状态由当前用户的 Project 接口查询，页面定期从持久任务列表恢复各项目最新的未完成或失败清理，网络中断后继续查找；失败或取消可重试。linked Project 无文件删除选项，也不能通过参数触发目录清理。
+删除 Project 默认在同一事务中软删除它与全部 Conversation，并保留文件，留存目录继续在个人空间显示；项目列表仍隐藏已删除项目。用户明确勾选永久删除时，仅允许 managed Project 登记持久 `project_workdir_delete` 任务。提交后发布任务；worker 在用户级目录锁内再次验证目录属于该 Project、没有其他 Project 的同路径或下层绑定、没有排队请求或未完成 Run，然后使用 no-follow 文件操作删除目录。旧项目仅绑定目标目录的严格上层时，不论是否删除，只要没有仍在运行、排队或待清理的工作，就不阻挡 managed 子目录清理；同目录、下层绑定继续阻止清理。检查与文件清理期间持有上层 Project 和 Conversation 锁，防止并发准入任务。上层可见性与子目录归属的取舍见[managed 子目录按独立归属清理](./2026-10-09-managed-child-directory-ownership.md)。取消或超时发生在文件线程执行期间时，worker 等待线程结束才释放目录锁并记录终态。任务状态由当前用户的 Project 接口查询，页面定期从持久任务列表恢复各项目最新的未完成或失败清理，网络中断后继续查找；失败或取消可重试。linked Project 无文件删除选项，也不能通过参数触发目录清理。
 
 ## 替代方案
 
@@ -24,6 +24,8 @@ Owner：backend/package/yuxi/services/project_service.py
 - 清理时忽略全部已删除项目：同目录和下层绑定仍可能拥有需保留的文件，会失去归属保护。
 
 ## 后果
+
+个人空间的文件可见性与项目列表生命周期分离，详见[删除项目后的留存目录可见性](./2026-10-09-retained-project-directory-visibility.md)。
 
 - 新项目与旧目录没有文件继承关系。需要旧文件时，用户可在工作区自行复制到新项目目录。
 - 目录清理可能在 Project 已删除后失败；数据库任务保留失败状态且不参加通用终态剪枝，文件可能已部分删除，重试按缺失目录幂等完成。清理以 no-follow 方式移除目录内符号链接和特殊文件，不访问链接目标。

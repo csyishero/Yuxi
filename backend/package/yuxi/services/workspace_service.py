@@ -99,12 +99,12 @@ async def list_workspace_tree(
 
 
 async def _filter_project_tree_entries(entries: list[dict], *, uid: str, db) -> list[dict]:
-    """隐藏未归属 selectable Project 的 projects 子树。"""
+    """展示 selectable 项目的现存目录，项目软删除不隐藏留存文件。"""
     entries_with_paths = [(entry, PurePosixPath(str(entry.get("path") or "/").strip("/"))) for entry in entries]
     if not any(path.parts[:1] == ("projects",) and path.as_posix() != "projects" for _, path in entries_with_paths):
         return entries
 
-    visible_paths = await ProjectRepository(db).list_selectable_workdir_paths_for_user(uid)
+    visible_paths = await ProjectRepository(db).list_workspace_project_paths_for_user(uid)
     selected_project_paths = [
         PurePosixPath(path) for path in visible_paths if PurePosixPath(path).parts[:1] == ("projects",)
     ]
