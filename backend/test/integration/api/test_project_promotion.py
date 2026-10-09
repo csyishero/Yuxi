@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
-from yuxi.storage.postgres.models_business import Conversation, Message, Project, Agent
+from yuxi.storage.postgres.models_business import Agent, AgentRun, AgentRunRequest, Conversation, Message, Project
 from yuxi.workspace.paths import ensure_bound_user_workdir, user_workspace_dir
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -71,6 +71,8 @@ async def promotion_fixture(uid):
     finally:
         async with factory() as db:
             ids = select(Conversation.id).where(Conversation.project_id == project_id)
+            await db.execute(delete(AgentRunRequest).where(AgentRunRequest.conversation_thread_id == thread_id))
+            await db.execute(delete(AgentRun).where(AgentRun.conversation_thread_id == thread_id))
             await db.execute(delete(Message).where(Message.conversation_id.in_(ids)))
             await db.execute(delete(Conversation).where(Conversation.project_id == project_id))
             await db.execute(delete(Project).where(Project.id == project_id))
@@ -158,4 +160,47 @@ async def test_promote_waiter_rechecks_deleted_project(test_client, standard_use
         async with factory() as db:
             project = await db.get(Project, project_id)
             assert project.selection_status == "implicit" and project.status == "deleted"
+        assert (directory / "proof.txt").read_bytes() == b"original-bytes"
+
+
+async def test_promote_while_run_active_keeps_run_and_file_delete_guard(test_client, standard_user):
+    """运行中的对话可转项目；同一运行仍保护项目文件夹不被删除。"""
+    uid = standard_user["user"]["uid"]
+    headers = standard_user["headers"]
+    async with promotion_fixture(uid) as (factory, project_id, thread_id, directory):
+        run_id = f"run-{uuid4().hex}"
+        async with factory() as db:
+            conversation = await db.scalar(select(Conversation).where(Conversation.thread_id == thread_id))
+            db.add(
+                AgentRun(
+                    id=run_id,
+                    request_id=f"active-{uuid4().hex}",
+                    conversation_id=conversation.id,
+                    conversation_thread_id=thread_id,
+                    runtime_scope_id=thread_id,
+                    agent_slug=thread_id,
+                    uid=uid,
+                    status="running",
+                )
+            )
+            await db.commit()
+
+        promoted = await test_client.post(
+            f"/api/projects/from-conversation/{thread_id}", headers=headers, json={"name": "读书项目"}
+        )
+        assert promoted.status_code == 200, promoted.text
+        assert promoted.json()["id"] == project_id
+        assert promoted.json()["selection_status"] == "selectable"
+        assert (directory / "proof.txt").read_bytes() == b"original-bytes"
+        async with factory() as db:
+            run = await db.get(AgentRun, run_id)
+            conversation = await db.scalar(select(Conversation).where(Conversation.thread_id == thread_id))
+            assert run.status == "running" and run.conversation_id == conversation.id
+            assert conversation.project_id == project_id
+
+        deletion = await test_client.delete(
+            f"/api/projects/{project_id}", headers=headers, params={"delete_workdir": True}
+        )
+        assert deletion.status_code == 409, deletion.text
+        assert deletion.json()["detail"] == "项目中仍有运行或排队的任务，请结束后重试"
         assert (directory / "proof.txt").read_bytes() == b"original-bytes"

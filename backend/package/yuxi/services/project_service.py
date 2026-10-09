@@ -184,8 +184,6 @@ async def promote_conversation_project_view(*, uid: str, thread_id: str, name: s
         raise HTTPException(status_code=422, detail="旧共用或非独立目录不支持直接转为项目")
     if await repository.has_other_workdir_overlap(project):
         raise HTTPException(status_code=409, detail="目录存在共享绑定或其他任务占用，不能直接转为项目")
-    if await repository.has_active_project_work(project):
-        raise HTTPException(status_code=409, detail="对话仍有运行、排队或清理任务，请结束后再转为项目")
     try:
         Workdir.open_existing(str(uid), project.workdir_path)
     except (OSError, ValueError) as exc:

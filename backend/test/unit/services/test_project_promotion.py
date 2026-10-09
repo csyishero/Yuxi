@@ -81,9 +81,6 @@ async def test_promote_keeps_ids_paths_files_and_retry_name(case):
         "wrong_id",
         "shared",
         "overlap",
-        "busy",
-        "queued",
-        "cleanup",
         "missing",
         "blank",
         "subagent",
@@ -119,34 +116,6 @@ async def test_rejected_promotion_leaves_original_state(case, reason):
                 workdir_path=project.workdir_path,
             )
         )
-    elif reason in {"busy", "cleanup"}:
-        db.add(
-            AgentRun(
-                id="run",
-                request_id="request",
-                conversation_id=conversation.id,
-                conversation_thread_id="root",
-                runtime_scope_id="root",
-                uid="owner",
-                agent_slug="agent",
-                status="running" if reason == "busy" else "completed",
-                runtime_cleanup_pending=reason == "cleanup",
-            )
-        )
-    elif reason == "queued":
-        message = Message(conversation_id=conversation.id, role="user", content="pending")
-        db.add(message)
-        await db.flush()
-        db.add(
-            AgentRunRequest(
-                request_id="queued",
-                uid="owner",
-                agent_slug="agent",
-                conversation_thread_id="root",
-                input_message_id=message.id,
-                status="queued",
-            )
-        )
     elif reason == "missing":
         (directory / "report.txt").unlink()
         directory.rmdir()
@@ -167,9 +136,6 @@ async def test_rejected_promotion_leaves_original_state(case, reason):
         "shared": (409, "此目录存在其他普通会话，或当前是子会话，不能直接转为项目"),
         "subagent": (409, "此目录存在其他普通会话，或当前是子会话，不能直接转为项目"),
         "overlap": (409, "目录存在共享绑定或其他任务占用，不能直接转为项目"),
-        "busy": (409, "对话仍有运行、排队或清理任务，请结束后再转为项目"),
-        "queued": (409, "对话仍有运行、排队或清理任务，请结束后再转为项目"),
-        "cleanup": (409, "对话仍有运行、排队或清理任务，请结束后再转为项目"),
         "missing": (409, "原对话目录不存在或不可用，未转换项目"),
         "blank": (422, "项目名称不能为空"),
     }
@@ -222,3 +188,52 @@ async def test_promoted_conversation_keeps_original_creation_intent(case):
     conversation.creation_request_id = "another-create"
     with pytest.raises(HTTPException, match="其他 Conversation 创建意图"):
         _require_matching_thread_creation_intent(conversation, project, agent_slug="agent", project_id=None)
+
+
+@pytest.mark.parametrize("activity", ["running", "queued", "cleanup"])
+async def test_active_work_does_not_block_metadata_promotion_or_lose_files(case, activity):
+    """原地提升不触碰运行任务，文件删除仍受活动任务保护。"""
+    db, project, conversation, directory = case
+    if activity == "queued":
+        message = Message(conversation_id=conversation.id, role="user", content="pending")
+        db.add(message)
+        await db.flush()
+        db.add(
+            AgentRunRequest(
+                request_id="queued",
+                uid="owner",
+                agent_slug="agent",
+                conversation_thread_id="root",
+                input_message_id=message.id,
+                status="queued",
+            )
+        )
+    else:
+        db.add(
+            AgentRun(
+                id="run",
+                request_id="request",
+                conversation_id=conversation.id,
+                conversation_thread_id="root",
+                runtime_scope_id="root",
+                uid="owner",
+                agent_slug="agent",
+                status="running" if activity == "running" else "completed",
+                runtime_cleanup_pending=activity == "cleanup",
+            )
+        )
+    await db.commit()
+    before = (project.id, conversation.project_id, project.workdir_path, (directory / "report.txt").read_bytes())
+    result = await svc.promote_conversation_project_view(uid="owner", thread_id="root", name="读书项目", db=db)
+    assert result["selection_status"] == "selectable"
+    assert before == (
+        project.id,
+        conversation.project_id,
+        project.workdir_path,
+        (directory / "report.txt").read_bytes(),
+    )
+    assert await svc.ProjectRepository(db).has_active_project_work(project)
+    with pytest.raises(HTTPException) as error:
+        await svc._validate_managed_directory_deletion(project=project, repository=svc.ProjectRepository(db))
+    assert error.value.status_code == 409
+    assert error.value.detail == "项目中仍有运行或排队的任务，请结束后重试"
