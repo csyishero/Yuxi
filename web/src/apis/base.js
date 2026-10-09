@@ -57,8 +57,27 @@ function safeErrorData(errorData, status, publicMessage) {
   }
 }
 
-function publicErrorMessage(url, status, headers, requiresAuth) {
+// 仅允许目录删除接口的固定业务文案进入 UI，其他响应继续脱敏。
+const DIRECTORY_DELETE_ERRORS = new Set([
+  '项目目录不符合安全清理规则',
+  '项目目录与项目 ID 不匹配，不能删除文件夹',
+  '项目目录与其他项目共用或重叠，不能删除文件夹',
+  '项目中仍有运行或排队的任务，请结束后重试',
+  '文件夹仍被其他会话使用，请取消删除文件夹选项',
+  '关联已有目录的项目不能删除文件夹',
+  '项目内的对话不能单独删除共享文件夹'
+])
+
+function publicErrorMessage(url, status, headers, requiresAuth, options, errorData) {
   const path = safeRequestMetadata(url, {}).path
+  if (
+    options?.method?.toUpperCase() === 'DELETE' &&
+    /^\/api\/(?:chat\/thread|projects)\/[^/]+\/?$/.test(path) &&
+    [409, 422].includes(status) &&
+    DIRECTORY_DELETE_ERRORS.has(errorData?.detail)
+  ) {
+    return errorData.detail
+  }
   if (status === 400) return '请求参数错误'
   if (status === 401) {
     if (requiresAuth) return '登录已过期，请重新登录'
@@ -122,7 +141,6 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
     // 处理API返回的错误
     if (!response.ok) {
       // 尝试解析错误信息
-      const errorMessage = publicErrorMessage(url, response.status, response.headers, requiresAuth)
       let errorData = null
 
       console.error('API请求失败:', safeRequestMetadata(url, requestOptions, response))
@@ -138,6 +156,15 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
         // 如果无法解析JSON，使用默认错误信息
         console.error('API错误响应无法解析:', safeRequestMetadata(url, requestOptions, response))
       }
+
+      const errorMessage = publicErrorMessage(
+        url,
+        response.status,
+        response.headers,
+        requiresAuth,
+        requestOptions,
+        errorData
+      )
 
       // 特殊处理401和403错误
       const error = new Error(errorMessage)

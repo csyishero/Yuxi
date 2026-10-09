@@ -95,7 +95,7 @@ class ProjectRepository:
         return set(result.all())
 
     async def has_other_workdir_overlap(self, project: Project) -> bool:
-        """阻止清理仍共享或曾与其他项目同时共享的目录。"""
+        """阻止清理仍被占用的目录，保留同路径与下层绑定的文件。"""
         path = project.workdir_path
         other_projects = (
             await self.db.scalars(select(Project).where(Project.uid == project.uid, Project.id != project.id))
@@ -104,13 +104,7 @@ class ProjectRepository:
             other_path = other.workdir_path
             if not (other_path == path or other_path.startswith(f"{path}/") or path.startswith(f"{other_path}/")):
                 continue
-            if (
-                path.startswith(f"{other_path}/")
-                and other.status == "deleted"
-                and other.deleted_at is not None
-                and project.created_at is not None
-                and other.deleted_at < project.created_at
-            ):
+            if path.startswith(f"{other_path}/") and other.status == "deleted" and other.deleted_at is not None:
                 if await self.has_active_project_work(other):
                     return True
                 continue

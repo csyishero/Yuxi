@@ -434,6 +434,15 @@ async def test_explicit_managed_delete_persists_task_and_removes_only_its_direct
     task_id = None
     terminal_status = None
     try:
+        if standalone:
+            # 历史会话比已删除的上层绑定更早创建，仍只清理其专属子目录。
+            async with _database_connection() as db:
+                await db.execute(
+                    "UPDATE projects SET created_at = (SELECT created_at - interval '1 day' "
+                    "FROM projects WHERE id = $1) WHERE id = $2",
+                    deleted_projects_parent["project_id"],
+                    project_id,
+                )
         deleted = await test_client.delete(endpoint, headers=admin_headers, params={"delete_workdir": True})
         assert deleted.status_code == 200, deleted.text
         task_id = deleted.json()["workdir_delete_task_id"]

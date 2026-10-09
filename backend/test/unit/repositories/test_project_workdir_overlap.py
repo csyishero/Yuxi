@@ -1,4 +1,4 @@
-"""项目目录清理只忽略创建前已解绑的旧上层目录。"""
+"""项目目录清理忽略已解绑且没有未完成工作的上层目录。"""
 
 from datetime import datetime, timedelta
 
@@ -16,8 +16,8 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
     [
         ("projects", "deleted", -1, "user-1", False),
         ("projects", "active", None, "user-1", True),
-        ("projects", "deleted", 1, "user-1", True),
-        ("projects", "deleted", 0, "user-1", True),
+        ("projects", "deleted", 1, "user-1", False),
+        ("projects", "deleted", 0, "user-1", False),
         ("projects", "deleted", None, "user-1", True),
         ("projects/demo_a1b2c3d4", "deleted", -1, "user-1", True),
         ("projects/demo_a1b2c3d4/nested", "deleted", -1, "user-1", True),
@@ -25,7 +25,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
         ("projects", "active", None, "user-2", False),
     ],
 )
-async def test_workdir_overlap_respects_earlier_deleted_parent(
+async def test_workdir_overlap_respects_deleted_parent(
     other_path: str, other_status: str, deleted_offset: int | None, other_uid: str, expected: bool
 ):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -68,6 +68,7 @@ async def test_workdir_overlap_respects_earlier_deleted_parent(
         await engine.dispose()
 
 
+@pytest.mark.parametrize("deleted_offset", [-1, 1])
 @pytest.mark.parametrize(
     ("run_status", "cleanup_pending", "expected"),
     [
@@ -76,8 +77,8 @@ async def test_workdir_overlap_respects_earlier_deleted_parent(
         ("completed", False, False),
     ],
 )
-async def test_earlier_deleted_parent_with_unfinished_work_still_blocks_cleanup(
-    run_status: str, cleanup_pending: bool, expected: bool
+async def test_deleted_parent_with_unfinished_work_still_blocks_cleanup(
+    run_status: str, cleanup_pending: bool, expected: bool, deleted_offset: int
 ):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
@@ -104,7 +105,7 @@ async def test_earlier_deleted_parent_with_unfinished_work_still_blocks_cleanup(
                 workdir_path="projects",
                 directory_mode="linked",
                 status="deleted",
-                deleted_at=created_at - timedelta(seconds=1),
+                deleted_at=created_at + timedelta(seconds=deleted_offset),
             )
             db.add_all([target, old_parent])
             await db.flush()

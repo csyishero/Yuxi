@@ -481,3 +481,44 @@ test('工具元数据 API 使用普通用户认证且普通用户可正常请求
     assert.equal(result.data[0].slug, 'web_search')
   })
 })
+
+test('目录删除显示固定业务冲突，未知响应和其他接口保持脱敏', async () => {
+  await withServer(async (server) => {
+    const { apiRequest } = await server.ssrLoadModule('/src/apis/base.js')
+    const overlap = '项目目录与其他项目共用或重叠，不能删除文件夹'
+    const running = '项目中仍有运行或排队的任务，请结束后重试'
+    const cases = [
+      ['/api/chat/thread/example?delete_workdir=true', 'DELETE', 409, overlap, overlap],
+      ['/api/projects/example?delete_workdir=true', 'DELETE', 409, running, running],
+      [
+        '/api/chat/thread/example',
+        'DELETE',
+        422,
+        '项目内的对话不能单独删除共享文件夹',
+        '项目内的对话不能单独删除共享文件夹'
+      ],
+      ['/api/chat/thread/example', 'DELETE', 409, 'secret-response', '请求冲突，请刷新后重试'],
+      ['/api/chat/thread/example', 'GET', 409, overlap, '请求冲突，请刷新后重试'],
+      ['/api/unrelated', 'DELETE', 409, overlap, '请求冲突，请刷新后重试'],
+      [
+        '/api/chat/thread/example',
+        'DELETE',
+        500,
+        overlap,
+        '服务器内部错误，请使用 docker compose logs api 查看详细日志'
+      ]
+    ]
+    for (const [url, method, status, detail, expected] of cases) {
+      globalThis.fetch = async () =>
+        new Response(JSON.stringify({ detail }), {
+          status,
+          headers: { 'content-type': 'application/json' }
+        })
+      await assert.rejects(apiRequest(url, { method }, false), (error) => {
+        assert.equal(error.message, expected)
+        assert.deepEqual(error.response.data, { detail: expected })
+        return true
+      })
+    }
+  })
+})
