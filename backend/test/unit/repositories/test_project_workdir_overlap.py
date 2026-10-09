@@ -1,4 +1,4 @@
-"""项目目录清理忽略已解绑且没有未完成工作的上层目录。"""
+"""managed 子目录清理按归属判断，并保护上层未完成工作。"""
 
 from datetime import datetime, timedelta
 
@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.repositories.project_repository import ProjectRepository
-from yuxi.storage.postgres.models_business import AgentRun, Base, Conversation, Project, User
+from yuxi.storage.postgres.models_business import AgentRun, AgentRunRequest, Base, Conversation, Message, Project, User
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
@@ -15,17 +15,19 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
     ("other_path", "other_status", "deleted_offset", "other_uid", "expected"),
     [
         ("projects", "deleted", -1, "user-1", False),
-        ("projects", "active", None, "user-1", True),
+        ("projects", "active", None, "user-1", False),
         ("projects", "deleted", 1, "user-1", False),
         ("projects", "deleted", 0, "user-1", False),
-        ("projects", "deleted", None, "user-1", True),
+        ("projects", "deleted", None, "user-1", False),
         ("projects/demo_a1b2c3d4", "deleted", -1, "user-1", True),
+        ("projects/demo_a1b2c3d4", "active", None, "user-1", True),
+        ("projects/demo_a1b2c3d4/nested", "active", None, "user-1", True),
         ("projects/demo_a1b2c3d4/nested", "deleted", -1, "user-1", True),
         ("projects/sibling", "active", None, "user-1", False),
         ("projects", "active", None, "user-2", False),
     ],
 )
-async def test_workdir_overlap_respects_deleted_parent(
+async def test_managed_workdir_overlap_respects_directory_ownership(
     other_path: str, other_status: str, deleted_offset: int | None, other_uid: str, expected: bool
 ):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -68,17 +70,18 @@ async def test_workdir_overlap_respects_deleted_parent(
         await engine.dispose()
 
 
-@pytest.mark.parametrize("deleted_offset", [-1, 1])
+@pytest.mark.parametrize("deleted_offset", [None, -1, 1])
 @pytest.mark.parametrize(
-    ("run_status", "cleanup_pending", "expected"),
+    ("run_status", "cleanup_pending", "queued", "expected"),
     [
-        ("running", False, True),
-        ("completed", True, True),
-        ("completed", False, False),
+        ("running", False, False, True),
+        ("completed", True, False, True),
+        ("completed", False, False, False),
+        ("completed", False, True, True),
     ],
 )
-async def test_deleted_parent_with_unfinished_work_still_blocks_cleanup(
-    run_status: str, cleanup_pending: bool, expected: bool, deleted_offset: int
+async def test_parent_with_unfinished_work_still_blocks_cleanup(
+    run_status: str, cleanup_pending: bool, queued: bool, expected: bool, deleted_offset: int | None
 ):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
@@ -104,8 +107,8 @@ async def test_deleted_parent_with_unfinished_work_still_blocks_cleanup(
                 selection_status="selectable",
                 workdir_path="projects",
                 directory_mode="linked",
-                status="deleted",
-                deleted_at=created_at + timedelta(seconds=deleted_offset),
+                status="active" if deleted_offset is None else "deleted",
+                deleted_at=created_at + timedelta(seconds=deleted_offset) if deleted_offset is not None else None,
             )
             db.add_all([target, old_parent])
             await db.flush()
@@ -133,6 +136,20 @@ async def test_deleted_parent_with_unfinished_work_still_blocks_cleanup(
                     input_payload={},
                 )
             )
+            if queued:
+                message = Message(conversation_id=conversation.id, role="user", content="queued test")
+                db.add(message)
+                await db.flush()
+                db.add(
+                    AgentRunRequest(
+                        request_id="queued-request",
+                        uid="user-1",
+                        agent_slug="main",
+                        conversation_thread_id=conversation.thread_id,
+                        input_message_id=message.id,
+                        status="queued",
+                    )
+                )
             await db.flush()
 
             assert await ProjectRepository(db).has_other_workdir_overlap(target) is expected

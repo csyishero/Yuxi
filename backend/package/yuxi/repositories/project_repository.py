@@ -95,16 +95,26 @@ class ProjectRepository:
         return set(result.all())
 
     async def has_other_workdir_overlap(self, project: Project) -> bool:
-        """阻止清理仍被占用的目录，保留同路径与下层绑定的文件。"""
+        """按 managed 子目录归属检查共享绑定，并锁住上层的工作准入。"""
         path = project.workdir_path
         other_projects = (
-            await self.db.scalars(select(Project).where(Project.uid == project.uid, Project.id != project.id))
+            await self.db.scalars(
+                select(Project).where(Project.uid == project.uid, Project.id != project.id).order_by(Project.id)
+            )
         ).all()
         for other in other_projects:
             other_path = other.workdir_path
             if not (other_path == path or other_path.startswith(f"{path}/") or path.startswith(f"{other_path}/")):
                 continue
-            if path.startswith(f"{other_path}/") and other.status == "deleted" and other.deleted_at is not None:
+            if project.directory_mode == "managed" and path.startswith(f"{other_path}/"):
+                # 新会话/子线程先锁 Project，普通请求锁 Conversation；持锁覆盖检查与文件清理。
+                await self.db.execute(select(Project.id).where(Project.id == other.id).with_for_update())
+                await self.db.execute(
+                    select(Conversation.id)
+                    .where(Conversation.project_id == other.id)
+                    .order_by(Conversation.id)
+                    .with_for_update()
+                )
                 if await self.has_active_project_work(other):
                     return True
                 continue

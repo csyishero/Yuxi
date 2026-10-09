@@ -12,7 +12,8 @@ import asyncpg
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
-from sqlalchemy import delete
+from sqlalchemy import delete, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from test.live_api_cleanup import (
     make_test_conversation_metadata,
@@ -105,6 +106,7 @@ async def project_lifecycle_database():
     try:
         async with session_factory() as session:
             session.add(User(username=uid, uid=uid, password_hash="test"))
+            await session.flush()
             session.add(
                 Project(
                     id=project_id,
@@ -394,12 +396,14 @@ async def test_thread_delete_preserves_files_by_default_and_rejects_project_clea
         Workspace(thread["uid"]).delete_authorized_path(f"/{thread['workdir_path']}", root="/")
 
 
+@pytest.mark.parametrize("parent_active", [False, True])
 @pytest.mark.parametrize("standalone", [False, True])
 async def test_explicit_managed_delete_persists_task_and_removes_only_its_directory(
     test_client,
     admin_headers,
     deleted_projects_parent,
     standalone,
+    parent_active,
 ):
     if standalone:
         created = await test_client.post(
@@ -443,6 +447,12 @@ async def test_explicit_managed_delete_persists_task_and_removes_only_its_direct
                     deleted_projects_parent["project_id"],
                     project_id,
                 )
+        if parent_active:
+            async with _database_connection() as db:
+                await db.execute(
+                    "UPDATE projects SET status = 'active', deleted_at = NULL WHERE id = $1",
+                    deleted_projects_parent["project_id"],
+                )
         deleted = await test_client.delete(endpoint, headers=admin_headers, params={"delete_workdir": True})
         assert deleted.status_code == 200, deleted.text
         task_id = deleted.json()["workdir_delete_task_id"]
@@ -476,6 +486,11 @@ async def test_explicit_managed_delete_persists_task_and_removes_only_its_direct
         assert status.json()["status"] == "success", status.text
         assert not directory.exists()
         assert (sibling / "marker.txt").read_text(encoding="utf-8") == "keep"
+        async with _database_connection() as db:
+            parent_status = await db.fetchval(
+                "SELECT status FROM projects WHERE id = $1", deleted_projects_parent["project_id"]
+            )
+        assert parent_status == ("active" if parent_active else "deleted")
     finally:
         if task_id and terminal_status is not None:
             async with _database_connection() as db:
@@ -498,8 +513,9 @@ async def test_explicit_managed_delete_persists_task_and_removes_only_its_direct
         sibling.rmdir()
 
 
-async def test_deleted_parent_with_running_work_still_blocks_directory_cleanup(
-    test_client, admin_headers, deleted_projects_parent
+@pytest.mark.parametrize("parent_active", [False, True])
+async def test_parent_with_running_work_still_blocks_directory_cleanup(
+    test_client, admin_headers, deleted_projects_parent, parent_active
 ):
     created = await test_client.post(
         "/api/projects",
@@ -514,6 +530,12 @@ async def test_deleted_parent_with_running_work_still_blocks_directory_cleanup(
     project = created.json()
     path = project["workdir_path"]
     directory = user_workdir_host_dir(project["uid"], path)
+    if parent_active:
+        async with _database_connection() as db:
+            await db.execute(
+                "UPDATE projects SET status = 'active', deleted_at = NULL WHERE id = $1",
+                deleted_projects_parent["project_id"],
+            )
     old_thread_id = f"pytest-old-parent-{uuid.uuid4()}"
     old_run_id = str(uuid.uuid4())
     engine = create_async_engine(os.environ["POSTGRES_URL"])
@@ -958,3 +980,39 @@ async def test_subagent_run_scope_rejects_child_conversation_deleted_after_initi
         if not scope_task.done():
             scope_task.cancel()
         await asyncio.gather(scope_task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("admission_boundary", ["project", "conversation"])
+async def test_managed_cleanup_serializes_active_ancestor_admission(project_lifecycle_database, admission_boundary):
+    """清理锁释放前，上层的新会话或普通请求不能取得准入锁。"""
+    sessions, uid, target_id = project_lifecycle_database
+    parent_id = str(uuid.uuid4())
+    thread_id = str(uuid.uuid4())
+    async with sessions() as db:
+        db.add(
+            Project(
+                id=parent_id, uid=uid, selection_status="selectable", workdir_path="projects", directory_mode="linked"
+            )
+        )
+        await db.flush()
+        db.add(Conversation(uid=uid, project_id=parent_id, thread_id=thread_id, agent_id="default-chatbot"))
+        await db.commit()
+
+    async def acquire_admission(db):
+        """使用正式准入路径持有的锁。"""
+        if admission_boundary == "project":
+            return await ProjectRepository(db).lock_active_for_user(parent_id, uid)
+        return await ConversationRepository(db).lock_conversation_by_thread_id(thread_id)
+
+    async with sessions() as cleanup, sessions() as incoming:
+        target = await ProjectRepository(cleanup).get_for_user(target_id, uid)
+        assert await ProjectRepository(cleanup).has_other_workdir_overlap(target) is False
+        await incoming.execute(text("SET LOCAL lock_timeout = '200ms'"))
+        with pytest.raises(DBAPIError) as blocked:
+            await acquire_admission(incoming)
+        assert blocked.value.orig.sqlstate == "55P03"
+        await incoming.rollback()
+        await cleanup.rollback()
+        await incoming.execute(text("SET LOCAL lock_timeout = '2s'"))
+        assert await acquire_admission(incoming) is not None
+        await incoming.rollback()
