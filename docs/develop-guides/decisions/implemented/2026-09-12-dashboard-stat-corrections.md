@@ -10,6 +10,8 @@ Owner：backend/package/yuxi/repositories/dashboard_repository.py
 
 ## 决策
 
+历史范围、分期筛选及删除后的统计语义见[历史使用与当前资源口径](./2026-10-09-dashboard-history-scope.md)。
+
 会话列表、筛选和详情将 active 展示为“未归档”。DashboardRepository 从同 conversation_id 的 AgentRun.token_usage 汇总已报告的实测 Token，用 complete 标记识别部分统计；列表先分页，再聚合当前页 Run，详情只聚合对应会话。无 Run 的历史会话保留非零 ConversationStats 汇总，旧汇总的零值无法证明已采集用量，显示未知。
 
 列表与详情共享读取口径：完整统计显示数值，部分统计显示“≥ 已知值”，全部缺失显示“未记录”；真正报告的零仍显示 0。会话统计概览和智能体分组使用同一来源，求和含义为已记录用量。各子会话独立统计，不重复累加父子用量。

@@ -68,13 +68,21 @@ class DashboardService:
         *,
         time_range: str = "30days",
         agent_id: str | None = None,
-        include_subagents: bool = False,
+        include_subagents: bool = True,
+        uid: str | None = None,
+        project_id: str | None = None,
+        status: str = "all",
+        search: str | None = None,
     ) -> dict[str, Any]:
         """汇总会话（Thread）多维分析统计。"""
         return await self.repo.get_thread_analytics(
             time_range=time_range,
             agent_id=agent_id,
             include_subagents=include_subagents,
+            uid=uid,
+            project_id=project_id,
+            status=status,
+            search=search,
         )
 
     async def get_conversation_filter_options(self) -> dict[str, list[dict[str, Any]]]:
@@ -88,6 +96,9 @@ class DashboardService:
         agent_id: str | None = None,
         status: str = "all",
         search: str | None = None,
+        project_id: str | None = None,
+        time_range: str = "all",
+        include_subagents: bool = True,
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -97,6 +108,9 @@ class DashboardService:
             agent_id=agent_id,
             status=status,
             search=search,
+            project_id=project_id,
+            time_range=time_range,
+            include_subagents=include_subagents,
             limit=limit,
             offset=offset,
         )
@@ -108,7 +122,6 @@ class DashboardService:
             return None
 
         messages = await self.conv_repo.get_messages(conversation.id)
-        stats = await self.conv_repo.get_stats(conversation.id)
         audit_metadata = await self.repo.get_conversation_audit_metadata(conversation)
         message_list = []
         for message in messages:
@@ -147,7 +160,11 @@ class DashboardService:
             "title": conversation.title,
             "status": conversation.status,
             "is_pinned": bool(conversation.is_pinned),
-            "message_count": stats.message_count if stats else len(message_list),
+            "message_count": len(message_list),
+            "project_id": audit_metadata["project_id"],
+            "project_name": audit_metadata["project_name"],
+            "project_deleted": audit_metadata["project_deleted"],
+            "project_implicit": audit_metadata["project_implicit"],
             "created_at": format_utc_datetime(conversation.created_at) or "",
             "updated_at": format_utc_datetime(conversation.updated_at) or "",
             **await self.repo.get_conversation_token_usage(conversation.id),

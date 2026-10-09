@@ -30,6 +30,18 @@
         </div>
       </template>
 
+      <div class="call-scope-note">
+        <span
+          >包含已删除记录；按实际执行时间统计。模型调用为已记录次数，工具调用为已完成执行。</span
+        >
+        <span v-if="isTokenView">Token 按执行开始时间归属，仅含已记录用量。</span>
+        <span v-if="isTokenView && callStatsData?.incomplete_usage_runs" role="status">
+          {{ callStatsData.incomplete_usage_runs }} 次执行的用量不完整，图中数值为已知下界。
+        </span>
+        <span v-if="callStatsError" role="alert"
+          >加载失败，请重试。<button @click="loadCallStats">重试</button></span
+        >
+      </div>
       <div class="call-stats-container">
         <div class="chart-container">
           <div ref="callStatsChartRef" class="chart"></div>
@@ -61,6 +73,8 @@ const themeStore = useThemeStore()
 // state
 const callStatsData = ref(null)
 const callStatsLoading = ref(false)
+const callStatsError = ref(false)
+let latestCallRequest = 0
 const callTimeRange = ref('14days')
 const callDataType = ref('agents')
 const timeRangeOptions = [
@@ -115,16 +129,23 @@ const retryCount = ref(0)
 const maxRetry = 20
 
 const loadCallStats = async () => {
+  const requestId = ++latestCallRequest
   callStatsLoading.value = true
+  callStatsError.value = false
   try {
     const response = await dashboardApi.getCallTimeseries(callDataType.value, callTimeRange.value)
+    if (requestId !== latestCallRequest) return
     callStatsData.value = response
     await nextTick()
     renderCallStatsChart()
   } catch (error) {
+    if (requestId !== latestCallRequest) return
+    callStatsData.value = null
+    callStatsChart?.clear()
+    callStatsError.value = true
     console.error('加载调用统计数据失败:', error)
   } finally {
-    callStatsLoading.value = false
+    if (requestId === latestCallRequest) callStatsLoading.value = false
   }
 }
 
@@ -174,7 +195,7 @@ const renderCallStatsChart = () => {
   const agentNames = callStatsData.value.agent_names || {}
 
   const resolveCategoryLabel = (cat) => {
-    if (cat === 'None') return '未知模型'
+    if (cat === 'None' || cat === 'unknown_model') return '未知模型'
     return agentNames[cat] || cat
   }
 
@@ -336,6 +357,15 @@ onUnmounted(() => {
 </script>
 
 <style scoped lang="less">
+.call-scope-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--gray-600);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
 /* 复用 dashboard.css 样式：此处仅做最小覆盖以避免重复 */
 .call-stats-section {
   background-color: var(--gray-0);
@@ -347,6 +377,7 @@ onUnmounted(() => {
 :deep(.ant-card-body) {
   flex: 1;
   display: flex;
+  flex-direction: column;
   padding: 16px; /* 减少padding从20px到16px */
   overflow-x: hidden; /* 防止横向滚动条 */
 }

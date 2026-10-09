@@ -25,6 +25,10 @@ export const dashboardApi = {
     if (params.search) queryParams.append('search', params.search)
     if (params.limit) queryParams.append('limit', params.limit)
     if (params.offset) queryParams.append('offset', params.offset)
+    if (params.project_id) queryParams.append('project_id', params.project_id)
+    if (params.time_range) queryParams.append('time_range', params.time_range)
+    if (params.include_subagents !== undefined)
+      queryParams.append('include_subagents', String(params.include_subagents))
 
     return apiAdminGet(`/api/dashboard/conversations?${queryParams.toString()}`)
   },
@@ -113,7 +117,12 @@ export const dashboardApi = {
     const queryParams = new URLSearchParams()
     if (params.timeRange) queryParams.append('time_range', params.timeRange)
     if (params.agentId) queryParams.append('agent_id', params.agentId)
-    if (params.includeSubagents) queryParams.append('include_subagents', 'true')
+    if (params.includeSubagents !== undefined)
+      queryParams.append('include_subagents', String(params.includeSubagents))
+    if (params.projectId) queryParams.append('project_id', params.projectId)
+    if (params.uid) queryParams.append('uid', params.uid)
+    if (params.status) queryParams.append('status', params.status)
+    if (params.search) queryParams.append('search', params.search)
 
     return apiAdminGet(`/api/dashboard/stats/threads?${queryParams.toString()}`)
   },

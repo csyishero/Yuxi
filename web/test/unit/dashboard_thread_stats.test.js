@@ -84,7 +84,10 @@ test('dashboardApi.getThreadStats 正确拼接时间范围与智能体过滤参�
     assert.equal(res2.summary.active_threads, 5)
 
     await dashboardApi.getThreadStats({ timeRange: '90days', includeSubagents: true })
-    assert.equal(requests[2], '/api/dashboard/stats/threads?time_range=90days&include_subagents=true')
+    assert.equal(
+      requests[2],
+      '/api/dashboard/stats/threads?time_range=90days&include_subagents=true'
+    )
   })
 })
 
@@ -156,7 +159,10 @@ test('会话统计源码包含筛选请求代次和 loading 回写守卫', () =>
     new URL('../../src/components/dashboard/ThreadStatsComponent.vue', import.meta.url),
     'utf8'
   )
-  const statsLoader = source.slice(source.indexOf('const loadData'), source.indexOf('const toggleSubagents'))
+  const statsLoader = source.slice(
+    source.indexOf('const loadData'),
+    source.indexOf('const toggleSubagents')
+  )
   const conversationLoader = source.slice(
     source.indexOf('const loadConversations'),
     source.indexOf('const resetFilters')
@@ -263,4 +269,138 @@ test('dashboardApi.getConversations 正确拼接 search 搜索关键词与分页
     assert.equal(result.items.length, 1)
     assert.equal(result.items[0].thread_id, 'thread-123')
   })
+})
+
+test('会话图表与明细 API 共享筛选并显式发送不含子会话', async () => {
+  await withServer(async (server) => {
+    const requests = []
+    globalThis.fetch = async (input) => {
+      requests.push(new URL(String(input), 'http://localhost'))
+      return jsonResponse({})
+    }
+    await prepareStores(server)
+    const { dashboardApi } = await server.ssrLoadModule('/src/apis/dashboard_api.js')
+    await dashboardApi.getThreadStats({
+      timeRange: '7days',
+      agentId: 'removed-agent',
+      projectId: 'deleted-project',
+      uid: 'deleted-user',
+      status: 'deleted',
+      search: '报告',
+      includeSubagents: false
+    })
+    await dashboardApi.getConversations({
+      time_range: '7days',
+      agent_id: 'removed-agent',
+      project_id: 'deleted-project',
+      uid: 'deleted-user',
+      status: 'deleted',
+      search: '报告',
+      include_subagents: false
+    })
+    assert.deepEqual(
+      Object.fromEntries(requests[0].searchParams),
+      Object.fromEntries(requests[1].searchParams)
+    )
+    assert.equal(requests[0].searchParams.get('include_subagents'), 'false')
+  })
+})
+
+async function auditLoader() {
+  const { runInNewContext } = await import('node:vm')
+  const { ref } = await import('vue')
+  const source = readFileSync(
+    new URL('../../src/components/dashboard/ThreadStatsComponent.vue', import.meta.url),
+    'utf8'
+  )
+  const calls = [],
+    pending = []
+  const read = (kind) => (params) => {
+    calls.push({ kind, params: JSON.parse(JSON.stringify(params)) })
+    return new Promise((resolve, reject) => pending.push({ resolve, reject }))
+  }
+  const state = {
+    includeSubagents: ref(true),
+    timeRange: ref('7days'),
+    selectedAgentId: ref('agent'),
+    selectedUid: ref('user'),
+    selectedProjectId: ref('project'),
+    selectedStatus: ref('deleted'),
+    searchKeyword: ref('报告'),
+    appliedSearchKeyword: ref('报告'),
+    loading: ref(false),
+    tableLoading: ref(false),
+    threadData: ref(null),
+    conversationList: ref([]),
+    tablePagination: ref({ current: 1, pageSize: 10, total: 0 }),
+    filterOptions: ref({})
+  }
+  const actions = runInNewContext(
+    `${source.slice(source.indexOf('const loadData ='), source.indexOf('const resetFilters ='))}\n({loadData, loadConversations})`,
+    {
+      ...state,
+      latestStatsRequest: 0,
+      latestConversationRequest: 0,
+      nextTick: async () => {},
+      renderAllCharts() {},
+      trendChart: null,
+      depthChart: null,
+      agentChart: null,
+      dashboardApi: { getThreadStats: read('stats'), getConversations: read('list') },
+      message: { error() {} },
+      console: { error() {} }
+    }
+  )
+  return { ...actions, state, calls, pending }
+}
+
+test('审计快速切换筛选后迟到响应不能覆盖新图表和明细', async () => {
+  const loader = await auditLoader()
+  const oldStats = loader.loadData(),
+    oldList = loader.loadConversations()
+  loader.state.selectedProjectId.value = 'new-project'
+  const newStats = loader.loadData(),
+    newList = loader.loadConversations()
+  loader.pending[2].resolve({ summary: { total_threads: 2 } })
+  loader.pending[3].resolve({ items: [{ thread_id: 'new' }], total: 2 })
+  await Promise.all([newStats, newList])
+  loader.pending[0].resolve({ summary: { total_threads: 999 } })
+  loader.pending[1].resolve({ items: [{ thread_id: 'old' }], total: 999 })
+  await Promise.all([oldStats, oldList])
+  assert.equal(loader.state.threadData.value.summary.total_threads, 2)
+  assert.equal(loader.state.conversationList.value[0].thread_id, 'new')
+  assert.equal(loader.state.tablePagination.value.total, 2)
+  assert.equal(loader.calls[2].params.projectId, loader.calls[3].params.project_id)
+  assert.equal(loader.calls[2].params.status, 'deleted')
+  assert.equal(loader.calls[2].params.timeRange, loader.calls[3].params.time_range)
+})
+
+test('审计请求失败清除旧数值，重试空结果保持零条', async () => {
+  const loader = await auditLoader()
+  loader.state.threadData.value = { summary: { total_threads: 999 } }
+  loader.state.conversationList.value = [{ thread_id: 'old' }]
+  const stats = loader.loadData(),
+    list = loader.loadConversations()
+  loader.pending[0].reject(new Error('offline'))
+  loader.pending[1].reject(new Error('offline'))
+  await Promise.all([stats, list])
+  assert.equal(loader.state.threadData.value, null)
+  assert.equal(loader.state.conversationList.value.length, 0)
+  assert.equal(loader.state.tablePagination.value.total, 0)
+  const retry = loader.loadConversations()
+  loader.pending[2].resolve({ items: [], total: 0 })
+  await retry
+  assert.equal(loader.state.tableLoading.value, false)
+  assert.equal(loader.state.conversationList.value.length, 0)
+})
+
+test('尚未提交的新关键词不会改变分页查询的已应用条件', async () => {
+  const loader = await auditLoader()
+  loader.state.searchKeyword.value = '未提交关键词'
+  loader.state.tablePagination.value.current = 2
+  const page = loader.loadConversations()
+  assert.equal(loader.calls[0].params.search, '报告')
+  assert.equal(loader.calls[0].params.offset, 10)
+  loader.pending[0].resolve({ items: [], total: 0 })
+  await page
 })

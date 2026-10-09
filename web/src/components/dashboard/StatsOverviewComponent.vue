@@ -1,5 +1,6 @@
 <template>
   <div class="stats-overview-container">
+    <p class="scope-note">历史累计 · 包含已删除会话、项目及已注销用户的留存记录</p>
     <DashboardMetricGrid>
       <DashboardMetricCard
         :icon="MessageCircle"
@@ -17,22 +18,10 @@
       </DashboardMetricCard>
 
       <DashboardMetricCard
-        :icon="Activity"
-        :value="formatNumber(basicStats?.active_conversations)"
-        label="活跃对话"
-        tone="success"
-      />
-      <DashboardMetricCard
         :icon="Mail"
         :value="formatNumber(basicStats?.total_messages)"
         label="总消息数"
         tone="info"
-      />
-      <DashboardMetricCard
-        :icon="Users"
-        :value="formatNumber(basicStats?.total_users)"
-        label="用户数"
-        tone="warning"
       />
       <DashboardMetricCard
         :icon="BarChart3"
@@ -44,9 +33,31 @@
       />
       <DashboardMetricCard
         :icon="Heart"
-        :value="`${basicStats?.feedback_stats?.satisfaction_rate || 0}%`"
+        :value="
+          basicStats?.feedback_stats?.satisfaction_rate == null
+            ? '无反馈'
+            : `${basicStats.feedback_stats.satisfaction_rate}%`
+        "
         label="满意度"
         :tone="getSatisfactionTone()"
+      />
+    </DashboardMetricGrid>
+    <p class="scope-note">当前可用资源</p>
+    <DashboardMetricGrid>
+      <DashboardMetricCard
+        :icon="Folder"
+        :value="formatNumber(basicStats?.current_resources?.projects)"
+        label="当前项目"
+      />
+      <DashboardMetricCard
+        :icon="Activity"
+        :value="formatNumber(basicStats?.current_resources?.conversations)"
+        label="当前会话"
+      />
+      <DashboardMetricCard
+        :icon="Users"
+        :value="formatNumber(basicStats?.current_resources?.users)"
+        label="当前用户"
       />
     </DashboardMetricGrid>
   </div>
@@ -54,6 +65,7 @@
 
 <script setup>
 import {
+  Folder,
   MessageCircle,
   Activity,
   Mail,
@@ -89,6 +101,13 @@ const getSatisfactionTone = () => {
 </script>
 
 <style lang="less" scoped>
+.scope-note {
+  padding: 0 var(--page-padding);
+  color: var(--gray-600);
+  margin: 16px 0 8px;
+  font-size: 12px;
+}
+
 .stats-overview-container {
   margin-top: 8px;
 }

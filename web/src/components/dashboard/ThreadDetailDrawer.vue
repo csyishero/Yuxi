@@ -10,6 +10,7 @@
     <template #extra>
       <a-tag v-if="detail?.status === 'active'" color="default">未归档</a-tag>
       <a-tag v-else-if="detail?.status === 'archived'" color="blue">已归档</a-tag>
+      <a-tag v-else-if="detail?.status === 'deleted'" color="default">已删除</a-tag>
       <a-tag v-else color="default">{{ detail?.status || '未知' }}</a-tag>
     </template>
 
@@ -26,6 +27,15 @@
         </div>
 
         <div class="meta-grid">
+          <div class="meta-item">
+            <span class="meta-label">所属项目</span>
+            <span class="meta-value" :title="detail.project_id">
+              {{
+                detail.project_implicit ? '无项目会话' : detail.project_name || detail.project_id
+              }}
+              <a-tag v-if="detail.project_deleted" class="history-tag">项目已删除</a-tag>
+            </span>
+          </div>
           <div class="meta-item">
             <span class="meta-label">Thread ID</span>
             <span class="meta-value code-font" :title="detail.thread_id">{{

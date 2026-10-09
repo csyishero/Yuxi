@@ -4,7 +4,7 @@
       <DashboardMetricCard
         :icon="Users"
         :value="formatNumber(userStats?.total_users)"
-        label="总用户"
+        label="累计用户"
         tone="info"
         compact
       />
@@ -30,7 +30,7 @@
           <span class="chart-title">活跃度分布</span>
           <span class="chart-subtitle">近 120 天</span>
         </div>
-        <span class="chart-hint">按日统计活跃用户</span>
+        <span class="chart-hint">按用户消息发生日统计，包含已注销用户</span>
       </div>
       <DashboardActivityHeatmap :data="userStats?.daily_active_users" :loading="loading" />
     </div>

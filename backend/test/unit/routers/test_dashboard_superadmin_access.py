@@ -93,6 +93,12 @@ async def dashboard_session():
         )
         message_a = Message(conversation=conversation_a, role="assistant", content="A", created_at=now)
         message_b = Message(conversation=conversation_b, role="assistant", content="B", created_at=now)
+        db.add_all(
+            [
+                Message(conversation=conversation_a, role="user", content="ask A", created_at=now),
+                Message(conversation=conversation_b, role="user", content="ask B", created_at=now),
+            ]
+        )
         tool_call_a = ToolCall(message=message_a, tool_name="dept_a_tool", status="success", created_at=now)
         tool_call_b = ToolCall(message=message_b, tool_name="dept_b_tool", status="success", created_at=now)
         db.add_all(

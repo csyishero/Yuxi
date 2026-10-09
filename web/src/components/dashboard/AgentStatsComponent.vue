@@ -5,7 +5,7 @@
       <DashboardMetricCard
         :icon="Bot"
         :value="formatNumber(agentStats?.total_agents)"
-        label="智能体总数"
+        label="当前智能体"
         tone="info"
         compact
       />

@@ -8,7 +8,7 @@
             v-model:value="timeRange"
             :options="timeRangeOptions"
             size="middle"
-            @change="loadData()"
+            @change="handleSearch"
           />
         </div>
 
@@ -26,7 +26,7 @@
           <span class="toggle-state">{{ includeSubagents ? '包含' : '不含' }}</span>
         </button>
 
-        <button type="button" class="refresh-btn" @click="loadData()">
+        <button type="button" class="refresh-btn" @click="handleSearch">
           <RefreshCw class="control-icon" aria-hidden="true" />
           <span>刷新</span>
         </button>
@@ -38,7 +38,7 @@
       <DashboardMetricCard
         :icon="MessageSquare"
         :value="formatNumber(threadData?.summary?.total_threads)"
-        label="累计会话"
+        label="涉及会话"
         tone="primary"
       />
 
@@ -52,7 +52,7 @@
       <DashboardMetricCard
         :icon="Layers"
         :value="threadData?.summary?.avg_messages_per_thread || 0"
-        label="平均轮数 / 会话"
+        label="平均消息 / 会话"
         tone="info"
       />
 
@@ -71,7 +71,11 @@
         <div class="card-header">
           <div class="card-title-group">
             <span class="card-title">会话增长与活跃趋势</span>
-            <span class="card-desc">每日新增会话与活跃会话统计</span>
+            <span class="card-desc">{{
+              timeRange === 'all'
+                ? '全部历史模式下，此趋势展示近 30 天'
+                : '所选周期每日新增与活跃会话'
+            }}</span>
           </div>
         </div>
         <div class="chart-body">
@@ -79,12 +83,12 @@
         </div>
       </div>
 
-      <!-- 2. 对话轮数深度分布 -->
+      <!-- 2. 会话消息数分布 -->
       <div class="chart-card">
         <div class="card-header">
           <div class="card-title-group">
-            <span class="card-title">对话轮数深度分布</span>
-            <span class="card-desc">探索单次问答与多轮连续交互占比</span>
+            <span class="card-title">会话消息数分布</span>
+            <span class="card-desc">当前筛选范围内每个会话的消息条数</span>
           </div>
         </div>
         <div class="chart-body">
@@ -97,7 +101,7 @@
         <div class="card-header">
           <div class="card-title-group">
             <span class="card-title">智能体会话承载排行</span>
-            <span class="card-desc">各 Agent 累计会话数与平均轮数</span>
+            <span class="card-desc">当前筛选范围内的会话数与平均消息数</span>
           </div>
         </div>
         <div class="chart-body">
@@ -140,6 +144,7 @@
                   />
                   <div class="user-cell-meta">
                     <span class="user-cell-name">{{ record.username || record.uid }}</span>
+                    <a-tag v-if="record.user_deleted" class="history-tag">已注销</a-tag>
                     <span class="user-cell-uid" :title="record.uid">{{ record.uid }}</span>
                   </div>
                 </div>
@@ -161,7 +166,9 @@
       <div class="explorer-header">
         <div class="explorer-title-group">
           <span class="explorer-title">全平台会话审计</span>
-          <span class="explorer-subtitle">默认排除已删除记录，可切换筛选查看完整历史</span>
+          <span class="explorer-subtitle"
+            >图表与明细共享筛选；包含已删除记录。消息和用量按所选周期统计，详情展示完整会话。</span
+          >
         </div>
 
         <div class="explorer-actions">
@@ -184,7 +191,7 @@
             class="filter-select status-filter"
             @change="handleSearch"
           >
-            <a-select-option value="all">全部（不含已删除）</a-select-option>
+            <a-select-option value="all">全部状态（含已删除）</a-select-option>
             <a-select-option value="active">未归档</a-select-option>
             <a-select-option value="archived">已归档</a-select-option>
             <a-select-option value="deleted">已删除</a-select-option>
@@ -239,6 +246,27 @@
             </a-select-option>
           </a-select>
 
+          <a-select
+            v-model:value="selectedProjectId"
+            aria-label="按项目筛选"
+            allow-clear
+            show-search
+            option-filter-prop="label"
+            placeholder="全部项目 / 无项目会话"
+            size="small"
+            class="filter-select"
+            @change="handleSearch"
+          >
+            <a-select-option
+              v-for="project in filterOptions.projects"
+              :key="project.project_id"
+              :value="project.project_id"
+              :label="`${project.project_name} ${project.uid} ${project.project_id}`"
+            >
+              {{ project.project_name }} · {{ project.uid }} · {{ project.project_id.slice(0, 8) }}
+              {{ project.is_deleted ? '（已删除）' : '' }}
+            </a-select-option>
+          </a-select>
           <a-button size="small" @click="resetFilters">重置</a-button>
           <a-button type="primary" size="small" @click="handleSearch">查询</a-button>
         </div>
@@ -325,6 +353,12 @@
               </div>
             </template>
 
+            <template v-if="column.key === 'project'">
+              <span>{{
+                record.project_implicit ? '无项目会话' : record.project_name || record.project_id
+              }}</span>
+              <a-tag v-if="record.project_deleted" class="history-tag">项目已删除</a-tag>
+            </template>
             <template v-if="column.key === 'status'">
               <a-tag v-if="record.status === 'active'" color="default">未归档</a-tag>
               <a-tag v-else-if="record.status === 'archived'" color="default">已归档</a-tag>
@@ -389,18 +423,21 @@ const themeStore = useThemeStore()
 
 const loading = ref(false)
 const tableLoading = ref(false)
-const timeRange = ref('30days')
-const includeSubagents = ref(false)
+const timeRange = ref('all')
+const includeSubagents = ref(true)
 const searchKeyword = ref('')
+const appliedSearchKeyword = ref('')
 const selectedStatus = ref('all')
 const selectedAgentId = ref(undefined)
 const selectedUid = ref(undefined)
+const selectedProjectId = ref(undefined)
 const threadData = ref(null)
-const filterOptions = ref({ users: [], agents: [] })
+const filterOptions = ref({ users: [], agents: [], projects: [] })
 const conversationList = ref([])
 const detailDrawerRef = ref(null)
 
 const timeRangeOptions = [
+  { label: '全部历史', value: 'all' },
   { label: '近7天', value: '7days' },
   { label: '近14天', value: '14days' },
   { label: '近30天', value: '30days' },
@@ -425,6 +462,7 @@ const userColumns = [
 
 const conversationColumns = [
   { title: '会话标题 & ID', key: 'title', width: '28%' },
+  { title: '所属项目', key: 'project', width: 180 },
   { title: '所属智能体', key: 'agent', width: 190 },
   { title: '用户', key: 'user', width: 180 },
   { title: '会话状态', key: 'status', width: '90px', align: 'center' },
@@ -456,7 +494,12 @@ const loadData = async (requestedIncludeSubagents = includeSubagents.value) => {
   try {
     const res = await dashboardApi.getThreadStats({
       timeRange: timeRange.value,
-      includeSubagents: requestedIncludeSubagents
+      includeSubagents: requestedIncludeSubagents,
+      agentId: selectedAgentId.value,
+      uid: selectedUid.value,
+      projectId: selectedProjectId.value,
+      status: selectedStatus.value,
+      search: appliedSearchKeyword.value || undefined
     })
     if (requestId !== latestStatsRequest) return
 
@@ -466,6 +509,10 @@ const loadData = async (requestedIncludeSubagents = includeSubagents.value) => {
     if (requestId === latestStatsRequest) renderAllCharts()
   } catch (err) {
     if (requestId !== latestStatsRequest) return
+    threadData.value = null
+    trendChart?.clear()
+    depthChart?.clear()
+    agentChart?.clear()
     console.error('加载会话统计数据失败:', err)
     message.error('加载会话统计数据失败')
   } finally {
@@ -474,7 +521,8 @@ const loadData = async (requestedIncludeSubagents = includeSubagents.value) => {
 }
 
 const toggleSubagents = () => {
-  void loadData(!includeSubagents.value)
+  includeSubagents.value = !includeSubagents.value
+  handleSearch()
 }
 
 const loadFilterOptions = async () => {
@@ -492,9 +540,12 @@ const loadConversations = async () => {
     const offset = (tablePagination.value.current - 1) * tablePagination.value.pageSize
     const res = await dashboardApi.getConversations({
       status: selectedStatus.value,
-      search: searchKeyword.value.trim() || undefined,
+      search: appliedSearchKeyword.value || undefined,
       agent_id: selectedAgentId.value,
       uid: selectedUid.value,
+      project_id: selectedProjectId.value,
+      time_range: timeRange.value,
+      include_subagents: includeSubagents.value,
       limit: tablePagination.value.pageSize,
       offset
     })
@@ -504,6 +555,9 @@ const loadConversations = async () => {
     tablePagination.value.total = res?.total || 0
   } catch (err) {
     if (requestId !== latestConversationRequest) return
+    conversationList.value = []
+    tablePagination.value.total = 0
+    message.error('加载会话明细失败，请重试')
     console.error('加载会话明细列表失败:', err)
   } finally {
     if (requestId === latestConversationRequest) tableLoading.value = false
@@ -515,11 +569,14 @@ const resetFilters = () => {
   selectedStatus.value = 'all'
   selectedAgentId.value = undefined
   selectedUid.value = undefined
+  selectedProjectId.value = undefined
   handleSearch()
 }
 
 const handleSearch = () => {
+  appliedSearchKeyword.value = searchKeyword.value.trim()
   tablePagination.value.current = 1
+  loadData()
   loadConversations()
 }
 

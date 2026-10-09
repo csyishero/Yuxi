@@ -56,6 +56,10 @@ class ConversationListItem(BaseModel):
     agent_name: str | None = None
     agent_avatar: str | None = None
     agent_deleted: bool = False
+    project_id: str
+    project_name: str | None = None
+    project_deleted: bool = False
+    project_implicit: bool = False
     title: str | None
     status: str
     is_pinned: bool = False
@@ -91,6 +95,7 @@ class ConversationFilterOptionsResponse(BaseModel):
 
     users: list[ConversationFilterOption]
     agents: list[ConversationFilterOption]
+    projects: list[dict]
 
 
 class ConversationDetailResponse(BaseModel):
@@ -105,6 +110,10 @@ class ConversationDetailResponse(BaseModel):
     agent_name: str | None = None
     agent_avatar: str | None = None
     agent_deleted: bool = False
+    project_id: str
+    project_name: str | None = None
+    project_deleted: bool = False
+    project_implicit: bool = False
     title: str | None
     status: str
     is_pinned: bool = False
@@ -141,6 +150,8 @@ class TimeSeriesStats(BaseModel):
     peak_count: int
     peak_date: str
     agent_names: dict[str, str] | None = None
+    incomplete_usage_runs: int = 0
+    token_usage_complete: bool = True
 
 
 class ThreadSummary(BaseModel):
@@ -149,9 +160,10 @@ class ThreadSummary(BaseModel):
     total_threads: int
     active_threads: int
     total_messages: int
-    total_tokens: int
+    total_tokens: int | None
+    token_usage_complete: bool = False
     avg_messages_per_thread: float
-    avg_tokens_per_thread: float
+    avg_tokens_per_thread: float | None
     pinned_threads: int = 0
 
 
@@ -171,7 +183,8 @@ class ThreadAgentStat(BaseModel):
     agent_name: str
     thread_count: int
     message_count: int
-    token_count: int
+    token_count: int | None
+    token_usage_complete: bool = False
     avg_messages: float
     agent_avatar: str | None = None
 
@@ -185,6 +198,7 @@ class ThreadUserStat(BaseModel):
     thread_count: int
     message_count: int
     last_active_at: str | None
+    user_deleted: bool = False
 
 
 class ThreadAnalyticsResponse(BaseModel):
@@ -251,9 +265,13 @@ async def get_call_timeseries_stats(
 
 @dashboard.get("/stats/threads", response_model=ThreadAnalyticsResponse)
 async def get_thread_analytics_stats(
-    time_range: Literal["7days", "14days", "30days", "90days"] = "30days",
+    time_range: Literal["all", "7days", "14days", "30days", "90days"] = "30days",
     agent_id: str | None = None,
-    include_subagents: bool = Query(False, description="是否将子智能体会话纳入统计"),
+    include_subagents: bool = Query(True, description="是否将子智能体会话纳入统计"),
+    uid: str | None = None,
+    project_id: str | None = None,
+    status: Literal["active", "archived", "deleted", "subagent", "all"] = "all",
+    search: Annotated[str | None, Query(max_length=255)] = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_superadmin_user),
 ):
@@ -262,6 +280,10 @@ async def get_thread_analytics_stats(
         time_range=time_range,
         agent_id=agent_id,
         include_subagents=include_subagents,
+        uid=uid,
+        project_id=project_id,
+        status=status,
+        search=search,
     )
     return ThreadAnalyticsResponse(**data)
 
@@ -292,6 +314,9 @@ async def get_all_conversations(
     agent_id: str | None = None,
     status: Literal["active", "archived", "deleted", "subagent", "all"] = "all",
     search: Annotated[str | None, Query(max_length=255)] = None,
+    project_id: str | None = None,
+    time_range: Literal["all", "7days", "14days", "30days", "90days"] = "all",
+    include_subagents: bool = True,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
     db: AsyncSession = Depends(get_db),
@@ -303,6 +328,9 @@ async def get_all_conversations(
         agent_id=agent_id,
         status=status,
         search=search,
+        project_id=project_id,
+        time_range=time_range,
+        include_subagents=include_subagents,
         limit=limit,
         offset=offset,
     )

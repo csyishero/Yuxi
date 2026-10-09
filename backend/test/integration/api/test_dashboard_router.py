@@ -58,7 +58,7 @@ async def test_admin_can_fetch_conversation_filter_options(test_client, admin_he
 
     assert response.status_code == 200, response.text
     data = response.json()
-    assert set(data) == {"users", "agents"}
+    assert set(data) == {"users", "agents", "projects"}
     assert all("is_deleted" in item for item in data["users"])
     assert all("is_deleted" in item for item in data["agents"])
 
@@ -172,8 +172,8 @@ async def test_dashboard_http_applies_subagent_and_deleted_conversation_scopes(t
 
     default_scope = await analytics(include_subagents=False)
     subagent_scope = await analytics(include_subagents=True)
-    assert default_scope["summary"]["total_threads"] == baseline_default["summary"]["total_threads"] + 1
-    assert subagent_scope["summary"]["total_threads"] == baseline_including_subagents["summary"]["total_threads"] + 2
+    assert default_scope["summary"]["total_threads"] == baseline_default["summary"]["total_threads"] + 2
+    assert subagent_scope["summary"]["total_threads"] == baseline_including_subagents["summary"]["total_threads"] + 3
 
     default_audit = await test_client.get(
         "/api/dashboard/conversations",
@@ -187,7 +187,7 @@ async def test_dashboard_http_applies_subagent_and_deleted_conversation_scopes(t
     )
     assert default_audit.status_code == 200, default_audit.text
     assert deleted_audit.status_code == 200, deleted_audit.text
-    assert {item["thread_id"] for item in default_audit.json()["items"]} == set(thread_ids[:2])
+    assert {item["thread_id"] for item in default_audit.json()["items"]} == set(thread_ids)
     assert {item["thread_id"] for item in deleted_audit.json()["items"]} == {thread_ids[2]}
 
 
@@ -265,4 +265,234 @@ async def test_dashboard_http_reads_run_token_totals(test_client, admin_headers)
                 await db.execute(update(AgentRun).where(AgentRun.id == run_id).values(token_usage={"available": False}))
                 await db.commit()
     finally:
+        await engine.dispose()
+
+
+async def test_dashboard_history_survives_lifecycle_changes(test_client, admin_headers):
+    """真实 PostgreSQL 与 HTTP 验证删除不改写历史，列表和图表同口径。"""
+    from datetime import timedelta
+
+    from sqlalchemy import delete, select
+    from yuxi.repositories.project_repository import ProjectRepository
+    from yuxi.storage.postgres.models_business import Agent, AgentRun, Department, Message, Project, ToolCall, User
+    from yuxi.utils.datetime_utils import utc_now_naive
+
+    marker = f"history-{uuid.uuid4().hex[:12]}"
+    engine = create_async_engine(os.environ["POSTGRES_URL"])
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as db:
+            now = utc_now_naive() - timedelta(seconds=5)
+            department = Department(name=marker)
+            db.add(department)
+            await db.flush()
+            user = User(uid=marker, username=marker, password_hash="unused", role="user", department_id=department.id)
+            agent = Agent(slug=marker, backend_id=marker, name="历史统计测试", share_config={})
+            db.add_all([user, agent])
+            await db.flush()
+            project = Project(
+                id=marker,
+                uid=marker,
+                name="审计保留项目",
+                selection_status="selectable",
+                directory_mode="managed",
+                workdir_path=f"projects/{marker}",
+                status="active",
+            )
+            db.add(project)
+            await db.flush()
+            conversation = Conversation(
+                thread_id=marker,
+                project_id=marker,
+                uid=marker,
+                agent_id=marker,
+                title=marker,
+                status="active",
+                created_at=now - timedelta(days=60),
+                updated_at=now,
+            )
+            db.add(conversation)
+            await db.flush()
+            for index in range(2):
+                run = AgentRun(
+                    id=f"{marker}-{index}",
+                    request_id=f"{marker}-{index}",
+                    conversation_id=conversation.id,
+                    conversation_thread_id=marker,
+                    runtime_scope_id=marker,
+                    uid=marker,
+                    agent_slug=marker,
+                    status="completed",
+                    started_at=now,
+                    created_at=now,
+                    token_usage={
+                        "complete": True,
+                        "usage_reported_call_count": 1,
+                        "total": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                    },
+                )
+                db.add(run)
+                await db.flush()
+                message = Message(
+                    conversation_id=conversation.id,
+                    run_id=run.id,
+                    role="assistant",
+                    content="ok",
+                    operation_id=f"model-{index}",
+                    execution_status="completed",
+                    started_at=now,
+                    created_at=now,
+                    extra_metadata={"response_metadata": {"model_name": marker}},
+                )
+                db.add(message)
+                await db.flush()
+                # 审批前声明可以属于前一个 Run，执行通过明确投影 ID 关联到 resume Run。
+                if index == 1:
+                    message.run_id = f"{marker}-0"
+                tool = ToolCall(
+                    message_id=message.id,
+                    tool_name=marker,
+                    langgraph_tool_call_id=f"tool-{index}",
+                    status="success",
+                    created_at=now - timedelta(days=60),
+                )
+                db.add(tool)
+                await db.flush()
+                db.add(
+                    Message(
+                        conversation_id=conversation.id,
+                        run_id=run.id,
+                        role="tool",
+                        content="done",
+                        message_type="tool_audit",
+                        operation_id=f"tool-{index}",
+                        execution_status="completed",
+                        started_at=now,
+                        created_at=now,
+                        extra_metadata={"compatibility_tool_call_id": tool.id},
+                    )
+                )
+            # queued, never started: cannot count as an Agent execution
+            db.add(
+                AgentRun(
+                    id=f"{marker}-pending",
+                    request_id=f"{marker}-pending",
+                    conversation_id=conversation.id,
+                    conversation_thread_id=marker,
+                    runtime_scope_id=marker,
+                    uid=marker,
+                    agent_slug=marker,
+                    status="pending",
+                    created_at=now,
+                    token_usage={"available": False},
+                )
+            )
+            await db.commit()
+
+            async def read(path, params=None):
+                response = await test_client.get(f"/api/dashboard/{path}", headers=admin_headers, params=params)
+                assert response.status_code == 200, response.text
+                return response.json()
+
+            filters = {"project_id": marker, "time_range": "7days"}
+            before = await read("stats/threads", filters)
+            assert before["summary"]["total_threads"] == 1
+            assert before["summary"]["total_messages"] == 2
+            assert before["summary"]["total_tokens"] == 30
+            assert before["summary"]["token_usage_complete"] is True
+            totals = {}
+            for kind, expected in [("agents", 2), ("models", 2), ("tools", 2)]:
+                series = await read("stats/calls/timeseries", {"type": kind, "time_range": "14days"})
+                totals[kind] = sum(bucket["data"].get(marker, 0) for bucket in series["data"])
+                assert totals[kind] == expected
+                assert series["total_count"] == sum(bucket["total"] for bucket in series["data"])
+            tokens_before = await read("stats/calls/timeseries", {"type": "tokens", "time_range": "14days"})
+
+            await ProjectRepository(db).soft_delete_with_conversations(project, deleted_at=utc_now_naive())
+            user.is_deleted = 1
+            await db.delete(agent)
+            await db.commit()
+            after = await read("stats/threads", filters)
+            assert before["summary"] == after["summary"]
+            assert before["daily_trends"] == after["daily_trends"]
+            listing = await read("conversations", filters)
+            assert listing["total"] == after["summary"]["total_threads"]
+            item = listing["items"][0]
+            assert item["message_count"] == 2 and item["total_tokens"] == 30
+            assert item["project_name"] == "审计保留项目"
+            assert item["status"] == "deleted"
+            assert item["project_deleted"] and item["user_deleted"] and item["agent_deleted"]
+            assert (await read(f"conversations/{marker}"))["project_deleted"]
+            assert (await read("conversations", {**filters, "status": "active"}))["total"] == 0
+            options = await read("conversations/options")
+            assert next(project for project in options["projects"] if project["project_id"] == marker)["is_deleted"]
+            for kind in totals:
+                series = await read("stats/calls/timeseries", {"type": kind, "time_range": "14days"})
+                assert sum(bucket["data"].get(marker, 0) for bucket in series["data"]) == totals[kind]
+            assert (await read("stats/calls/timeseries", {"type": "tokens", "time_range": "14days"}))[
+                "total_count"
+            ] == tokens_before["total_count"]
+    finally:
+        async with factory() as db:
+            ids = select(Conversation.id).where(Conversation.thread_id == marker)
+            messages = select(Message.id).where(Message.conversation_id.in_(ids))
+            await db.execute(delete(ToolCall).where(ToolCall.message_id.in_(messages)))
+            await db.execute(delete(Message).where(Message.conversation_id.in_(ids)))
+            await db.execute(delete(AgentRun).where(AgentRun.uid == marker))
+            await db.execute(delete(Conversation).where(Conversation.thread_id == marker))
+            await db.execute(delete(Project).where(Project.id == marker))
+            await db.execute(delete(User).where(User.uid == marker))
+            await db.execute(delete(Agent).where(Agent.slug == marker))
+            await db.execute(delete(Department).where(Department.name == marker))
+            await db.commit()
+        await engine.dispose()
+
+
+async def test_dashboard_period_buckets_use_shanghai_and_iso_year():
+    """真实 PG 验证当天起点、小时起点和跨年 ISO 周，工具总数只含所选周期。"""
+    from datetime import datetime
+
+    from sqlalchemy import delete
+    from yuxi.repositories.dashboard_repository import DashboardRepository
+    from yuxi.storage.postgres.models_business import AgentRun
+
+    engine = create_async_engine(os.environ["POSTGRES_URL"])
+    marker = f"buckets-{uuid.uuid4().hex[:10]}"
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+            for index, when in enumerate(
+                [datetime(2025, 12, 28, 16, 0), datetime(2025, 12, 31, 16, 0), datetime(2026, 1, 1, 4, 0)]
+            ):
+                db.add(
+                    AgentRun(
+                        id=f"{marker}-{index}",
+                        request_id=f"{marker}-{index}",
+                        conversation_thread_id=marker,
+                        runtime_scope_id=marker,
+                        uid=marker,
+                        agent_slug=marker,
+                        status="completed",
+                        started_at=when,
+                        created_at=when,
+                    )
+                )
+            await db.commit()
+            repo = DashboardRepository(db)
+            for period, bucket, expected in [
+                ("14weeks", "2026-01", 3),
+                ("14days", "2026-01-01", 2),
+                ("14hours", "2026-01-01 00:00", 1),
+            ]:
+                stats = await repo.get_call_timeseries(
+                    metric_type="agents", time_range=period, now=datetime(2026, 1, 1, 5, 30)
+                )
+                row = next(row for row in stats["data"] if row["date"] == bucket)
+                assert row["data"][marker] == expected
+                assert stats["total_count"] == sum(row["total"] for row in stats["data"])
+            await db.execute(delete(AgentRun).where(AgentRun.uid == marker))
+            await db.commit()
+    finally:
+        async with async_sessionmaker(engine)() as db:
+            await db.execute(delete(AgentRun).where(AgentRun.uid == marker))
+            await db.commit()
         await engine.dispose()

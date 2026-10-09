@@ -11,6 +11,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from yuxi.services.dashboard_service import DashboardService
 from yuxi.storage.postgres.models_business import (
     Agent,
+    AgentRun,
+    Project,
+    SubagentThread,
     Base,
     Conversation,
     ConversationStats,
@@ -258,6 +261,26 @@ async def dashboard_db():
                 removed_agent_feedback,
             ]
         )
+        for conversation in (
+            conv1,
+            conv2,
+            conv3,
+            deleted_conversation,
+            deleted_user_conversation,
+            missing_agent_conversation,
+            subagent_conversation,
+        ):
+            db.add(
+                Project(
+                    id=conversation.project_id,
+                    uid=conversation.uid,
+                    name=conversation.title,
+                    status="deleted" if conversation.status == "deleted" else "active",
+                    selection_status="selectable",
+                    directory_mode="managed",
+                    workdir_path=f"projects/{conversation.project_id}",
+                )
+            )
         await db.commit()
         yield db
     await engine.dispose()
@@ -267,22 +290,22 @@ async def test_dashboard_service_basic_stats(dashboard_db):
     service = DashboardService(dashboard_db)
     stats = await service.get_basic_stats()
 
-    assert stats["total_conversations"] == 3
-    assert stats["active_conversations"] == 2
-    assert stats["total_messages"] == 4
+    assert stats["total_conversations"] == 7
+    assert stats["current_resources"]["conversations"] == 3
+    assert stats["total_messages"] == 5
     assert stats["total_users"] == 3
-    assert stats["feedback_stats"]["total_feedbacks"] == 1
-    assert stats["feedback_stats"]["satisfaction_rate"] == 100.0
+    assert stats["feedback_stats"]["total_feedbacks"] == 2
+    assert stats["feedback_stats"]["satisfaction_rate"] == 50.0
 
     tool_stats = await service.get_tool_call_stats()
-    assert tool_stats["total_calls"] == 1
+    assert tool_stats["total_calls"] == 2
 
     user_stats = await service.get_user_activity_stats()
     assert len(user_stats["daily_active_users"]) == 120
     assert user_stats["daily_active_users"][0]["date"] < user_stats["daily_active_users"][-1]["date"]
 
     feedbacks = await service.get_feedbacks()
-    assert len(feedbacks) == 1
+    assert len(feedbacks) == 2
 
 
 async def test_agent_analytics_omits_removed_top_performers_contract(dashboard_db):
@@ -300,6 +323,7 @@ async def test_agent_analytics_omits_removed_top_performers_contract(dashboard_d
     assert analytics["agent_names"] == {
         "agent-helper": "Helper Agent",
         "agent-coder": "Coder Agent",
+        "removed-agent": "removed-agent（已删除）",
     }
     coder_satisfaction = next(
         item for item in analytics["agent_satisfaction_rates"] if item["agent_id"] == "agent-coder"
@@ -313,44 +337,44 @@ async def test_agent_analytics_omits_removed_top_performers_contract(dashboard_d
 
 async def test_dashboard_service_thread_analytics(dashboard_db):
     service = DashboardService(dashboard_db)
-    analytics = await service.get_thread_analytics(time_range="7days")
+    analytics = await service.get_thread_analytics(time_range="all", include_subagents=False)
 
     summary = analytics["summary"]
-    assert summary["total_threads"] == 3
+    assert summary["total_threads"] == 6
     assert summary["active_threads"] >= 1
     assert summary["pinned_threads"] == 1
-    assert summary["total_messages"] == 4
+    assert summary["total_messages"] == 5
     assert summary["total_tokens"] == 5000
     assert summary["avg_messages_per_thread"] > 0
     assert summary["avg_tokens_per_thread"] > 0
 
-    assert len(analytics["daily_trends"]) == 7
+    assert len(analytics["daily_trends"]) == 30
 
     depth = analytics["depth_distribution"]
-    assert depth["1-2 条"] == 1  # conv3 has 1 message
-    assert depth["3-5 条"] == 1  # conv1 has 4 messages
-    assert depth["6-10 条"] == 1  # conv2 has 8 messages
+    assert depth["1-2 条"] == 3  # actual Message rows, not stale ConversationStats
+    assert depth["0 条"] == 3
+    assert depth["6-10 条"] == 0
 
     agents = analytics["agent_distribution"]
-    assert len(agents) == 2
+    assert len(agents) == 3
     coder_stat = next(a for a in agents if a["agent_id"] == "agent-coder")
     assert coder_stat["thread_count"] == 2
     assert coder_stat["agent_name"] == "Coder Agent"
 
     with_subagents = await service.get_thread_analytics(time_range="7days", include_subagents=True)
-    assert with_subagents["summary"]["total_threads"] == 4
+    assert with_subagents["summary"]["total_threads"] == 7
     helper_with_subagent = next(
         item for item in with_subagents["agent_distribution"] if item["agent_id"] == "agent-helper"
     )
-    assert helper_with_subagent["thread_count"] == 2
+    assert helper_with_subagent["thread_count"] == 4
 
     top_users = analytics["top_users"]
     assert len(top_users) >= 2
     alice_stat = next(u for u in top_users if u["uid"] == "uid-alice")
     assert alice_stat["username"] == "Alice"
-    assert alice_stat["thread_count"] == 2
+    assert alice_stat["thread_count"] == 4
 
-    assert analytics["status_distribution"]["active"] == 2
+    assert analytics["status_distribution"]["active"] == 4
     assert analytics["status_distribution"]["archived"] == 1
 
     coder_only = await service.get_thread_analytics(time_range="7days", agent_id="agent-coder")
@@ -422,9 +446,9 @@ async def test_dashboard_service_list_conversations_search(dashboard_db):
     service = DashboardService(dashboard_db)
 
     all_convs = await service.list_conversations(limit=20)
-    assert all_convs["total"] == 6
-    assert len(all_convs["items"]) == 6
-    assert all(item["status"] != "deleted" for item in all_convs["items"])
+    assert all_convs["total"] == 7
+    assert len(all_convs["items"]) == 7
+    assert any(item["status"] == "deleted" for item in all_convs["items"])
     deleted_convs = await service.list_conversations(status="deleted", limit=20)
     assert deleted_convs["total"] == 1
     assert deleted_convs["items"][0]["thread_id"] == "thread-deleted"
@@ -521,4 +545,152 @@ async def test_conversation_tokens_use_runs_and_expose_missing_usage(dashboard_d
     await dashboard_db.commit()
     item = (await service.list_conversations(search="thread-102"))["items"][0]
     assert item["total_tokens"] == 0
+    assert item["token_usage_complete"] is True
+
+
+async def test_history_is_unchanged_by_project_deletion_and_removed_dimensions(dashboard_db):
+    """软删除、注销及智能体移除只影响当前资源和标签，不减少历史事实。"""
+    from sqlalchemy import select
+    from yuxi.repositories.project_repository import ProjectRepository
+
+    service = DashboardService(dashboard_db)
+    before = await service.get_basic_stats()
+    before_threads = await service.get_thread_analytics(time_range="all")
+    before_tools = await service.get_tool_call_stats()
+    project = await dashboard_db.get(Project, "p-2")
+    await ProjectRepository(dashboard_db).soft_delete_with_conversations(project, deleted_at=utc_now_naive())
+    user = await dashboard_db.scalar(select(User).where(User.uid == "uid-bob"))
+    user.is_deleted = 1
+    await dashboard_db.delete(await dashboard_db.scalar(select(Agent).where(Agent.slug == "agent-coder")))
+    await dashboard_db.commit()
+
+    after = await service.get_basic_stats()
+    assert after["current_resources"]["projects"] == before["current_resources"]["projects"] - 1
+    assert after["current_resources"]["conversations"] < before["current_resources"]["conversations"]
+    for key in ("total_conversations", "total_messages", "feedback_stats"):
+        assert after[key] == before[key]
+    assert (await service.get_thread_analytics(time_range="all"))["summary"] == before_threads["summary"]
+    assert (await service.get_tool_call_stats())["total_calls"] == before_tools["total_calls"]
+    item = (await service.list_conversations(project_id="p-2"))["items"][0]
+    assert item["status"] == "deleted"
+    assert item["project_name"] == "Bob Coder Task"
+    assert item["project_deleted"] and item["user_deleted"] and item["agent_deleted"]
+    assert (await service.get_conversation_detail(item["thread_id"]))["project_deleted"]
+
+
+async def test_period_list_and_charts_share_facts_and_filters(dashboard_db):
+    """旧会话的新执行纳入当期，旧消息和无法分期的汇总不能混入。"""
+    from sqlalchemy import select
+
+    repo = DashboardService(dashboard_db).repo
+    now = datetime(2026, 10, 9, 1)
+    conversation = await dashboard_db.scalar(select(Conversation).where(Conversation.thread_id == "thread-102"))
+    conversation.created_at = datetime(2020, 1, 1)
+    for msg in (await dashboard_db.scalars(select(Message).where(Message.conversation_id == conversation.id))).all():
+        msg.created_at = datetime(2020, 1, 1)
+    for index, (when, usage) in enumerate(
+        [
+            (datetime(2020, 1, 1), {"total": {"total_tokens": 900}, "complete": True}),
+            (datetime(2026, 10, 8, 17), {"total": {"total_tokens": 42}, "complete": True}),
+            (datetime(2026, 10, 8, 18), {"available": False}),
+        ]
+    ):
+        dashboard_db.add(
+            AgentRun(
+                id=f"period-{index}",
+                request_id=f"period-{index}",
+                conversation_id=conversation.id,
+                conversation_thread_id=conversation.thread_id,
+                runtime_scope_id=conversation.thread_id,
+                agent_slug=conversation.agent_id,
+                uid=conversation.uid,
+                status="completed",
+                started_at=when,
+                created_at=when,
+                token_usage=usage,
+            )
+        )
+    dashboard_db.add(
+        Message(conversation_id=conversation.id, role="user", content="new", created_at=datetime(2026, 10, 8, 17))
+    )
+    await dashboard_db.commit()
+    filters = dict(
+        time_range="7days",
+        now=now,
+        project_id="p-2",
+        uid="uid-bob",
+        agent_id="agent-coder",
+        search="Coder",
+        status="all",
+    )
+    listing = await repo.list_conversations(**filters)
+    analytics = await repo.get_thread_analytics(**filters)
+    assert listing["total"] == analytics["summary"]["total_threads"] == 1
+    assert listing["items"][0]["message_count"] == analytics["summary"]["total_messages"] == 1
+    assert listing["items"][0]["total_tokens"] == analytics["summary"]["total_tokens"] == 42
+    assert listing["items"][0]["token_usage_complete"] is False
+    assert analytics["summary"]["token_usage_complete"] is False
+    assert sum(day["message_count"] for day in analytics["daily_trends"]) == 1
+    assert sum(day["new_threads"] for day in analytics["daily_trends"]) == 0
+    assert analytics["agent_distribution"][0]["message_count"] == 1
+    assert analytics["top_users"][0]["message_count"] == 1
+    assert (await repo.list_conversations(**{**filters, "status": "deleted"}))["total"] == 0
+    assert (await repo.get_thread_analytics(**{**filters, "uid": "uid-alice"}))["summary"]["total_threads"] == 0
+
+
+async def test_deleted_subagent_remains_excluded_when_toggle_is_off(dashboard_db):
+    """持久子线程关系在项目删除覆盖 status 后仍可区分子会话。"""
+    from sqlalchemy import select
+
+    parent = await dashboard_db.scalar(select(Conversation).where(Conversation.thread_id == "thread-101"))
+    child = await dashboard_db.scalar(select(Conversation).where(Conversation.thread_id == "thread-subagent"))
+    dashboard_db.add(
+        SubagentThread(
+            uid=child.uid,
+            parent_conversation_id=parent.id,
+            child_conversation_id=child.id,
+            child_thread_id=child.thread_id,
+            subagent_slug=child.agent_id,
+            created_by_run_id="historical-parent",
+        )
+    )
+    child.status = "deleted"
+    await dashboard_db.commit()
+    service = DashboardService(dashboard_db)
+    listing = await service.list_conversations(include_subagents=False)
+    assert child.thread_id not in {item["thread_id"] for item in listing["items"]}
+    assert (await service.list_conversations(status="subagent"))["total"] == 1
+    assert (await service.get_thread_analytics(time_range="all", include_subagents=False))["summary"][
+        "total_threads"
+    ] == listing["total"]
+
+
+async def test_unstarted_requests_do_not_make_recorded_usage_incomplete(dashboard_db):
+    """未开始的待执行与已取消记录不代表未知模型消耗。"""
+    from sqlalchemy import select
+
+    conversation = await dashboard_db.scalar(select(Conversation).where(Conversation.thread_id == "thread-102"))
+    for index, (status, usage) in enumerate(
+        [
+            ("completed", {"total": {"total_tokens": 42}, "complete": True}),
+            ("pending", {}),
+            ("cancelled", {}),
+        ]
+    ):
+        dashboard_db.add(
+            AgentRun(
+                id=f"unstarted-{index}",
+                request_id=f"unstarted-{index}",
+                conversation_id=conversation.id,
+                conversation_thread_id=conversation.thread_id,
+                runtime_scope_id=conversation.thread_id,
+                agent_slug=conversation.agent_id,
+                uid=conversation.uid,
+                status=status,
+                token_usage=usage,
+            )
+        )
+    await dashboard_db.commit()
+    item = (await DashboardService(dashboard_db).list_conversations(project_id="p-2"))["items"][0]
+    assert item["total_tokens"] == 42
     assert item["token_usage_complete"] is True
