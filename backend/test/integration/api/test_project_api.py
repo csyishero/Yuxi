@@ -5,6 +5,7 @@ import os
 import re
 import uuid
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from types import SimpleNamespace
 
 import asyncpg
@@ -23,7 +24,8 @@ from yuxi.repositories.project_repository import ProjectRepository
 from yuxi.services.agent_run_service import prepare_agent_run_creation_scope
 from yuxi.services.project_service import delete_project_view
 from yuxi.services.subagent_run_service import SubagentRunService
-from yuxi.storage.postgres.models_business import Conversation, Project, SubagentThread, User
+from yuxi.storage.postgres.models_business import AgentRun, Conversation, Project, SubagentThread, User
+from yuxi.utils.datetime_utils import utc_now_naive
 from yuxi.workspace.paths import user_workdir_host_dir
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -68,6 +70,28 @@ async def linked_directory(test_client, admin_headers):
             params={"path": directory_name},
         )
         assert response.status_code in {200, 404}, response.text
+
+
+@pytest_asyncio.fixture()
+async def deleted_projects_parent(test_client, admin_headers):
+    """模拟新项目创建前已删除、曾绑定 projects 根的旧项目。"""
+    me = await test_client.get("/api/auth/me", headers=admin_headers)
+    assert me.status_code == 200, me.text
+    project_id = str(uuid.uuid4())
+    async with _database_connection() as db:
+        await db.execute(
+            "INSERT INTO projects (id, uid, name, selection_status, workdir_path, directory_mode, "
+            "status, created_at, deleted_at) VALUES ($1, $2, 'Old projects root', 'selectable', "
+            "'projects', 'linked', 'deleted', clock_timestamp() - interval '2 minutes', "
+            "clock_timestamp() - interval '1 minute')",
+            project_id,
+            str(me.json()["uid"]),
+        )
+    try:
+        yield {"project_id": project_id, "uid": str(me.json()["uid"])}
+    finally:
+        async with _database_connection() as db:
+            await db.execute("DELETE FROM projects WHERE id = $1", project_id)
 
 
 @pytest_asyncio.fixture()
@@ -315,6 +339,7 @@ async def test_existing_linked_project_remains_visible_but_cannot_delete_directo
 async def test_explicit_managed_delete_persists_task_and_removes_only_its_directory(
     test_client,
     admin_headers,
+    deleted_projects_parent,
 ):
     created = await test_client.post(
         "/api/projects",
@@ -373,6 +398,77 @@ async def test_explicit_managed_delete_persists_task_and_removes_only_its_direct
         if (sibling / "marker.txt").exists():
             (sibling / "marker.txt").unlink()
         sibling.rmdir()
+
+
+async def test_deleted_parent_with_running_work_still_blocks_directory_cleanup(
+    test_client, admin_headers, deleted_projects_parent
+):
+    created = await test_client.post(
+        "/api/projects",
+        headers=admin_headers,
+        json={
+            "request_id": make_test_resource_id("managed-delete-old-run"),
+            "name": "旧任务仍在运行",
+            "workdir": {"mode": "managed"},
+        },
+    )
+    assert created.status_code == 200, created.text
+    project = created.json()
+    path = project["workdir_path"]
+    directory = user_workdir_host_dir(project["uid"], path)
+    old_thread_id = f"pytest-old-parent-{uuid.uuid4()}"
+    old_run_id = str(uuid.uuid4())
+    engine = create_async_engine(os.environ["POSTGRES_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as db:
+            lease_started_at = utc_now_naive()
+            conversation = Conversation(
+                thread_id=old_thread_id,
+                uid=deleted_projects_parent["uid"],
+                project_id=deleted_projects_parent["project_id"],
+                agent_id="default-chatbot",
+                status="deleted",
+            )
+            db.add(conversation)
+            await db.flush()
+            db.add(
+                AgentRun(
+                    id=old_run_id,
+                    conversation_thread_id=old_thread_id,
+                    conversation_id=conversation.id,
+                    runtime_scope_id=old_thread_id,
+                    agent_slug="default-chatbot",
+                    uid=deleted_projects_parent["uid"],
+                    status="running",
+                    worker_id="pytest-old-parent-worker",
+                    heartbeat_at=lease_started_at,
+                    lease_expires_at=lease_started_at + timedelta(minutes=5),
+                    request_id=str(uuid.uuid4()),
+                    run_type="chat",
+                    input_payload={},
+                )
+            )
+            await db.commit()
+
+        rejected = await test_client.delete(
+            f"/api/projects/{project['id']}", headers=admin_headers, params={"delete_workdir": True}
+        )
+        assert rejected.status_code == 409, rejected.text
+        assert directory.is_dir()
+        async with _database_connection() as db:
+            status = await db.fetchval("SELECT status FROM projects WHERE id = $1", project["id"])
+        assert status == "active"
+    finally:
+        async with _database_connection() as db:
+            await db.execute("DELETE FROM agent_runs WHERE id = $1", old_run_id)
+            await db.execute("DELETE FROM conversations WHERE thread_id = $1", old_thread_id)
+            await db.execute("DELETE FROM projects WHERE id = $1", project["id"])
+        await engine.dispose()
+        if directory.exists():
+            from yuxi.workspace.filesystem import Workspace
+
+            Workspace(project["uid"]).delete_authorized_path(f"/{path}", root="/")
 
 
 async def test_project_rename_and_delete_soft_delete_conversations_but_keep_workdir(

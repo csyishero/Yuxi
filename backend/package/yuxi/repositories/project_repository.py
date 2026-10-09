@@ -95,14 +95,27 @@ class ProjectRepository:
         return set(result.all())
 
     async def has_other_workdir_overlap(self, project: Project) -> bool:
-        """连已删除记录也纳入检查，避免清理曾被其他项目共享的目录。"""
+        """阻止清理仍共享或曾与其他项目同时共享的目录。"""
         path = project.workdir_path
-        paths = (
-            await self.db.scalars(
-                select(Project.workdir_path).where(Project.uid == project.uid, Project.id != project.id)
-            )
+        other_projects = (
+            await self.db.scalars(select(Project).where(Project.uid == project.uid, Project.id != project.id))
         ).all()
-        return any(other == path or other.startswith(f"{path}/") or path.startswith(f"{other}/") for other in paths)
+        for other in other_projects:
+            other_path = other.workdir_path
+            if not (other_path == path or other_path.startswith(f"{path}/") or path.startswith(f"{other_path}/")):
+                continue
+            if (
+                path.startswith(f"{other_path}/")
+                and other.status == "deleted"
+                and other.deleted_at is not None
+                and project.created_at is not None
+                and other.deleted_at < project.created_at
+            ):
+                if await self.has_active_project_work(other):
+                    return True
+                continue
+            return True
+        return False
 
     async def has_active_project_work(self, project: Project) -> bool:
         """清理前阻止未结束的 Run、运行时清理和排队请求。"""
