@@ -298,17 +298,27 @@ const confirmDeleteProject = (project) => {
     okText: '删除项目',
     okButtonProps: { danger: true },
     cancelText: '取消',
-    content: () => h('div', [
-      h('p', '项目中的对话会被删除。默认保留项目文件夹和文件。'),
-      h('p', `项目目录：个人空间/${project.workdir_path}`),
-      ...(isManaged ? [h('label', { class: 'project-delete-files-option' }, [
-        h('input', {
-          type: 'checkbox',
-          onChange: (event) => { deleteWorkdir = event.target.checked }
-        }),
-        ' 同时永久删除项目文件夹和其中的全部文件'
-      ])] : [])
-    ]),
+    content: () =>
+      h('div', [
+        h('p', '项目及其中的对话会被删除。'),
+        h('p', `项目目录：个人空间/${project.workdir_path}`),
+        h('label', { class: 'project-delete-files-option' }, [
+          h('input', {
+            type: 'checkbox',
+            disabled: !isManaged,
+            onChange: (event) => {
+              if (isManaged) deleteWorkdir = event.target.checked
+            }
+          }),
+          ' 同时永久删除项目文件夹和其中的全部文件'
+        ]),
+        h(
+          'p',
+          isManaged
+            ? '默认保留项目文件夹和文件。'
+            : '此项目关联的是已有目录，可能包含其他内容。删除项目时会保留目录；如需清理，请到个人空间确认后手动删除。'
+        )
+      ]),
     onOk: () => emit('delete-project', { projectId: project.id, deleteWorkdir })
   })
 }
