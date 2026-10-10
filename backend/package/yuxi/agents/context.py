@@ -487,7 +487,12 @@ async def resolve_agent_resource_options(
 
         skills = await list_accessible_skills(db, user)
         options["skills"] = [
-            _resource_option(skill.slug, skill.name, skill.description) for skill in skills if skill.slug
+            {
+                **_resource_option(skill.slug, skill.name, skill.description),
+                "source_scope": skill.source_scope,
+            }
+            for skill in skills
+            if skill.slug
         ]
     if "subagents" in fields_to_load:
         from yuxi.repositories.agent_repository import AgentRepository

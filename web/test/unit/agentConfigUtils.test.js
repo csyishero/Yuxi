@@ -4,8 +4,12 @@ import test from 'node:test'
 import {
   normalizeAgent,
   normalizeAgentBackendOption,
+  getAgentConfigOptionValue,
+  getAgentConfigOptionLabel,
   mergeVisibleAgentResourceSelection,
-  getVisibleAgentResourceSelection
+  getVisibleAgentResourceSelection,
+  getSkillSelectionMode,
+  getSkillSourceLabel
 } from '../../src/utils/agentConfigUtils.js'
 
 test('normalizeAgent 按 agent_id、slug、id 顺序统一身份字段', () => {
@@ -68,6 +72,26 @@ test('子智能体空列表显示全部，Skill 空列表显示禁用，隐藏�
   assert.deepEqual(getVisibleAgentResourceSelection(null, 'skills', available), available)
   assert.deepEqual(getVisibleAgentResourceSelection(['hidden', 'b'], 'skills', available), ['b'])
   assert.deepEqual(getVisibleAgentResourceSelection(['hidden'], 'skills', []), [])
+})
+
+test('Skill 使用方式区分动态全部、固定选择和不启用', () => {
+  assert.equal(getSkillSelectionMode(null), 'auto')
+  assert.equal(getSkillSelectionMode(undefined), 'auto')
+  assert.equal(getSkillSelectionMode(['skill-a']), 'fixed')
+  assert.equal(getSkillSelectionMode([]), 'off')
+})
+
+test('同名 Skill 保留唯一标识，并显示后端提供的来源', () => {
+  const options = [
+    { key: 'ppt-builder', name: 'ppt-builder', source_scope: 'shared' },
+    { key: 'ppt-builder-team', name: 'ppt-builder', source_scope: 'personal' }
+  ]
+  assert.equal(getAgentConfigOptionLabel(options[0]), getAgentConfigOptionLabel(options[1]))
+  assert.notEqual(getAgentConfigOptionValue(options[0]), getAgentConfigOptionValue(options[1]))
+  assert.equal(getSkillSourceLabel(options[0]), '共享')
+  assert.equal(getSkillSourceLabel(options[1]), '个人')
+  assert.equal(getSkillSourceLabel({ source_scope: 'builtin' }), '内置')
+  assert.equal(getSkillSourceLabel({}), '')
 })
 
 test('normalizeAgentBackendOption 缺少名称时回退到 backend_id', () => {

@@ -81,6 +81,78 @@
                   </a-select-option>
                 </a-select>
 
+                <!-- Skill 的空值、空列表与固定列表是三种不同的运行策略。 -->
+                <div v-else-if="key === 'skills'" class="skill-config-container">
+                  <div class="skill-mode-options" role="group" aria-label="Skill 使用方式">
+                    <button
+                      v-for="mode in skillModes"
+                      :key="mode.value"
+                      type="button"
+                      class="skill-mode-option"
+                      :class="{ selected: getSkillSelectionMode(agentConfig[key]) === mode.value }"
+                      :aria-pressed="getSkillSelectionMode(agentConfig[key]) === mode.value"
+                      :disabled="isReadOnlyConfig"
+                      @click="selectSkillMode(mode.value)"
+                    >
+                      <span class="skill-mode-name">{{ mode.label }}</span>
+                      <span class="skill-mode-description">{{ mode.description }}</span>
+                    </button>
+                  </div>
+                  <div class="skill-mode-status" role="status">
+                    <template v-if="getSkillSelectionMode(agentConfig[key]) === 'auto'">
+                      <strong>使用运行者有权限的全部 Skill</strong>
+                      <span
+                        >本账号当前可用
+                        {{ getConfigOptions(value).length }} 项；其他运行者的数量随权限变化。</span
+                      >
+                    </template>
+                    <template v-else-if="getSkillSelectionMode(agentConfig[key]) === 'fixed'">
+                      <strong>固定选择 {{ agentConfig[key].length }} 项 Skill</strong>
+                      <span>本账号可用 {{ getSelectedCount(key) }} 项；运行者仍需有对应权限。</span>
+                    </template>
+                    <template v-else>
+                      <strong>不启用 Skill</strong>
+                      <span>这个智能体运行时不会加载 Skill。</span>
+                    </template>
+                  </div>
+                  <div
+                    v-if="getSkillSelectionMode(agentConfig[key]) === 'fixed'"
+                    class="fixed-skills"
+                  >
+                    <div class="fixed-skills-header">
+                      <span>已固定的 Skill</span>
+                      <a-button
+                        v-if="!isReadOnlyConfig"
+                        type="link"
+                        size="small"
+                        @click="openSelectionModal(key)"
+                      >
+                        调整选择
+                      </a-button>
+                    </div>
+                    <div v-if="getSelectedCount(key)" class="fixed-skill-list">
+                      <div v-for="slug in ensureArray(key)" :key="slug" class="fixed-skill-item">
+                        <div class="fixed-skill-identity">
+                          <strong>{{ getOptionLabelFromValue(key, slug) }}</strong>
+                          <span>标识：{{ slug }}</span>
+                        </div>
+                        <span v-if="getOptionSourceFromValue(key, slug)" class="skill-source-label">
+                          {{ getOptionSourceFromValue(key, slug) }}
+                        </span>
+                      </div>
+                    </div>
+                    <div
+                      v-if="getHiddenSelection(key).length"
+                      class="hidden-selection-note"
+                      role="status"
+                    >
+                      另有
+                      {{ getHiddenSelection(key).length }}
+                      项本账号不可访问，调整可见选择时会保留；选择“不启用”会移除全部固定项。
+                    </div>
+                  </div>
+                </div>
+
                 <!-- 多选 / 工具列表 (统一处理) -->
                 <div v-else-if="isListConfig(key, value)" class="list-config-container">
                   <div v-if="value.kind === 'subagents'" class="hidden-selection-note">
@@ -277,9 +349,18 @@
       :width="800"
       :footer="null"
       :maskClosable="false"
+      @cancel="closeSelectionModal"
       class="selection-modal"
     >
       <div class="selection-modal-content">
+        <p
+          v-if="
+            currentConfigKey === 'skills' && getSkillSelectionMode(agentConfig.skills) !== 'fixed'
+          "
+          class="skill-switch-note"
+        >
+          切换为固定选择后，只使用明确勾选的 Skill；不会自动把本账号当前可用的全部 Skill 固定下来。
+        </p>
         <div class="selection-search">
           <a-input
             v-model:value="selectionSearchText"
@@ -327,11 +408,22 @@
               <div class="selection-item-header">
                 <span class="selection-item-name">{{ getOptionLabel(option) }}</span>
 
+                <span
+                  v-if="currentConfigKind === 'skills' && getSkillSourceLabel(option)"
+                  class="skill-source-label"
+                >
+                  {{ getSkillSourceLabel(option) }}
+                </span>
+
                 <div class="selection-item-indicator">
                   <Check v-if="tempSelectedValues.includes(getOptionValue(option))" :size="16" />
 
                   <Plus v-else :size="16" />
                 </div>
+              </div>
+
+              <div v-if="currentConfigKind === 'skills'" class="selection-item-key">
+                标识：{{ getOptionValue(option) }}
               </div>
 
               <div v-if="getOptionDescription(option)" class="selection-item-description">
@@ -347,7 +439,16 @@
           <div class="modal-actions">
             <a-button @click="closeSelectionModal">取消</a-button>
 
-            <a-button v-if="!isReadOnlyConfig" type="primary" @click="confirmSelection">
+            <a-button
+              v-if="!isReadOnlyConfig"
+              type="primary"
+              :disabled="
+                currentConfigKey === 'skills' &&
+                !tempSelectedValues.length &&
+                !getHiddenSelection('skills').length
+              "
+              @click="confirmSelection"
+            >
               确认
             </a-button>
           </div>
@@ -410,6 +511,8 @@ import { useAgentStore } from '@/stores/agent'
 import {
   getAgentConfigOptionDescription as getOptionDescription,
   getAgentConfigOptionLabel as getOptionLabel,
+  getSkillSelectionMode,
+  getSkillSourceLabel,
   getAgentConfigOptions as getConfigOptions,
   getAgentConfigOptionValue as getOptionValue,
   isDefaultAllAgentResourceKind,
@@ -454,6 +557,11 @@ const segmentOptions = [
 const activeSegment = computed(() => (props.showSegmented ? currentSegment.value : props.segment))
 const isToolResourceKind = (kind) => isDefaultAllAgentResourceKind(kind)
 const KNOWLEDGE_BASE_SKILL_SLUG = 'knowledge-base'
+const skillModes = [
+  { value: 'auto', label: '动态使用全部', description: '随运行者权限变化' },
+  { value: 'fixed', label: '固定选择', description: '仅使用指定的 Skill' },
+  { value: 'off', label: '不启用', description: '不加载 Skill' }
+]
 
 const isEmptyConfig = computed(() => {
   return !selectedAgentId.value || Object.keys(configurableItems.value).length === 0
@@ -611,7 +719,8 @@ const filteredOptions = computed(() => {
   return options.filter((opt) => {
     const label = String(getOptionLabel(opt)).toLowerCase()
     const desc = String(getOptionDescription(opt) || '').toLowerCase()
-    return label.includes(search) || desc.includes(search)
+    const optionKey = String(getOptionValue(opt)).toLowerCase()
+    return label.includes(search) || desc.includes(search) || optionKey.includes(search)
   })
 })
 
@@ -691,6 +800,15 @@ const clearSelection = (key) => {
   })
 }
 
+const selectSkillMode = (mode) => {
+  if (isReadOnlyConfig.value || mode === getSkillSelectionMode(agentConfig.value.skills)) return
+  if (mode === 'fixed') {
+    openSelectionModal('skills')
+    return
+  }
+  agentStore.updateAgentConfig({ skills: mode === 'auto' ? null : [] })
+}
+
 // 统一选择弹窗相关方法
 const getOptionLabelFromValue = (key, val) => {
   const options = getConfigOptions(configurableItems.value[key])
@@ -698,10 +816,20 @@ const getOptionLabelFromValue = (key, val) => {
   return option ? getOptionLabel(option) : val
 }
 
+const getOptionSourceFromValue = (key, val) => {
+  const option = getConfigOptions(configurableItems.value[key]).find(
+    (item) => getOptionValue(item) === val
+  )
+  return getSkillSourceLabel(option)
+}
+
 const openSelectionModal = (key) => {
   if (isReadOnlyConfig.value) return
   currentConfigKey.value = key
-  tempSelectedValues.value = [...ensureArray(key)]
+  tempSelectedValues.value =
+    key === 'skills' && getSkillSelectionMode(agentConfig.value.skills) !== 'fixed'
+      ? []
+      : [...ensureArray(key)]
   selectionModalOpen.value = true
 }
 
@@ -718,6 +846,13 @@ const toggleModalSelection = (optionValue) => {
 const confirmSelection = () => {
   if (isReadOnlyConfig.value) {
     closeSelectionModal()
+    return
+  }
+  if (
+    currentConfigKey.value === 'skills' &&
+    !tempSelectedValues.value.length &&
+    !getHiddenSelection('skills').length
+  ) {
     return
   }
   if (currentConfigKey.value) {
@@ -786,6 +921,106 @@ const canResetSelection = (key) => {
 <style lang="less" scoped>
 .agent-runtime-config-form {
   background: var(--gray-0);
+
+  .skill-mode-options {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .skill-mode-option {
+    min-width: 0;
+    padding: 10px 12px;
+    text-align: left;
+    background: var(--gray-0);
+    color: var(--gray-900);
+    border: 1px solid var(--gray-200);
+    border-radius: 8px;
+    cursor: pointer;
+
+    &.selected {
+      border-color: var(--main-color);
+      background: var(--main-10);
+    }
+
+    &:disabled {
+      cursor: default;
+    }
+
+    .skill-mode-name,
+    .skill-mode-description {
+      display: block;
+    }
+
+    .skill-mode-name {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .skill-mode-description {
+      margin-top: 3px;
+      color: var(--gray-600);
+      font-size: 12px;
+    }
+  }
+
+  .skill-mode-status {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px;
+    background: var(--gray-50);
+    border: 1px solid var(--gray-200);
+    border-radius: 8px;
+    font-size: 13px;
+
+    span {
+      color: var(--gray-600);
+    }
+  }
+
+  .fixed-skills {
+    margin-top: 12px;
+  }
+
+  .fixed-skills-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .fixed-skill-list {
+    display: grid;
+    gap: 6px;
+  }
+
+  .fixed-skill-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--gray-0);
+    border: 1px solid var(--gray-200);
+    border-radius: 6px;
+  }
+
+  .fixed-skill-identity {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    font-size: 13px;
+
+    span {
+      color: var(--gray-600);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+  }
 
   .hidden-selection-note {
     margin-bottom: 8px;
@@ -981,6 +1216,22 @@ const canResetSelection = (key) => {
   }
 }
 
+.skill-source-label {
+  flex: none;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: var(--gray-50);
+  color: var(--gray-600);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+@media (max-width: 620px) {
+  .agent-runtime-config-form .skill-mode-options {
+    grid-template-columns: 1fr;
+  }
+}
+
 // 选择器样式
 .selection-container {
   .selection-summary {
@@ -1128,6 +1379,16 @@ const canResetSelection = (key) => {
 // 选择弹窗样式
 .selection-modal {
   .selection-modal-content {
+    .skill-switch-note {
+      padding: 8px 10px;
+      margin: 0 0 12px;
+      border-radius: 6px;
+      background: var(--color-info-50);
+      color: var(--color-info-900);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
     .selection-search {
       margin-bottom: 16px;
       display: flex;
@@ -1224,6 +1485,13 @@ const canResetSelection = (key) => {
             -webkit-box-orient: vertical;
             overflow: hidden;
             text-overflow: ellipsis;
+          }
+
+          .selection-item-key {
+            margin-top: 4px;
+            color: var(--gray-600);
+            font-size: 12px;
+            overflow-wrap: anywhere;
           }
         }
 

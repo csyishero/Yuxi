@@ -166,6 +166,30 @@ async def test_resolve_agent_resource_options_empty_fields_loads_nothing(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_skill_options_include_source_scope_for_same_name_skills(monkeypatch):
+    """同名 Skill 选项仍可按 slug 与来源区分。"""
+
+    async def fake_list_skills(_db, _user):
+        return [
+            types.SimpleNamespace(slug="ppt-builder", name="PPT Builder", description="", source_scope="shared"),
+            types.SimpleNamespace(slug="ppt-builder-team", name="PPT Builder", description="", source_scope="personal"),
+        ]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "yuxi.agents.skills.service",
+        types.SimpleNamespace(list_accessible_skills=fake_list_skills),
+    )
+
+    options = await context_module.resolve_agent_resource_options({"skills"}, db=object(), user=object())
+
+    assert options["skills"] == [
+        {"key": "ppt-builder", "name": "PPT Builder", "description": "", "source_scope": "shared"},
+        {"key": "ppt-builder-team", "name": "PPT Builder", "description": "", "source_scope": "personal"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_normalize_agent_context_config_expands_null_and_filters_explicit_lists(monkeypatch):
     async def fake_get_databases_by_user(_user):
         return [_knowledge_summary("kb-a"), _knowledge_summary("kb-b")]
@@ -182,8 +206,8 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
 
     async def fake_list_skills(_db, _user):
         return [
-            types.SimpleNamespace(slug="skill-a", name="Skill A", description=""),
-            types.SimpleNamespace(slug="skill-b", name="Skill B", description=""),
+            types.SimpleNamespace(slug="skill-a", name="Skill A", description="", source_scope="shared"),
+            types.SimpleNamespace(slug="skill-b", name="Skill B", description="", source_scope="shared"),
         ]
 
     class FakeAgentRepository:
@@ -309,8 +333,8 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
 
     async def fake_list_skills(_db, _user):
         return [
-            types.SimpleNamespace(slug="skill-a", name="Skill A", description=""),
-            types.SimpleNamespace(slug="skill-b", name="Skill B", description=""),
+            types.SimpleNamespace(slug="skill-a", name="Skill A", description="", source_scope="shared"),
+            types.SimpleNamespace(slug="skill-b", name="Skill B", description="", source_scope="shared"),
         ]
 
     async def fake_resolve_visible_knowledge_bases(context):

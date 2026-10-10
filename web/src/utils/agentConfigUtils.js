@@ -58,6 +58,18 @@ export const getAgentConfigOptionLabel = (option) => {
 export const getAgentConfigOptionDescription = (option) =>
   typeof option === 'object' && option !== null ? option.description || '' : ''
 
+/** Skill 配置用空值、空列表和非空列表区分动态、停用与固定选择。 */
+export const getSkillSelectionMode = (value) => {
+  if (value == null) return 'auto'
+  return Array.isArray(value) && value.length > 0 ? 'fixed' : 'off'
+}
+
+/** 将后端 Skill 来源标识转换为可辨认的展示文案。 */
+export const getSkillSourceLabel = (option) => {
+  const scope = option?.source_scope
+  return { builtin: '内置', shared: '共享', personal: '个人' }[scope] || ''
+}
+
 /** 修改可见选择时保留不可见引用，避免局部取消被误读为清空全部。 */
 export const mergeVisibleAgentResourceSelection = (current, available, selected) => {
   const visible = new Set(available.map(String))
