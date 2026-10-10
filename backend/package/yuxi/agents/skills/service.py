@@ -31,12 +31,15 @@ from yuxi.config import (
     get_skill_projection_dir,
 )
 from yuxi.permissions import ResourcePermission, normalize_permission_config, resolve_skill_permission
-from yuxi.storage.postgres.models_business import Skill, User
+from yuxi.repositories.department_repository import DepartmentRepository
+from yuxi.repositories.user_repository import UserRepository
+from yuxi.storage.postgres.models_business import Department, Skill, User
 from yuxi.utils.logging_config import logger
 from yuxi.utils.paths import ensure_within_root, open_directory_fd, open_regular_file_fd
 
 SKILL_SLUG_PATTERN = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 SKILL_NAME_PATTERN = SKILL_SLUG_PATTERN
+MAX_SHARED_SKILL_SLUG_LENGTH = 128
 
 TEXT_FILE_EXTENSIONS = {
     ".md",
@@ -101,6 +104,8 @@ class ResolvedSkill:
     content_hash: str | None = None
     overrides_shared: bool = False
     shadowed_by_personal: bool = False
+    read_department_names: list[str] | None = None
+    read_user_names: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """返回可安全提供给前端的 Skill 元数据。"""
@@ -116,11 +121,17 @@ class ResolvedSkill:
             "tool_dependencies": self.tool_dependencies,
             "mcp_dependencies": self.mcp_dependencies,
             "skill_dependencies": self.skill_dependencies,
+            "version": self.version,
+            "content_hash": self.content_hash,
             "overrides_shared": self.overrides_shared,
             "shadowed_by_personal": self.shadowed_by_personal,
         }
         if self.share_config is not None:
             data["share_config"] = self.share_config
+        if self.read_department_names is not None:
+            data["read_department_names"] = self.read_department_names
+        if self.read_user_names is not None:
+            data["read_user_names"] = self.read_user_names
         return data
 
 
@@ -203,6 +214,33 @@ def normalize_skill_share_config(
         unauthorized_access_level_message="当前用户无权使用该 Skill 共享范围",
         strict=True,
     )
+
+
+async def validate_personal_share_read_scope(db: AsyncSession, *, read_scope: dict, operator: User) -> None:
+    """校验个人 Skill 发布副本的受众存在且在管理员授权边界内。"""
+    if not read_scope:
+        raise ValueError("请选择共享部门或人员")
+    if read_scope["access_level"] == "department":
+        ids = read_scope["department_ids"]
+        if operator.role == "admin" and ids != [operator.department_id]:
+            raise ValueError("部门管理员只能共享给所属部门")
+        known = set((await db.scalars(select(Department.id).where(Department.id.in_(ids)))).all())
+        if known != set(ids):
+            raise ValueError("共享部门不存在")
+        return
+
+    if read_scope["access_level"] == "user":
+        uids = read_scope["user_uids"]
+        users = (await db.scalars(select(User).where(User.uid.in_(uids), User.is_deleted == 0))).all()
+        if {user.uid for user in users} != set(uids):
+            raise ValueError("指定人员不存在或已删除")
+        if operator.role == "admin" and (
+            operator.department_id is None or any(user.department_id != operator.department_id for user in users)
+        ):
+            raise ValueError("部门管理员只能共享给本部门人员")
+        return
+
+    raise ValueError("个人 Skill 共享副本仅支持指定部门或人员")
 
 
 def user_can_access_skill(user: User, skill: Skill, *, require_enabled: bool = True) -> bool:
@@ -464,34 +502,75 @@ def _build_builtin_skill_dir_path(slug: str) -> str:
     return (Path("shared") / slug).as_posix()
 
 
-def _dir_contains_symlink(path: Path) -> bool:
+def skill_dir_contains_symlink(path: Path) -> bool:
     """检查目录内是否包含任意符号链接子路径。"""
     return any(child.is_symlink() for child in path.rglob("*"))
 
 
-def copy_skill_tree_no_symlinks(source_dir: Path, target_dir: Path) -> None:
-    """复制不含符号链接的 Skill 目录到 staging。"""
-    source_dir = source_dir.resolve()
-    if not source_dir.is_dir():
-        raise FileNotFoundError(source_dir)
-    if _dir_contains_symlink(source_dir):
-        raise ValueError(f"Skill 来源只允许普通文件和目录: {source_dir}")
+def copy_skill_tree_no_symlinks(
+    source_dir: Path,
+    target_dir: Path,
+    *,
+    max_bytes: int | None = None,
+    max_entries: int | None = None,
+) -> None:
+    """通过源目录 fd 逐项禁止跟随链接，再复制到 staging。"""
+    absolute = Path(os.path.abspath(source_dir))
+    source_fd = open_directory_fd(Path(absolute.anchor), absolute.parts[1:])
+    entry_count = 0
+    byte_count = 0
+
+    def copy_entries(directory_fd: int, destination: Path) -> None:
+        """按已打开的父目录读取来源，避免检查后被链接替换。"""
+        nonlocal entry_count, byte_count
+        for name in os.listdir(directory_fd):
+            entry_count += 1
+            if max_entries is not None and entry_count > max_entries:
+                raise ValueError("共享申请快照超过 1000 项或 20 MB 限制")
+            mode = os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode
+            target = destination / name
+            if stat.S_ISDIR(mode):
+                child_fd = open_directory_fd(directory_fd, (name,))
+                try:
+                    target.mkdir()
+                    copy_entries(child_fd, target)
+                    target.chmod(stat.S_IMODE(os.fstat(child_fd).st_mode) & 0o777)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(mode):
+                with open_regular_file_fd(directory_fd, (name,)) as (file_fd, file_stat):
+                    with target.open("xb") as output:
+                        while chunk := os.read(file_fd, 1024 * 1024):
+                            byte_count += len(chunk)
+                            if max_bytes is not None and byte_count > max_bytes:
+                                raise ValueError("共享申请快照超过 1000 项或 20 MB 限制")
+                            output.write(chunk)
+                    target.chmod(stat.S_IMODE(file_stat.st_mode) & 0o777)
+            else:
+                raise ValueError(f"Skill 来源只允许普通文件和目录: {source_dir}")
+
     try:
-        shutil.copytree(source_dir, target_dir, symlinks=False)
+        target_dir.mkdir(parents=True)
+        copy_entries(source_fd, target_dir)
+        target_dir.chmod(stat.S_IMODE(os.fstat(source_fd).st_mode) & 0o777)
     except BaseException:
         shutil.rmtree(target_dir, ignore_errors=True)
         raise
+    finally:
+        os.close(source_fd)
 
 
-def _copy_skill_snapshot(
+def copy_skill_snapshot(
     source_dir: Path,
     target_dir: Path,
     *,
     expected_slug: str | None = None,
     final_slug: str | None = None,
+    max_bytes: int | None = None,
+    max_entries: int | None = None,
 ) -> dict[str, Any]:
     """复制并解析 Skill staging，可校验来源或重写最终 slug。"""
-    copy_skill_tree_no_symlinks(source_dir, target_dir)
+    copy_skill_tree_no_symlinks(source_dir, target_dir, max_bytes=max_bytes, max_entries=max_entries)
     parsed = parse_skill_dir_metadata(target_dir)
     if expected_slug and parsed["slug"] != expected_slug:
         raise ValueError("Skill slug 在复制过程中发生变化")
@@ -548,7 +627,7 @@ def _compute_projection_hash(path: Path) -> bytes:
     return hasher.digest()
 
 
-def _compute_dir_hash(source_dir: Path) -> str:
+def compute_skill_dir_hash(source_dir: Path) -> str:
     hasher = hashlib.sha256()
     entries = sorted(source_dir.rglob("*"), key=lambda path: path.relative_to(source_dir).as_posix())
     for entry in entries:
@@ -627,8 +706,19 @@ async def list_accessible_skills(
 async def list_skill_cards_for_user(
     db: AsyncSession,
     user: User,
+    *,
+    audience_search: str | None = None,
+    audience_department_id: int | None = None,
 ) -> list[ResolvedSkill]:
     """返回管理页所需的共享与个人 Skill 卡片。"""
+    if audience_search or audience_department_id is not None:
+        if user.role not in ADMIN_ROLES:
+            raise ValueError("无权按人员筛选 Skill")
+        if user.role == "admin":
+            if user.department_id is None or audience_department_id not in {None, user.department_id}:
+                raise ValueError("无权访问该部门")
+            audience_department_id = user.department_id
+
     shared_items, personal_items = await asyncio.gather(
         list_visible_skills_for_management(db, user),
         list_personal_skills(str(user.uid)),
@@ -640,7 +730,117 @@ async def list_skill_cards_for_user(
     shared_cards = [
         _resolved_shared_skill(item, shadowed_by_personal=item.slug in personal_slugs) for item in shared_items
     ]
+    if audience_search or audience_department_id is not None:
+        audience = await UserRepository(db).list_skill_catalog_audience(
+            search=audience_search, department_id=audience_department_id
+        )
+        target_uids = {uid for uid, _ in audience}
+        target_department_ids = {department_id for _, department_id in audience if department_id is not None}
+
+        def matches_audience(card: ResolvedSkill) -> bool:
+            """按目标用户的真实授权范围筛选已可见的共享卡片。"""
+            if card.source_type == "builtin":
+                return True
+            scope = card.share_config.get("read_scope") or {}
+            if scope.get("access_level") == "global":
+                return bool(audience)
+            if scope.get("access_level") == "department":
+                return bool(target_department_ids.intersection(scope.get("department_ids") or []))
+            if scope.get("access_level") == "user":
+                return bool(target_uids.intersection(scope.get("user_uids") or []))
+            return False
+
+        shared_cards = [card for card in shared_cards if matches_audience(card)]
+    if any((card.share_config.get("read_scope") or {}).get("access_level") == "department" for card in shared_cards):
+        department_names = {item.id: item.name for item in await DepartmentRepository(db).list_departments()}
+        shared_cards = [
+            replace(
+                card,
+                read_department_names=[
+                    department_names.get(int(department_id), f"已删除部门 #{department_id}")
+                    for department_id in card.share_config["read_scope"].get("department_ids", [])
+                ],
+            )
+            if (card.share_config.get("read_scope") or {}).get("access_level") == "department"
+            else card
+            for card in shared_cards
+        ]
+    user_cards = [
+        card for card in shared_cards if (card.share_config.get("read_scope") or {}).get("access_level") == "user"
+    ]
+    if user_cards:
+        user_uids = [uid for card in user_cards for uid in card.share_config["read_scope"].get("user_uids", [])]
+        user_names = {
+            item.uid: item.username for item in await UserRepository(db).list_by_uids(user_uids) if not item.is_deleted
+        }
+        shared_cards = [
+            replace(
+                card,
+                read_user_names=[
+                    user_names.get(uid, "已删除用户") for uid in card.share_config["read_scope"].get("user_uids", [])
+                ],
+            )
+            if (card.share_config.get("read_scope") or {}).get("access_level") == "user"
+            else card
+            for card in shared_cards
+        ]
     return [*personal_cards, *shared_cards]
+
+
+async def list_personal_skill_catalog(
+    db: AsyncSession,
+    *,
+    operator: User,
+    department_id: int | None = None,
+    owner_search: str | None = None,
+    offset: int = 0,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """按管理员可访问的部门分页汇总有效用户的个人 Skill。"""
+    if operator.role not in {"admin", "superadmin"}:
+        raise ValueError("无权访问个人 Skill 目录")
+    if operator.role == "admin":
+        if operator.department_id is None or department_id not in {None, operator.department_id}:
+            raise ValueError("无权访问该部门")
+        department_id = operator.department_id
+    owners, total_owners = await UserRepository(db).list_page_with_department(
+        offset=offset,
+        limit=limit,
+        department_id=department_id,
+        search=owner_search,
+    )
+    cards: list[dict[str, Any]] = []
+    for owner, department_name in owners:
+        if not get_personal_skills_root_dir(str(owner.uid)).exists():
+            continue
+        for item in await list_personal_skills(str(owner.uid)):
+            cards.append(
+                {
+                    **item.to_dict(),
+                    "owner_uid": owner.uid,
+                    "owner_name": owner.username,
+                    "owner_department_id": owner.department_id,
+                    "owner_department_name": department_name,
+                }
+            )
+    return {"items": cards, "next_offset": offset + limit if offset + limit < total_owners else None}
+
+
+async def get_manageable_personal_skill_owner(db: AsyncSession, *, operator: User, owner_uid: str) -> User:
+    """只向管理员返回其权限范围内的有效个人 Skill 所有者。"""
+    if operator.role not in {"admin", "superadmin"}:
+        raise ValueError("无权访问个人 Skill")
+    owner = await UserRepository(db).get_by_uid_with_db(db, owner_uid)
+    if (
+        owner is None
+        or owner.is_deleted
+        or (
+            operator.role == "admin"
+            and (operator.department_id is None or owner.department_id != operator.department_id)
+        )
+    ):
+        raise ValueError("个人 Skill 所有者不存在或无权访问")
+    return owner
 
 
 async def list_visible_skills_for_management(db: AsyncSession, user: User) -> list[Skill]:
@@ -719,13 +919,14 @@ def _get_all_tool_names() -> list[str]:
     return [tool["slug"] for tool in all_tools]
 
 
-async def _validate_dependencies(
+async def validate_skill_dependencies(
     *,
     parent: Skill,
     tool_dependencies: list[str],
     mcp_dependencies: list[str],
     skill_dependencies: list[str],
     available_skills: dict[str, Skill],
+    check_scope: bool = True,
 ) -> tuple[list[str], list[str], list[str]]:
     tools = normalize_string_list(tool_dependencies)
     mcps = normalize_string_list(mcp_dependencies)
@@ -749,7 +950,9 @@ async def _validate_dependencies(
     if parent.slug in skills:
         raise ValueError("skill_dependencies 不允许包含自身")
 
-    forbidden_skills = [name for name in skills if not can_skill_depend_on(parent, available_skills[name])]
+    forbidden_skills = [
+        name for name in skills if check_scope and not can_skill_depend_on(parent, available_skills[name])
+    ]
     if forbidden_skills:
         raise ValueError(f"存在权限范围不匹配的 skill 依赖: {', '.join(forbidden_skills)}")
 
@@ -767,10 +970,12 @@ async def update_skill_dependencies(
 ) -> Skill:
     item = await get_manageable_skill_or_raise(db, operator, slug)
     _ensure_non_builtin(item)
+    if item.source_type == "personal_share":
+        raise ValueError("已审核发布的 Skill 依赖不可原地修改，请重新提交共享申请")
     repo = SkillRepository(db)
     skill_items = await _list_accessible_shared_skills(db, operator)
     available_skills = {skill.slug: skill for skill in skill_items}
-    tools, mcps, skills = await _validate_dependencies(
+    tools, mcps, skills = await validate_skill_dependencies(
         parent=item,
         tool_dependencies=tool_dependencies,
         mcp_dependencies=mcp_dependencies,
@@ -787,6 +992,74 @@ async def update_skill_dependencies(
     )
     await db.commit()
     return updated
+
+
+async def update_personal_skill_dependencies(
+    db: AsyncSession,
+    *,
+    slug: str,
+    tool_dependencies: list[str],
+    mcp_dependencies: list[str],
+    skill_dependencies: list[str],
+    operator: User,
+) -> ResolvedSkill:
+    """验证依赖并写入本人个人 Skill 的 SKILL.md。"""
+    uid = str(operator.uid)
+    root, _ = _personal_skill_workspace_paths(uid, slug)
+    available_skills = {item.slug: item for item in await _list_accessible_shared_skills(db, operator)}
+    parent = Skill(
+        slug=slug,
+        source_type=PERSONAL_SKILL_SOURCE_TYPE,
+        enabled=True,
+        created_by=uid,
+        share_config=normalize_skill_share_config(None, operator_uid=uid),
+    )
+    tools, mcps, skills = await validate_skill_dependencies(
+        parent=parent,
+        tool_dependencies=tool_dependencies,
+        mcp_dependencies=mcp_dependencies,
+        skill_dependencies=skill_dependencies,
+        available_skills=available_skills,
+        check_scope=False,
+    )
+
+    from yuxi.workspace.filesystem import Workspace
+
+    workspace = Workspace(uid)
+
+    def write_dependencies() -> ResolvedSkill:
+        """在工作区文件边界内读取并原子替换 frontmatter。"""
+        target = f"{root}/SKILL.md"
+        content = workspace.read_authorized_file(target, max_bytes=2 * 1024 * 1024).decode("utf-8")
+        parsed_slug, _, _, metadata = _parse_skill_markdown(content)
+        if parsed_slug != slug:
+            raise ValueError("SKILL.md 的 name 必须与个人 Skill 标识一致")
+        metadata["tool_dependencies"] = tools
+        metadata["mcp_dependencies"] = mcps
+        metadata["skill_dependencies"] = skills
+        _, body = _split_frontmatter(content)
+        dumped = yaml.safe_dump(metadata, sort_keys=False, allow_unicode=True).strip()
+        updated = f"---\n{dumped}\n---\n{body}"
+        if len(updated.encode("utf-8")) > 2 * 1024 * 1024:
+            raise ValueError("文本文件不能超过 2 MB")
+        workspace.replace_authorized_file(target, updated.encode("utf-8"))
+        return _resolved_personal_skill(
+            uid,
+            personal_skills_root(uid),
+            {
+                "slug": parsed_slug,
+                "name": str(metadata["name"]),
+                "description": str(metadata["description"]),
+                "tool_dependencies": tools,
+                "mcp_dependencies": mcps,
+                "skill_dependencies": skills,
+            },
+        )
+
+    try:
+        return await asyncio.to_thread(write_dependencies)
+    except FileNotFoundError as exc:
+        raise ValueError("个人 Skill 不存在") from exc
 
 
 def _validate_skill_slug_value(slug: str, *, field_name: str) -> str:
@@ -861,10 +1134,7 @@ def _rewrite_frontmatter_slug(content: str, new_slug: str) -> str:
     data = yaml.safe_load(frontmatter_raw)
     if not isinstance(data, dict):
         raise ValueError("SKILL.md frontmatter 必须是对象")
-    if data.get("slug"):
-        data["slug"] = new_slug
-    else:
-        data["name"] = new_slug
+    data["slug"] = new_slug
     dumped = yaml.safe_dump(data, sort_keys=False, allow_unicode=True).strip()
     return f"---\n{dumped}\n---\n{body}"
 
@@ -878,14 +1148,20 @@ def _validate_zip_paths(zip_file: zipfile.ZipFile) -> None:
             raise ValueError(f"ZIP 包含路径穿越片段: {name}")
 
 
-async def _generate_available_slug(repo: SkillRepository, base_slug: str) -> str:
+async def generate_available_skill_slug(repo: SkillRepository, base_slug: str) -> str:
+    """生成数据库字段长度内的独立共享 slug。"""
     root = get_skills_root_dir()
-    if not await repo.exists_slug(base_slug) and not (root / base_slug).exists():
-        return base_slug
+    base = base_slug
+    if len(base) > MAX_SHARED_SKILL_SLUG_LENGTH:
+        digest = hashlib.sha256(base.encode("utf-8")).hexdigest()[:8]
+        base = f"{base[: MAX_SHARED_SKILL_SLUG_LENGTH - 9].rstrip('-')}-{digest}"
+    if not await repo.exists_slug(base) and not (root / base).exists():
+        return base
 
     idx = 2
     while True:
-        candidate = f"{base_slug}-v{idx}"
+        suffix = f"-v{idx}"
+        candidate = f"{base[: MAX_SHARED_SKILL_SLUG_LENGTH - len(suffix)].rstrip('-')}{suffix}"
         if not await repo.exists_slug(candidate) and not (root / candidate).exists():
             return candidate
         idx += 1
@@ -915,7 +1191,7 @@ def get_personal_skills_root_dir(uid: str) -> Path:
     return user_workspace_dir(uid) / "agents" / "skills"
 
 
-def _personal_skills_root(uid: str) -> Path:
+def personal_skills_root(uid: str) -> Path:
     """返回已创建且位于当前用户工作区内的个人 Skill 根。"""
     from yuxi.workspace.paths import ensure_user_workspace, user_workspace_dir
 
@@ -926,7 +1202,7 @@ def _personal_skills_root(uid: str) -> Path:
     return ensure_within_root(root.resolve(), workspace_root, error_message="个人 Skill 路径越界")
 
 
-def _resolve_personal_skill_dir(root: Path, slug: str) -> Path:
+def resolve_personal_skill_dir(root: Path, slug: str) -> Path:
     """安全解析固定根下的个人 Skill 目录。"""
     if not is_valid_skill_slug(slug):
         raise ValueError("无效 skill slug")
@@ -958,25 +1234,203 @@ async def install_personal_skill_dir(
 
 async def read_personal_skill_file(uid: str, slug: str, relative_path: str) -> dict[str, Any]:
     """读取个人 Skill 中的文本文件。"""
-    skill_dir = _resolve_personal_skill_dir(_personal_skills_root(uid), slug)
-    target, normalized_path = _resolve_relative_path(skill_dir, relative_path)
-    if not target.is_file():
-        raise ValueError("文件不存在")
-    if not _is_text_path(target):
+    from yuxi.workspace.filesystem import Workspace
+
+    root, normalized_path = _personal_skill_workspace_paths(uid, slug, relative_path)
+    if not is_skill_text_path(Path(normalized_path)):
         raise ValueError("仅支持读取文本文件")
+    workspace = Workspace(uid)
     try:
-        content = target.read_text(encoding="utf-8")
+        content = await asyncio.to_thread(workspace.read_authorized_file, f"{root}/{normalized_path}", 2 * 1024 * 1024)
+        return {"path": normalized_path, "content": content.decode("utf-8")}
+    except FileNotFoundError as exc:
+        raise ValueError("个人 Skill 或文件不存在") from exc
+    except PermissionError as exc:
+        raise ValueError("非法路径：越界访问被拒绝") from exc
     except UnicodeDecodeError as exc:
         raise ValueError("文件编码不支持（仅支持 UTF-8）") from exc
-    return {"path": normalized_path, "content": content}
+
+
+def _personal_skill_workspace_paths(uid: str, slug: str, relative_path: str | None = None) -> tuple[str, str]:
+    """限定当前用户的个人 Skill 路径为单个受控目录。"""
+    personal_skills_root(uid)
+    if not is_valid_skill_slug(slug):
+        raise ValueError("无效 skill slug")
+    root = f"/agents/skills/{slug}"
+    if relative_path is None:
+        return root, ""
+    raw = str(relative_path or "").strip()
+    invalid_component = any(part in {"", ".", ".."} for part in raw.split("/"))
+    if not raw or len(raw) > 512 or raw.startswith("/") or "\\" in raw or invalid_component:
+        raise ValueError("非法路径")
+    return root, raw
+
+
+async def get_personal_skill_tree(uid: str, slug: str) -> list[dict[str, Any]]:
+    """从当前用户工作区读取个人 Skill 的文件树。"""
+    from yuxi.workspace.filesystem import Workspace
+
+    root, _ = _personal_skill_workspace_paths(uid, slug)
+    workspace = Workspace(uid)
+
+    def build_tree() -> list[dict[str, Any]]:
+        """只展示普通文件和真实目录，并限制树深与条目数。"""
+        if not workspace.stat_authorized_path(root, root=root)["is_dir"]:
+            raise ValueError("个人 Skill 不存在")
+        count = 0
+
+        def visit(directory: str, depth: int) -> list[dict[str, Any]]:
+            nonlocal count
+            if depth > 16:
+                raise ValueError("个人 Skill 目录层级过深")
+            entries = workspace.list_authorized_directory(directory, root=root, max_entries=1000 - count)
+            count += len(entries)
+            if count > 1000:
+                raise ValueError("个人 Skill 文件数量超过 1000 项")
+            nodes = []
+            for entry in sorted(entries, key=lambda item: (not item["is_dir"], item["name"].lower())):
+                path = f"{directory}/{entry['name']}"
+                node = {"name": entry["name"], "path": path.removeprefix(f"{root}/"), "is_dir": entry["is_dir"]}
+                if entry["is_dir"]:
+                    node["children"] = visit(path, depth + 1)
+                nodes.append(node)
+            return nodes
+
+        return visit(root, 0)
+
+    try:
+        return await asyncio.to_thread(build_tree)
+    except FileNotFoundError as exc:
+        raise ValueError("个人 Skill 不存在") from exc
+
+
+async def update_personal_skill_file(uid: str, slug: str, relative_path: str, content: str) -> None:
+    """在本人工作区修改已有文本文件，保留根 Skill 标识。"""
+    from yuxi.workspace.filesystem import Workspace
+
+    root, path = _personal_skill_workspace_paths(uid, slug, relative_path)
+    if not is_skill_text_path(Path(path)):
+        raise ValueError("仅支持编辑文本文件")
+    if path == "SKILL.md":
+        frontmatter_raw, _ = _split_frontmatter(content)
+        try:
+            metadata = yaml.safe_load(frontmatter_raw)
+        except yaml.YAMLError as exc:
+            raise ValueError(f"SKILL.md frontmatter YAML 解析失败: {exc}") from exc
+        if not isinstance(metadata, dict):
+            raise ValueError("SKILL.md frontmatter 必须是对象")
+        if "slug" not in metadata and str(metadata.get("name", "")).strip() != slug:
+            lines = content.splitlines(keepends=True)
+            newline = "\r\n" if lines[0].endswith("\r\n") else "\n"
+            lines.insert(1, f"slug: {slug}{newline}")
+            content = "".join(lines)
+        parsed_slug, _, _, _ = _parse_skill_markdown(content)
+        if parsed_slug != slug:
+            raise ValueError("SKILL.md 的 slug 必须与个人 Skill 标识一致")
+    encoded = content.encode("utf-8")
+    if len(encoded) > 2 * 1024 * 1024:
+        raise ValueError("文本文件不能超过 2 MB")
+    workspace = Workspace(uid)
+
+    def write_file() -> None:
+        """先证明目标为已有普通文件，再按 fd 写入。"""
+        target = f"{root}/{path}"
+        if workspace.stat_authorized_path(target, root=root)["is_dir"]:
+            raise ValueError("文件不存在")
+        workspace.write_authorized_file(target, encoded)
+
+    try:
+        await asyncio.to_thread(write_file)
+    except FileNotFoundError as exc:
+        raise ValueError("个人 Skill 或文件不存在") from exc
+
+
+async def create_personal_skill_node(uid: str, slug: str, relative_path: str, *, is_dir: bool, content: str) -> None:
+    """在本人个人 Skill 下新建目录或文本文件。"""
+    from yuxi.workspace.filesystem import Workspace
+
+    root, path = _personal_skill_workspace_paths(uid, slug, relative_path)
+    if path == "SKILL.md":
+        raise ValueError("SKILL.md 已存在")
+    workspace = Workspace(uid)
+    parent = f"{root}/{path.rsplit('/', 1)[0]}" if "/" in path else root
+    name = path.rsplit("/", 1)[-1]
+
+    def create_node() -> None:
+        """使用工作区 no-follow 文件原语，且文件创建不覆盖已有内容。"""
+        if not workspace.stat_authorized_path(root, root=root)["is_dir"]:
+            raise ValueError("个人 Skill 不存在")
+        if is_dir:
+            workspace.create_authorized_directory(parent, name, root=root, create_parents=False)
+            return
+        if not is_skill_text_path(Path(path)):
+            raise ValueError("仅支持创建文本文件")
+        encoded = content.encode("utf-8")
+        if len(encoded) > 2 * 1024 * 1024:
+            raise ValueError("文本文件不能超过 2 MB")
+        with tempfile.NamedTemporaryFile(prefix="personal-skill-", delete=True) as staged:
+            staged.write(encoded)
+            staged.flush()
+            workspace.upload_authorized_file_from_path(
+                f"{root}/{path}", staged.name, overwrite=False, create_parents=False
+            )
+
+    try:
+        await asyncio.to_thread(create_node)
+    except FileExistsError as exc:
+        raise ValueError("目标已存在") from exc
+    except FileNotFoundError as exc:
+        raise ValueError("个人 Skill 不存在") from exc
+
+
+async def delete_personal_skill_node(uid: str, slug: str, relative_path: str) -> None:
+    """删除本人个人 Skill 中的非根文件或目录。"""
+    from yuxi.workspace.filesystem import Workspace
+
+    root, path = _personal_skill_workspace_paths(uid, slug, relative_path)
+    if path == "SKILL.md":
+        raise ValueError("不允许删除根目录 SKILL.md")
+    try:
+        await asyncio.to_thread(Workspace(uid).delete_authorized_path, f"{root}/{path}", root=root)
+    except FileNotFoundError as exc:
+        raise ValueError("个人 Skill 或文件不存在") from exc
+
+
+async def export_personal_skill_zip(uid: str, slug: str) -> tuple[str, str]:
+    """从本人目录无链接地复制快照并导出完整 ZIP。"""
+    root = resolve_personal_skill_dir(personal_skills_root(uid), slug)
+
+    def archive() -> str:
+        """在临时目录复制后打包，避免直接归档可变工作区。"""
+        with tempfile.TemporaryDirectory(prefix="personal-skill-export-") as staging_root:
+            snapshot = Path(staging_root) / slug
+            copy_skill_tree_no_symlinks(root, snapshot, max_bytes=20 * 1024 * 1024, max_entries=1000)
+            with tempfile.NamedTemporaryFile(prefix="personal-skill-", suffix=".zip", delete=False) as output:
+                export_path = output.name
+            try:
+                with zipfile.ZipFile(export_path, "w", compression=zipfile.ZIP_DEFLATED) as archive_file:
+                    for entry in sorted(snapshot.rglob("*")):
+                        archive_file.write(entry, (Path(slug) / entry.relative_to(snapshot)).as_posix())
+                return export_path
+            except BaseException:
+                Path(export_path).unlink(missing_ok=True)
+                raise
+
+    try:
+        return await asyncio.to_thread(archive), f"{slug}.zip"
+    except FileNotFoundError as exc:
+        raise ValueError("个人 Skill 不存在") from exc
 
 
 async def delete_personal_skill(uid: str, slug: str) -> None:
     """删除当前用户个人 Skill。"""
-    skill_dir = _resolve_personal_skill_dir(_personal_skills_root(uid), slug)
-    if not skill_dir.is_dir():
-        raise ValueError("个人 Skill 不存在")
-    await asyncio.to_thread(shutil.rmtree, skill_dir)
+    from yuxi.workspace.filesystem import Workspace
+
+    root, _ = _personal_skill_workspace_paths(uid, slug)
+    try:
+        await asyncio.to_thread(Workspace(uid).delete_authorized_path, root, root="/agents/skills")
+    except FileNotFoundError as exc:
+        raise ValueError("个人 Skill 不存在") from exc
 
 
 async def enable_personal_skills_for_agent_config(
@@ -1043,7 +1497,7 @@ def _resolved_shared_skill(item: Skill, *, shadowed_by_personal: bool = False) -
 
 
 def _resolved_personal_skill(uid: str, root: Path, metadata: dict[str, Any]) -> ResolvedSkill:
-    """将个人目录元数据适配为不含共享语义的有效 Skill 描述。"""
+    """将个人目录元数据适配为有效 Skill 描述。"""
     slug = str(metadata["slug"])
     if not is_valid_skill_slug(slug):
         raise ValueError("个人 Skill 包含非法 slug")
@@ -1059,21 +1513,21 @@ def _resolved_personal_skill(uid: str, root: Path, metadata: dict[str, Any]) -> 
         enabled=True,
         created_by=uid,
         share_config=None,
-        tool_dependencies=[],
-        mcp_dependencies=[],
-        skill_dependencies=[],
+        tool_dependencies=normalize_string_list(metadata["tool_dependencies"]),
+        mcp_dependencies=normalize_string_list(metadata["mcp_dependencies"]),
+        skill_dependencies=normalize_string_list(metadata["skill_dependencies"]),
     )
 
 
 def _scan_personal_skills(uid: str) -> list[ResolvedSkill]:
     """扫描并校验当前用户个人 Skill 的直接子目录。"""
     items: list[ResolvedSkill] = []
-    root = _personal_skills_root(uid)
+    root = personal_skills_root(uid)
     for entry in sorted(root.iterdir(), key=lambda path: path.name):
         if entry.is_symlink() or not entry.is_dir() or not is_valid_skill_slug(entry.name):
             logger.warning(f"跳过非法个人 Skill 目录: uid={uid}, name={entry.name}")
             continue
-        if _dir_contains_symlink(entry):
+        if skill_dir_contains_symlink(entry):
             logger.warning(f"跳过包含符号链接的个人 Skill: uid={uid}, slug={entry.name}")
             continue
         try:
@@ -1094,11 +1548,11 @@ def _install_personal_skill_dir_sync(
 ) -> ResolvedSkill:
     """将一个 Skill 原子复制到个人目录。"""
     source_dir = source_dir.resolve()
-    root = _personal_skills_root(uid)
+    root = personal_skills_root(uid)
     temp_target = root / f".install.tmp-{uuid.uuid4().hex[:8]}"
     target_dir: Path | None = None
     try:
-        metadata = _copy_skill_snapshot(source_dir, temp_target, expected_slug=expected_slug)
+        metadata = copy_skill_snapshot(source_dir, temp_target, expected_slug=expected_slug)
         slug = metadata["slug"]
         target_dir = root / slug
         if target_dir.exists() or target_dir.is_symlink():
@@ -1122,8 +1576,8 @@ async def _stage_skill_draft_item(
 ) -> dict[str, Any]:
     item_id = uuid.uuid4().hex
     item_dir = draft_items_dir / item_id
-    parsed = _copy_skill_snapshot(source_skill_dir, item_dir)
-    final_slug = await _generate_available_slug(repo, parsed["slug"])
+    parsed = copy_skill_snapshot(source_skill_dir, item_dir)
+    final_slug = await generate_available_skill_slug(repo, parsed["slug"])
     return {
         "draft_item_id": item_id,
         "source_dir": f"items/{item_id}",
@@ -1160,7 +1614,7 @@ def _resolve_skill_dir(item: Skill) -> Path:
     return (get_skill_data_dir() / dir_path).resolve()
 
 
-def _resolve_relative_path(skill_dir: Path, relative_path: str, *, allow_root: bool = False) -> tuple[Path, str]:
+def resolve_skill_relative_path(skill_dir: Path, relative_path: str, *, allow_root: bool = False) -> tuple[Path, str]:
     rel = (relative_path or "").strip().replace("\\", "/")
     rel = rel.lstrip("/")
     if not rel and not allow_root:
@@ -1174,14 +1628,14 @@ def _resolve_relative_path(skill_dir: Path, relative_path: str, *, allow_root: b
     return target, rel
 
 
-def _is_text_path(path: Path) -> bool:
+def is_skill_text_path(path: Path) -> bool:
     if path.name == "SKILL.md":
         return True
     suffix = path.suffix.lower()
     return suffix in TEXT_FILE_EXTENSIONS
 
 
-def _build_tree(path: Path, base_dir: Path) -> list[dict[str, Any]]:
+def build_skill_tree(path: Path, base_dir: Path) -> list[dict[str, Any]]:
     children: list[dict[str, Any]] = []
     for child in sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
         rel = child.relative_to(base_dir).as_posix()
@@ -1191,7 +1645,7 @@ def _build_tree(path: Path, base_dir: Path) -> list[dict[str, Any]]:
                     "name": child.name,
                     "path": rel,
                     "is_dir": True,
-                    "children": _build_tree(child, base_dir),
+                    "children": build_skill_tree(child, base_dir),
                 }
             )
         else:
@@ -1370,7 +1824,7 @@ async def confirm_skill_install_draft(
         final_dir = skills_root / slug
         published = False
         try:
-            parsed = _copy_skill_snapshot(source_dir, temp_target, final_slug=slug)
+            parsed = copy_skill_snapshot(source_dir, temp_target, final_slug=slug)
             if final_dir.exists():
                 raise ValueError("Skill slug 已被占用，请重新解析安装")
             temp_target.rename(final_dir)
@@ -1507,7 +1961,7 @@ async def get_skill_tree(db: AsyncSession, *, slug: str, operator: User) -> list
     skill_dir = _resolve_skill_dir(item)
     if not skill_dir.exists() or not skill_dir.is_dir():
         raise ValueError(f"技能目录不存在: {item.dir_path}")
-    return _build_tree(skill_dir, skill_dir)
+    return build_skill_tree(skill_dir, skill_dir)
 
 
 async def read_skill_file(
@@ -1519,10 +1973,10 @@ async def read_skill_file(
 ) -> dict[str, Any]:
     item = await get_management_readable_skill_or_raise(db, operator, slug)
     skill_dir = _resolve_skill_dir(item)
-    target, rel = _resolve_relative_path(skill_dir, relative_path)
+    target, rel = resolve_skill_relative_path(skill_dir, relative_path)
     if not target.exists() or not target.is_file():
         raise ValueError(f"文件不存在: {relative_path}")
-    if not _is_text_path(target):
+    if not is_skill_text_path(target):
         raise ValueError("仅支持读取文本文件")
     try:
         content = target.read_text(encoding="utf-8")
@@ -1545,8 +1999,10 @@ async def create_skill_node(
     item = await get_manageable_skill_or_raise(db, operator, slug)
     if is_builtin_skill(item):
         raise ValueError("内置 skill 不允许直接修改文件")
+    if item.source_type == "personal_share":
+        raise ValueError("已审核发布的 Skill 不允许直接修改文件")
     skill_dir = _resolve_skill_dir(item)
-    target, _ = _resolve_relative_path(skill_dir, relative_path)
+    target, _ = resolve_skill_relative_path(skill_dir, relative_path)
     if target.exists():
         raise ValueError("目标已存在")
 
@@ -1554,7 +2010,7 @@ async def create_skill_node(
         target.mkdir(parents=True, exist_ok=False)
         return
 
-    if not _is_text_path(target):
+    if not is_skill_text_path(target):
         raise ValueError("仅支持创建文本文件")
 
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1578,11 +2034,13 @@ async def update_skill_file(
     item = await get_manageable_skill_or_raise(db, operator, slug)
     if is_builtin_skill(item):
         raise ValueError("内置 skill 不允许直接修改文件")
+    if item.source_type == "personal_share":
+        raise ValueError("已审核发布的 Skill 不允许直接修改文件")
     skill_dir = _resolve_skill_dir(item)
-    target, _ = _resolve_relative_path(skill_dir, relative_path)
+    target, _ = resolve_skill_relative_path(skill_dir, relative_path)
     if not target.exists() or not target.is_file():
         raise ValueError("文件不存在")
-    if not _is_text_path(target):
+    if not is_skill_text_path(target):
         raise ValueError("仅支持编辑文本文件")
 
     await _update_skill_metadata_if_skills_md(db, item, content, skill_dir, target, updated_by)
@@ -1618,8 +2076,10 @@ async def delete_skill_node(
     item = await get_manageable_skill_or_raise(db, operator, slug)
     if is_builtin_skill(item):
         raise ValueError("内置 skill 不允许直接修改文件")
+    if item.source_type == "personal_share":
+        raise ValueError("已审核发布的 Skill 不允许直接修改文件")
     skill_dir = _resolve_skill_dir(item)
-    target, rel = _resolve_relative_path(skill_dir, relative_path, allow_root=False)
+    target, rel = resolve_skill_relative_path(skill_dir, relative_path, allow_root=False)
     if not target.exists():
         raise ValueError("目标不存在")
 
@@ -1711,6 +2171,10 @@ async def update_skill_share_config(
         source_type=item.source_type,
         allowed_access_levels=set(get_allowed_skill_access_levels(operator)),
     )
+    if item.source_type == "personal_share":
+        if normalized["manage_scope"] is not None:
+            raise ValueError("已审核发布的 Skill 不允许额外分配管理权限")
+        await validate_personal_share_read_scope(db, read_scope=normalized["read_scope"], operator=operator)
     repo = SkillRepository(db)
     updated = await repo.update_share_config(item, share_config=normalized, updated_by=operator.uid)
     await apply_skill_projection_policy_change(db, slug)
@@ -1759,7 +2223,7 @@ def list_builtin_skill_specs() -> list[dict[str, Any]]:
                 "tool_dependencies": configured_tools or normalize_string_list(meta.get("tool_dependencies")),
                 "mcp_dependencies": configured_mcps or normalize_string_list(meta.get("mcp_dependencies")),
                 "skill_dependencies": configured_skills or normalize_string_list(meta.get("skill_dependencies")),
-                "content_hash": _compute_dir_hash(source_dir),
+                "content_hash": compute_skill_dir_hash(source_dir),
                 "source_dir": source_dir,
             }
         )

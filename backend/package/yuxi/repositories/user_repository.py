@@ -197,6 +197,24 @@ class UserRepository:
             )
             return list(page_result.all()), total_result.scalar() or 0
 
+    async def list_skill_catalog_audience(
+        self, *, search: str | None = None, department_id: int | None = None
+    ) -> list[tuple[str, int | None]]:
+        """返回管理页筛选条件命中的有效用户及其部门。"""
+        async with self._session() as session:
+            query = select(User.uid, User.department_id).where(User.is_deleted == 0)
+            if department_id is not None:
+                query = query.where(User.department_id == department_id)
+            if search:
+                query = query.where(
+                    or_(
+                        User.username.icontains(search, autoescape=True),
+                        User.uid.icontains(search, autoescape=True),
+                        User.phone_number.icontains(search, autoescape=True),
+                    )
+                )
+            return [(uid, department_id) for uid, department_id in (await session.execute(query)).all()]
+
     async def create(self, data: dict[str, Any]) -> User:
         """创建用户"""
         async with self._session() as session:

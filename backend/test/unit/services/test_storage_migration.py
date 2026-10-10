@@ -43,6 +43,7 @@ async def test_storage_migration_reads_legacy_schema_before_cutover(monkeypatch)
         create_business_tables=lambda: _record(calls, "create_business_tables"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge_tables"),
         ensure_business_schema=lambda: _record(calls, "ensure_business_schema"),
+        ensure_skill_share_request_schema=lambda: _record(calls, "skill_share_schema"),
         ensure_knowledge_schema=lambda: _record(calls, "ensure_knowledge_schema"),
         setup_langgraph_checkpointer=lambda: _record(calls, "setup_langgraph_checkpointer"),
         get_async_session_context=session_context,
@@ -113,6 +114,7 @@ async def test_storage_migration_rejects_v071_schema_without_quiescence_proof(mo
         create_business_tables=lambda: _record(calls, "create"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
         ensure_business_schema=lambda: _record(calls, "schema"),
+        ensure_skill_share_request_schema=lambda: _record(calls, "skill_share_schema"),
         ensure_knowledge_schema=lambda: _record(calls, "knowledge_schema"),
         setup_langgraph_checkpointer=lambda: _record(calls, "checkpoint"),
         get_async_session_context=session_context,
@@ -159,6 +161,7 @@ async def test_current_schema_skips_schema_ddl(monkeypatch):
         create_business_tables=lambda: _record(calls, "create_business"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
         ensure_business_schema=lambda: _record(calls, "business_schema"),
+        ensure_skill_share_request_schema=lambda: _record(calls, "skill_share_schema"),
         ensure_knowledge_schema=lambda: _record(calls, "knowledge_schema"),
         setup_langgraph_checkpointer=lambda: _record(calls, "checkpoint"),
         get_async_session_context=session_context,
@@ -193,6 +196,7 @@ async def test_current_schema_skips_schema_ddl(monkeypatch):
         f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}",
         f"version:knowledge:{storage_migration.KNOWLEDGE_SCHEMA_VERSION}",
     }.isdisjoint(calls)
+    assert "skill_share_schema" in calls
     assert "converge:False" in calls
 
 
@@ -255,6 +259,7 @@ async def test_supported_business_schema_is_converged_and_versioned_as_current(
         create_business_tables=lambda: _record(calls, "create_business"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
         ensure_business_schema=lambda: _record(calls, "business_schema"),
+        ensure_skill_share_request_schema=lambda: _record(calls, "skill_share_schema"),
         ensure_knowledge_schema=lambda: _record(calls, "knowledge_schema"),
         setup_langgraph_checkpointer=lambda: _record(calls, "checkpoint"),
         get_async_session_context=session_context,
@@ -281,6 +286,7 @@ async def test_supported_business_schema_is_converged_and_versioned_as_current(
     await storage_migration.main()
 
     assert "business_schema" in calls
+    assert "skill_share_schema" in calls
     assert f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}" in calls
     assert {"create_business", "checkpoint", "knowledge_schema"}.isdisjoint(calls)
 
@@ -306,6 +312,7 @@ async def test_failed_business_migration_does_not_record_version(monkeypatch):
         create_business_tables=lambda: _record(calls, "create_business"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
         ensure_business_schema=lambda: _record(calls, "business_schema"),
+        ensure_skill_share_request_schema=lambda: _record(calls, "skill_share_schema"),
         ensure_knowledge_schema=lambda: _record(calls, "knowledge_schema"),
         setup_langgraph_checkpointer=fail_checkpoint_setup,
         get_async_session_context=session_context,
@@ -348,6 +355,7 @@ async def test_current_schema_does_not_rewrite_workdir_data(monkeypatch):
         create_business_tables=lambda: _record(calls, "create"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
         ensure_business_schema=lambda: _record(calls, "schema"),
+        ensure_skill_share_request_schema=lambda: _record(calls, "skill_share_schema"),
         ensure_knowledge_schema=lambda: _record(calls, "knowledge_schema"),
         setup_langgraph_checkpointer=lambda: _record(calls, "checkpoint"),
         get_async_session_context=session_context,

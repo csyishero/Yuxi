@@ -905,16 +905,16 @@ def test_install_personal_skill_preserves_concurrent_target(tmp_path: Path, monk
     """安装提交遇到并发同名目录时必须保留用户文件并失败。"""
     root = _personal_skill_root(tmp_path, monkeypatch)
     source = _write_personal_skill(tmp_path / "source", "demo", "personal")
-    original_copytree = svc.shutil.copytree
+    original_copy = svc.copy_skill_tree_no_symlinks
 
-    def copytree_with_concurrent_target(source_dir, temp_target, **kwargs):
-        result = original_copytree(source_dir, temp_target, **kwargs)
+    def copy_with_concurrent_target(source_dir, temp_target, **kwargs):
+        result = original_copy(source_dir, temp_target, **kwargs)
         target = Path(temp_target).with_name("demo")
         target.mkdir()
         (target / "user-file.txt").write_text("keep", encoding="utf-8")
         return result
 
-    monkeypatch.setattr(svc.shutil, "copytree", copytree_with_concurrent_target)
+    monkeypatch.setattr(svc, "copy_skill_tree_no_symlinks", copy_with_concurrent_target)
 
     with pytest.raises(ValueError, match="已存在同名 Skill"):
         svc._install_personal_skill_dir_sync("user-1", source)
@@ -1084,7 +1084,7 @@ def test_resolve_relative_path_blocks_traversal(tmp_path: Path):
     skill_dir.mkdir(parents=True, exist_ok=True)
 
     with pytest.raises(ValueError, match="上级路径"):
-        svc._resolve_relative_path(skill_dir, "../outside.txt")
+        svc.resolve_skill_relative_path(skill_dir, "../outside.txt")
 
 
 @pytest.mark.asyncio
@@ -2130,7 +2130,7 @@ async def test_personal_skill_list_reads_current_workspace_state(
 
 
 @pytest.mark.asyncio
-async def test_personal_skill_overrides_shared_skill_and_drops_dependencies(
+async def test_personal_skill_overrides_shared_skill_without_inheriting_dependencies(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -2175,6 +2175,33 @@ async def test_personal_skill_overrides_shared_skill_and_drops_dependencies(
     assert items[0].tool_dependencies == []
     assert items[0].mcp_dependencies == []
     assert items[0].skill_dependencies == []
+
+
+@pytest.mark.asyncio
+async def test_personal_skill_frontmatter_dependencies_reach_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """个人 Skill 的依赖来自自身 frontmatter，并进入运行时快照。"""
+    from yuxi.agents.skills.runtime import build_runtime_skills
+
+    personal_root = _personal_skill_root(tmp_path, monkeypatch)
+    skill_dir = personal_root / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: personal\ntool_dependencies:\n  - calculator\n"
+        "mcp_dependencies:\n  - reports\nskill_dependencies:\n  - base\n---\n# Demo\n",
+        encoding="utf-8",
+    )
+
+    personal = (await svc.list_personal_skills("user-1"))[0]
+    assert personal.tool_dependencies == ["calculator"]
+    assert personal.mcp_dependencies == ["reports"]
+    assert personal.skill_dependencies == ["base"]
+    runtime = build_runtime_skills([personal])["demo"]
+    assert runtime["tools"] == ["calculator"]
+    assert runtime["mcps"] == ["reports"]
+    assert runtime["skills"] == ["base"]
 
 
 @pytest.mark.asyncio

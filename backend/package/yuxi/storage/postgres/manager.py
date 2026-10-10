@@ -919,6 +919,48 @@ class PostgresManager(metaclass=SingletonMeta):
             for stmt in stmts:
                 await conn.execute(text(stmt))
 
+    async def ensure_skill_share_request_schema(self) -> None:
+        """在兼容业务 Schema 8 的前提下幂等创建 Skill 共享申请表。"""
+        self._check_initialized()
+        stmts = [
+            """
+            CREATE TABLE IF NOT EXISTS skill_share_requests (
+                id VARCHAR(36) PRIMARY KEY,
+                owner_uid VARCHAR(64) NOT NULL,
+                owner_department_id INTEGER,
+                personal_slug VARCHAR(128) NOT NULL,
+                name VARCHAR(128) NOT NULL,
+                description TEXT NOT NULL,
+                content_hash VARCHAR(128) NOT NULL,
+                status VARCHAR(16) NOT NULL DEFAULT 'pending',
+                review_note TEXT,
+                reviewer_uid VARCHAR(64),
+                published_slug VARCHAR(128),
+                department_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                read_scope JSONB,
+                created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                reviewed_at TIMESTAMP WITHOUT TIME ZONE,
+                CONSTRAINT ck_skill_share_requests_status
+                    CHECK (status IN ('pending', 'approved', 'rejected'))
+            )
+            """,
+            "ALTER TABLE IF EXISTS skill_share_requests ADD COLUMN IF NOT EXISTS read_scope JSONB",
+            "ALTER TABLE IF EXISTS skill_share_requests ALTER COLUMN owner_department_id DROP NOT NULL",
+            "CREATE INDEX IF NOT EXISTS ix_skill_share_requests_owner_uid ON skill_share_requests(owner_uid)",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_skill_share_requests_owner_department_id "
+                "ON skill_share_requests(owner_department_id)"
+            ),
+            "CREATE INDEX IF NOT EXISTS ix_skill_share_requests_status ON skill_share_requests(status)",
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_skill_share_requests_pending "
+                "ON skill_share_requests(owner_uid, personal_slug) WHERE status = 'pending'"
+            ),
+        ]
+        async with self.async_engine.begin() as conn:
+            for stmt in stmts:
+                await conn.execute(text(stmt))
+
     async def ensure_business_schema(self):
         """确保业务 schema 包含后续新增字段（运行时 schema 演进）。"""
         self._check_initialized()

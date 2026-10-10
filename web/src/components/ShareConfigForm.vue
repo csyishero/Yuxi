@@ -133,7 +133,7 @@
           </div>
           <div
             class="share-mode-cards"
-            :class="`active-${scopes[scope.key].access_level}`"
+            :class="[`active-${scopes[scope.key].access_level}`, { 'two-modes': getShareModeOptions(scope.key).length === 2 }]"
             role="radiogroup"
             :aria-label="scope.title"
           >
@@ -393,6 +393,7 @@ const props = defineProps({
   disabledReason: { type: String, default: '' },
   requireReadScope: { type: Boolean, default: false },
   showEditScope: { type: Boolean, default: false },
+  showManageScope: { type: Boolean, default: true },
   resourceDepartmentId: { type: [Number, String], default: null },
   showKnowledgeBaseInheritance: { type: Boolean, default: false },
   availableDepartments: { type: Array, default: null },
@@ -446,24 +447,26 @@ const scopeOptions = computed(() => [
         }
       ]
     : []),
-  {
-    key: 'manage_scope',
-    title: props.showEditScope
-      ? '共享管理权限（包含编辑与读取权限）'
-      : '共享管理权限（包含读取权限）',
-    profileTitle: '知识库管理员',
-    badge: '含高风险操作',
-    badgeColor: 'red',
-    description: '负责成员授权、共享设置和知识库生命周期管理',
-    scopePrompt: '额外授权范围（系统继承人员不会出现在候选列表中）',
-    icon: ShieldCheck,
-    capabilities: [
-      { label: '成员授权' },
-      { label: '共享设置' },
-      { label: '删除文档', danger: true },
-      { label: '删除知识库', danger: true }
-    ]
-  }
+  ...(props.showManageScope
+    ? [{
+        key: 'manage_scope',
+        title: props.showEditScope
+          ? '共享管理权限（包含编辑与读取权限）'
+          : '共享管理权限（包含读取权限）',
+        profileTitle: '知识库管理员',
+        badge: '含高风险操作',
+        badgeColor: 'red',
+        description: '负责成员授权、共享设置和知识库生命周期管理',
+        scopePrompt: '额外授权范围（系统继承人员不会出现在候选列表中）',
+        icon: ShieldCheck,
+        capabilities: [
+          { label: '成员授权' },
+          { label: '共享设置' },
+          { label: '删除文档', danger: true },
+          { label: '删除知识库', danger: true }
+        ]
+      }]
+    : [])
 ])
 
 const permissionProfiles = [
@@ -656,7 +659,9 @@ const initConfig = () => {
   const readScope = isV2 ? source.read_scope : source
   scopes.read_scope = normalizeScope(readScope, { includeCurrent: props.autoSelectUserDept })
   scopes.edit_scope = props.showEditScope ? normalizeScope(isV2 ? source.edit_scope : null) : null
-  const manageScope = normalizeScope(isV2 ? source.manage_scope : null)
+  const manageScope = props.showManageScope
+    ? normalizeScope(isV2 ? source.manage_scope : null)
+    : null
   scopes.manage_scope =
     isKnowledgeBasePermissionMode.value && manageScope?.access_level !== 'user'
       ? null
@@ -677,7 +682,8 @@ const initConfig = () => {
 
 const emitConfig = () => {
   const manageScope =
-    isKnowledgeBasePermissionMode.value && scopes.manage_scope?.access_level !== 'user'
+    !props.showManageScope ||
+    (isKnowledgeBasePermissionMode.value && scopes.manage_scope?.access_level !== 'user')
       ? null
       : normalizeScope(scopes.manage_scope)
   if (manageScope?.access_level === 'user') {
@@ -898,6 +904,7 @@ const loadUsers = async () => {
 watch(() => props.modelValue, initConfig, { deep: true })
 watch(normalizedAllowedAccessLevels, initConfig)
 watch(() => props.showEditScope, initConfig)
+watch(() => props.showManageScope, initConfig)
 watch(
   scopes,
   () => {
@@ -1423,6 +1430,10 @@ defineExpose({ scopes, validate })
   gap: 10px;
 }
 
+.share-mode-cards.two-modes {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .share-mode-card {
   min-width: 0;
   padding: 12px;
@@ -1578,7 +1589,8 @@ defineExpose({ scopes, validate })
     grid-template-columns: 1fr;
   }
 
-  .share-mode-cards {
+  .share-mode-cards,
+  .share-mode-cards.two-modes {
     grid-template-columns: 1fr;
   }
 }

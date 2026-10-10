@@ -150,6 +150,7 @@ async def main() -> None:
                 if business_version is None:
                     await pg_manager.setup_langgraph_checkpointer()
                 await pg_manager.record_schema_version("business", BUSINESS_SCHEMA_VERSION)
+            await pg_manager.ensure_skill_share_request_schema()
 
             if knowledge_version is None:
                 await pg_manager.create_knowledge_tables()

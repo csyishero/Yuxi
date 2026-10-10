@@ -22,8 +22,13 @@ class Workspace:
         uid = str(uid)
         self._workspace_root = user_workspace_dir(uid)
 
-    def list_authorized_directory(self, path: str, *, root: str) -> list[dict]:
+    def list_authorized_directory(self, path: str, *, root: str, max_entries: int | None = None) -> list[dict]:
         """列出 Workdir 内的普通文件与真实目录。"""
+        if max_entries is not None:
+            entries, examined = self._list_authorized_directory_limited(path, root=root, max_entries=max_entries + 1)
+            if examined > max_entries:
+                raise ValueError("directory entry limit exceeded")
+            return entries
         self._require_within(path, root)
         base, parts = self._resolve_path(path)
         directory_fd = self._open_directory(base, parts)
@@ -288,14 +293,15 @@ class Workspace:
                 pass
             os.close(parent_fd)
 
-    def create_authorized_directory(self, parent_path: str, name: str, *, root: str) -> dict:
+    def create_authorized_directory(
+        self, parent_path: str, name: str, *, root: str, create_parents: bool = True
+    ) -> dict:
         """在 Workdir 内创建一个单层目录。"""
         if not name or name in {".", ".."} or "/" in name or "\\" in name:
             raise ValueError("directory name must be one path component")
         self._require_within(parent_path, root)
         base, parts = self._resolve_path(parent_path)
-        # parent_fd = self._open_directory(base, parts)
-        parent_fd = self._open_directory(base, parts, create=True)
+        parent_fd = self._open_directory(base, parts, create=create_parents)
         try:
             os.mkdir(name, 0o700, dir_fd=parent_fd)
             item_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)

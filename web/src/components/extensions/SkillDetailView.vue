@@ -63,6 +63,12 @@
         <div v-if="isReadOnlySkill" class="readonly-scope-hint readonly-detail-hint">
           你可以查看并使用此 Skill，但没有管理权限。
         </div>
+        <div v-if="isApprovedSkillRelease" class="readonly-scope-hint readonly-detail-hint">
+          已发布的 Skill 内容和依赖不可原地修改；请从个人 Skill {{ userStore.isAdmin ? '重新发布共享版本' : '重新申请共享' }}。
+        </div>
+        <div v-if="isPersonalSkill" class="readonly-scope-hint readonly-detail-hint">
+          个人 Skill 仅你自己可用。修改内容或依赖不会自动更新已提交或已发布的共享版本；如需共享新版，{{ userStore.isAdmin ? '请直接转为共享' : '请再次申请' }}。
+        </div>
         <div class="workspace" :class="{ 'tree-visible': treeVisible }">
           <Transition name="skill-tree">
             <div v-if="treeVisible" id="skill-project-tree" class="tree-container">
@@ -90,6 +96,11 @@
                   <a-tooltip v-if="canEditSkillFiles" title="新建目录">
                     <button type="button" aria-label="新建目录" @click="openCreateModal(true)">
                       <FolderPlus :size="14" />
+                    </button>
+                  </a-tooltip>
+                  <a-tooltip v-if="isPersonalSkill && selectedPath && selectedPath !== 'SKILL.md'" title="删除所选文件或目录">
+                    <button type="button" aria-label="删除所选文件或目录" @click="confirmDeletePersonalNode">
+                      <Trash2 :size="14" />
                     </button>
                   </a-tooltip>
                   <a-tooltip title="刷新">
@@ -142,7 +153,7 @@
 
     <template #panel-config>
       <div class="extension-detail-view extension-detail-gray-switches config-view">
-        <section class="config-section extension-detail-section">
+        <section v-if="!isPersonalSkill" class="config-section extension-detail-section">
           <div class="config-section-header extension-detail-section-header">
             <div class="text extension-detail-section-heading">
               <h3>可用范围</h3>
@@ -192,13 +203,20 @@
               <div v-else-if="isReadOnlySkill" class="readonly-scope-hint">
                 当前 Skill 对你只读，不能修改生效范围。
               </div>
-              <ShareConfigForm
-                v-else
-                ref="shareConfigFormRef"
-                v-model="shareConfigForm"
-                :auto-select-user-dept="true"
-                :allowed-access-levels="allowedSkillAccessLevels"
-              />
+              <template v-else>
+                <div v-if="isApprovedSkillRelease" class="readonly-scope-hint">
+                  已发布的个人 Skill 共享副本支持指定部门或人员读取，不能额外分配管理权限。
+                </div>
+                <ShareConfigForm
+                  ref="shareConfigFormRef"
+                  v-model="shareConfigForm"
+                  :auto-select-user-dept="!isApprovedSkillRelease"
+                  :allowed-access-levels="isApprovedSkillRelease ? ['department', 'user'] : allowedSkillAccessLevels"
+                  :require-read-scope="isApprovedSkillRelease"
+                  :show-manage-scope="!isApprovedSkillRelease"
+                  :available-departments="isApprovedSkillRelease && !userStore.isSuperAdmin ? ownDepartmentOptions : null"
+                />
+              </template>
             </section>
           </div>
         </section>
@@ -367,7 +385,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import {
@@ -387,6 +405,7 @@ import {
   ChevronRight
 } from '@lucide/vue'
 import { skillApi } from '@/apis/skill_api'
+import { useUserStore } from '@/stores/user'
 import AgentFilePreview from '@/components/AgentFilePreview.vue'
 import ExtensionDetailLayout from '@/components/shared/ExtensionDetailLayout.vue'
 import FileTreeComponent from '@/components/FileTreeComponent.vue'
@@ -394,9 +413,11 @@ import ShareConfigForm from '@/components/ShareConfigForm.vue'
 
 const route = useRoute()
 const router = useRouter()
+const userStore = useUserStore()
 const slug = computed(() => decodeURIComponent(route.params.slug))
+const isPersonalRoute = computed(() => route.query.scope === 'personal')
 
-const skillDetailTabs = [
+const skillDetailTabs = computed(() => [
   {
     key: 'editor',
     label: '代码管理',
@@ -404,7 +425,7 @@ const skillDetailTabs = [
     panelClass: 'extension-detail-panel-fixed'
   },
   { key: 'config', label: '配置', icon: Settings }
-]
+])
 
 const loading = ref(false)
 const currentSkill = ref(null)
@@ -414,6 +435,7 @@ const expandedKeys = ref([])
 const selectedPath = ref('')
 const selectedIsDir = ref(false)
 const fileContent = ref('')
+let detailRequestId = 0
 const savingFile = ref(false)
 const creatingNode = ref(false)
 const savingDependencies = ref(false)
@@ -441,18 +463,27 @@ const dependencyForm = reactive({
 })
 const dependencySearch = reactive({ tools: '', mcps: '', skills: '' })
 
-const isInstalledSkill = computed(() => !!currentSkill.value?.dir_path)
+const isPersonalSkill = computed(
+  () => isPersonalRoute.value && currentSkill.value?.source_scope === 'personal'
+)
+const isInstalledSkill = computed(() => isPersonalSkill.value || !!currentSkill.value?.dir_path)
 
 const isBuiltinInstalledSkill = computed(() => {
   return !!(isInstalledSkill.value && currentSkill.value?.source_type === 'builtin')
 })
+const isApprovedSkillRelease = computed(() => currentSkill.value?.source_type === 'personal_share')
+const ownDepartmentOptions = computed(() =>
+  userStore.departmentId
+    ? [{ id: userStore.departmentId, name: userStore.departmentName || '本部门' }]
+    : []
+)
 const canManageCurrentSkill = computed(() => currentSkill.value?.can_manage !== false)
 const isReadOnlySkill = computed(() => isInstalledSkill.value && !canManageCurrentSkill.value)
 const canEditSkillFiles = computed(
-  () => canManageCurrentSkill.value && !isBuiltinInstalledSkill.value
+  () => canManageCurrentSkill.value && !isBuiltinInstalledSkill.value && !isApprovedSkillRelease.value
 )
 const canEditSkillDependencies = computed(
-  () => canManageCurrentSkill.value && !isBuiltinInstalledSkill.value
+  () => canManageCurrentSkill.value && !isBuiltinInstalledSkill.value && !isApprovedSkillRelease.value
 )
 
 const selectedFilePreview = computed(() => ({
@@ -582,35 +613,51 @@ const cloneShareConfig = (config) => ({
 
 const syncShareConfigFromSkill = (skillRecord) => {
   enabledForm.value = skillRecord?.enabled !== false
-  shareConfigForm.value = cloneShareConfig(skillRecord?.share_config)
+  const config = cloneShareConfig(skillRecord?.share_config)
+  if (skillRecord?.source_type === 'personal_share') config.manage_scope = null
+  shareConfigForm.value = config
 }
 
 const fetchSkillDetail = async () => {
+  const requestId = detailRequestId
+  const requestedSlug = slug.value
+  const requestedPersonal = isPersonalRoute.value
+  const isCurrent = () => requestId === detailRequestId
   loading.value = true
   try {
-    const skillResult = await skillApi.listSkills()
+    const skillResult = requestedPersonal
+      ? await skillApi.listSkillCards({ refreshPersonal: true })
+      : await skillApi.listSkills()
+    if (!isCurrent()) return
     skills.value = skillResult?.data || []
     allowedSkillAccessLevels.value = skillResult?.allowed_access_levels || ['user']
 
-    const found = skills.value.find((s) => s.slug === slug.value)
+    const found = skills.value.find(
+      (s) => s.slug === requestedSlug && (requestedPersonal ? s.source_scope === 'personal' : s.source_scope !== 'personal')
+    )
     if (found) {
       currentSkill.value = found
       syncDependencyFormFromSkill(found)
       syncShareConfigFromSkill(found)
-      await reloadTree()
-      await loadSkillFile(found.slug)
+      await reloadTree(isCurrent)
+      if (!isCurrent()) return
+      await loadSkillFile(found.slug, 'SKILL.md', isCurrent)
+    } else {
+      currentSkill.value = null
     }
-    await fetchDependencyOptions(currentSkill.value?.slug)
+    if (!isCurrent()) return
+    await fetchDependencyOptions(currentSkill.value?.slug, isCurrent)
   } catch {
-    message.error('加载失败')
+    if (isCurrent()) message.error('加载失败')
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
-const fetchDependencyOptions = async (currentSlug) => {
+const fetchDependencyOptions = async (currentSlug, isCurrent = () => true) => {
   try {
-    const result = await skillApi.getSkillDependencyOptions(currentSlug)
+    const result = await skillApi.getSkillDependencyOptions(isPersonalSkill.value ? null : currentSlug)
+    if (!isCurrent()) return
     const data = result?.data || {}
     dependencyOptions.tools = data.tools || []
     dependencyOptions.mcps = data.mcps || []
@@ -644,24 +691,30 @@ const resetFileState = () => {
   fileContent.value = ''
 }
 
-const reloadTree = async () => {
+const reloadTree = async (isCurrent = () => true) => {
   if (!currentSkill.value || !isInstalledSkill.value) return
   loading.value = true
   try {
-    const result = await skillApi.getSkillTree(currentSkill.value.slug)
+    const result = isPersonalSkill.value
+      ? await skillApi.getPersonalSkillTree(currentSkill.value.slug)
+      : await skillApi.getSkillTree(currentSkill.value.slug)
+    if (!isCurrent()) return
     const normalized = normalizeTree(result?.data || [])
     treeData.value = normalized
     expandedKeys.value = []
   } catch {
-    message.error('加载目录树失败')
+    if (isCurrent()) message.error('加载目录树失败')
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
-const loadSkillFile = async (skillSlug, path = 'SKILL.md') => {
+const loadSkillFile = async (skillSlug, path = 'SKILL.md', isCurrent = () => true) => {
   try {
-    const fileResult = await skillApi.getSkillFile(skillSlug, path)
+    const fileResult = isPersonalSkill.value
+      ? await skillApi.getPersonalSkillFile(skillSlug, path)
+      : await skillApi.getSkillFile(skillSlug, path)
+    if (!isCurrent()) return
     const content = fileResult?.data?.content || ''
     fileContent.value = content
     selectedPath.value = path
@@ -680,6 +733,7 @@ const handleTreeSelect = async (keys, info) => {
   const node = info?.node || {}
   const path = node.path || node.key
   const isDir = !!node.is_dir
+  const requestId = detailRequestId
   selectedTreeKeys.value = [path]
   selectedPath.value = path
   selectedIsDir.value = isDir
@@ -688,11 +742,14 @@ const handleTreeSelect = async (keys, info) => {
     return
   }
   try {
-    const result = await skillApi.getSkillFile(currentSkill.value.slug, path)
+    const result = isPersonalSkill.value
+      ? await skillApi.getPersonalSkillFile(currentSkill.value.slug, path)
+      : await skillApi.getSkillFile(currentSkill.value.slug, path)
+    if (requestId !== detailRequestId || selectedPath.value !== path) return
     const content = result?.data?.content || ''
     fileContent.value = content
   } catch {
-    message.error('文件读取失败')
+    if (requestId === detailRequestId) message.error('文件读取失败')
   }
 }
 
@@ -700,16 +757,20 @@ const saveCurrentFile = async (content = fileContent.value) => {
   if (!currentSkill.value || !selectedPath.value || selectedIsDir.value || !canEditSkillFiles.value)
     return
   savingFile.value = true
+  const requestId = detailRequestId
+  const path = selectedPath.value
   try {
-    await skillApi.updateSkillFile(currentSkill.value.slug, {
-      path: selectedPath.value,
+    const saveFile = isPersonalSkill.value ? skillApi.updatePersonalSkillFile : skillApi.updateSkillFile
+    await saveFile(currentSkill.value.slug, {
+      path,
       content
     })
+    if (requestId !== detailRequestId || selectedPath.value !== path) return
     fileContent.value = content
     message.success('已保存')
-    if (selectedPath.value === 'SKILL.md') await fetchSkillDetail()
-  } catch {
-    message.error('保存失败')
+    if (path === 'SKILL.md') await fetchSkillDetail()
+  } catch (error) {
+    if (requestId === detailRequestId) message.error(error?.response?.data?.detail || '保存失败')
   } finally {
     savingFile.value = false
   }
@@ -727,7 +788,8 @@ const confirmDeleteSkill = () => {
     cancelText: '取消',
     onOk: async () => {
       try {
-        await skillApi.deleteSkill(target.slug)
+        if (isPersonalSkill.value) await skillApi.deletePersonalSkill(target.slug)
+        else await skillApi.deleteSkill(target.slug)
         message.success(`已${actionText}`)
         router.push({ path: '/extensions', query: { tab: 'skills' } })
       } catch {
@@ -740,7 +802,9 @@ const confirmDeleteSkill = () => {
 const handleExport = async () => {
   if (!currentSkill.value || !isInstalledSkill.value || !canManageCurrentSkill.value) return
   try {
-    const response = await skillApi.exportSkill(currentSkill.value.slug)
+    const response = isPersonalSkill.value
+      ? await skillApi.exportPersonalSkill(currentSkill.value.slug)
+      : await skillApi.exportSkill(currentSkill.value.slug)
     const blob = await response.blob()
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
@@ -764,20 +828,50 @@ const openCreateModal = (isDir) => {
 const handleCreateNode = async () => {
   if (!currentSkill.value || !createForm.path.trim() || !canEditSkillFiles.value) return
   creatingNode.value = true
+  const requestId = detailRequestId
   try {
-    await skillApi.createSkillFile(currentSkill.value.slug, {
+    const createFile = isPersonalSkill.value ? skillApi.createPersonalSkillFile : skillApi.createSkillFile
+    await createFile(currentSkill.value.slug, {
       path: createForm.path.trim(),
       is_dir: createForm.isDir,
       content: createForm.content
     })
+    if (requestId !== detailRequestId) return
     createModalVisible.value = false
-    await reloadTree()
+    await reloadTree(() => requestId === detailRequestId)
+    if (requestId !== detailRequestId) return
     message.success('创建成功')
-  } catch {
-    message.error('创建失败')
+  } catch (error) {
+    if (requestId === detailRequestId) message.error(error?.response?.data?.detail || '创建失败')
   } finally {
     creatingNode.value = false
   }
+}
+
+const confirmDeletePersonalNode = () => {
+  if (!isPersonalSkill.value || !selectedPath.value || selectedPath.value === 'SKILL.md') return
+  const path = selectedPath.value
+  const targetSlug = currentSkill.value.slug
+  const requestId = detailRequestId
+  Modal.confirm({
+    title: `删除「${path}」？`,
+    content: selectedIsDir.value ? '目录及其中的所有文件将被永久删除。' : '文件将被永久删除。',
+    okText: '删除',
+    okType: 'danger',
+    cancelText: '取消',
+    onOk: async () => {
+      try {
+        await skillApi.deletePersonalSkillFile(targetSlug, path)
+        if (requestId !== detailRequestId) return
+        resetFileState()
+        await reloadTree(() => requestId === detailRequestId)
+        if (requestId !== detailRequestId) return
+        message.success('已删除')
+      } catch (error) {
+        if (requestId === detailRequestId) message.error(error?.response?.data?.detail || '删除失败')
+      }
+    }
+  })
 }
 
 const saveShareConfig = async () => {
@@ -791,18 +885,26 @@ const saveShareConfig = async () => {
   }
 
   savingShareConfig.value = true
+  const requestId = detailRequestId
+  const targetSlug = currentSkill.value.slug
+  const targetEnabled = enabledForm.value
+  const targetShareConfig = cloneShareConfig(shareConfigForm.value)
+  const targetIsBuiltin = isBuiltinInstalledSkill.value
   try {
-    if (!isBuiltinInstalledSkill.value) {
-      await skillApi.updateSkillShareConfig(currentSkill.value.slug, shareConfigForm.value)
+    if (!targetIsBuiltin) {
+      await skillApi.updateSkillShareConfig(targetSlug, targetShareConfig)
     }
-    const result = await skillApi.updateSkillEnabled(currentSkill.value.slug, enabledForm.value)
+    const result = await skillApi.updateSkillEnabled(targetSlug, targetEnabled)
+    if (requestId !== detailRequestId) return
     if (result?.data) {
       currentSkill.value = result.data
       syncShareConfigFromSkill(result.data)
     }
     message.success('设置已保存')
   } catch (error) {
-    message.error(error?.response?.data?.detail || error.message || '保存设置失败')
+    if (requestId === detailRequestId) {
+      message.error(error?.response?.data?.detail || error.message || '保存设置失败')
+    }
   } finally {
     savingShareConfig.value = false
   }
@@ -811,28 +913,39 @@ const saveShareConfig = async () => {
 const saveDependencies = async () => {
   if (!currentSkill.value || !isInstalledSkill.value || !canEditSkillDependencies.value) return
   savingDependencies.value = true
+  const requestId = detailRequestId
   try {
-    const result = await skillApi.updateSkillDependencies(currentSkill.value.slug, {
+    const saveDependencySelection = isPersonalSkill.value
+      ? skillApi.updatePersonalSkillDependencies
+      : skillApi.updateSkillDependencies
+    const result = await saveDependencySelection(currentSkill.value.slug, {
       tool_dependencies: dependencyForm.tool_dependencies,
       mcp_dependencies: dependencyForm.mcp_dependencies,
       skill_dependencies: dependencyForm.skill_dependencies
     })
+    if (requestId !== detailRequestId) return
     const updated = result?.data
     if (updated) {
       currentSkill.value = updated
       syncDependencyFormFromSkill(updated)
     }
     message.success('依赖已更新')
-  } catch {
-    message.error('更新失败')
+  } catch (error) {
+    if (requestId === detailRequestId) {
+      message.error(error?.response?.data?.detail || error?.message || '更新失败')
+    }
   } finally {
     savingDependencies.value = false
   }
 }
 
-onMounted(() => {
+watch([slug, isPersonalRoute], () => {
+  detailRequestId += 1
+  currentSkill.value = null
+  treeData.value = []
+  resetFileState()
   fetchSkillDetail()
-})
+}, { immediate: true })
 </script>
 
 <style lang="less" scoped>
@@ -949,6 +1062,11 @@ onMounted(() => {
     min-height: 0;
     overflow-y: auto;
     padding: 8px 10px 12px;
+  }
+
+  :deep(.custom-file-tree) {
+    background: transparent;
+    color: var(--gray-900);
   }
 }
 

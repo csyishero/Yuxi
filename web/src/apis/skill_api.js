@@ -7,9 +7,32 @@ export const listSkills = async () => {
   return apiGet(BASE_URL)
 }
 
-export const listSkillCards = async ({ refreshPersonal = false } = {}) => {
-  const query = refreshPersonal ? '?refresh_personal=true' : ''
-  return apiGet(`${USER_BASE_URL}${query}`)
+export const listSkillCards = async ({ refreshPersonal = false, audienceSearch, audienceDepartmentId } = {}) => {
+  const params = new URLSearchParams()
+  if (refreshPersonal) params.set('refresh_personal', 'true')
+  if (audienceSearch?.trim()) params.set('audience_search', audienceSearch.trim())
+  if (audienceDepartmentId) params.set('audience_department_id', String(audienceDepartmentId))
+  return apiGet(`${USER_BASE_URL}${params.size ? `?${params}` : ''}`)
+}
+
+export const listPersonalSkillCatalog = async ({ departmentId, ownerSearch, offset = 0 } = {}) => {
+  const params = new URLSearchParams({ offset: String(offset) })
+  if (departmentId) params.set('department_id', String(departmentId))
+  if (ownerSearch?.trim()) params.set('owner_search', ownerSearch.trim())
+  return apiGet(`${USER_BASE_URL}/personal-catalog?${params}`)
+}
+
+export const getPersonalSkillCatalogFile = async (ownerUid, slug, path) => {
+  return apiGet(
+    `${USER_BASE_URL}/personal-catalog/${encodeURIComponent(ownerUid)}/${encodeURIComponent(slug)}/file?path=${encodeURIComponent(path)}`
+  )
+}
+
+export const publishPersonalSkillDirectly = async (ownerUid, slug, readScope, note = '') => {
+  return apiPost(
+    `${USER_BASE_URL}/personal-catalog/${encodeURIComponent(ownerUid)}/${encodeURIComponent(slug)}/publish`,
+    { read_scope: readScope, note }
+  )
 }
 
 export const listAccessibleSkills = async () => {
@@ -81,6 +104,26 @@ export const getPersonalSkillFile = async (slug, path) => {
   )
 }
 
+export const getPersonalSkillTree = async (slug) => {
+  return apiGet(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/tree`)
+}
+
+export const createPersonalSkillFile = async (slug, payload) => {
+  return apiPost(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/file`, payload)
+}
+
+export const updatePersonalSkillFile = async (slug, payload) => {
+  return apiPut(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/file`, payload)
+}
+
+export const deletePersonalSkillFile = async (slug, path) => {
+  return apiDelete(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/file?path=${encodeURIComponent(path)}`)
+}
+
+export const exportPersonalSkill = async (slug) => {
+  return apiGet(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/export`, {}, true, 'blob')
+}
+
 export const createSkillFile = async (slug, payload) => {
   return apiPost(`${BASE_URL}/${encodeURIComponent(slug)}/file`, payload)
 }
@@ -91,6 +134,10 @@ export const updateSkillFile = async (slug, payload) => {
 
 export const updateSkillDependencies = async (slug, payload) => {
   return apiPut(`${BASE_URL}/${encodeURIComponent(slug)}/dependencies`, payload)
+}
+
+export const updatePersonalSkillDependencies = async (slug, payload) => {
+  return apiPut(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/dependencies`, payload)
 }
 
 export const updateSkillShareConfig = async (slug, shareConfig) => {
@@ -119,6 +166,46 @@ export const deletePersonalSkill = async (slug) => {
   return apiDelete(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}`)
 }
 
+export const submitSkillShareRequest = async (slug) => {
+  return apiPost(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/share-request`)
+}
+
+export const listSkillShareRequests = async () => {
+  return apiGet(`${USER_BASE_URL}/share-requests`)
+}
+
+export const getSkillShareSnapshot = async (requestId, path = 'SKILL.md') => {
+  return apiGet(
+    `${USER_BASE_URL}/share-requests/${encodeURIComponent(requestId)}/snapshot?path=${encodeURIComponent(path)}`
+  )
+}
+
+export const getSkillShareSnapshotTree = async (requestId) => {
+  return apiGet(`${USER_BASE_URL}/share-requests/${encodeURIComponent(requestId)}/tree`)
+}
+
+export const exportSkillShareSnapshot = async (requestId) => {
+  return apiGet(
+    `${USER_BASE_URL}/share-requests/${encodeURIComponent(requestId)}/export`,
+    {},
+    true,
+    'blob'
+  )
+}
+
+export const approveSkillShareRequest = async (requestId, readScope, note = '') => {
+  return apiAdminPost(`${USER_BASE_URL}/share-requests/${encodeURIComponent(requestId)}/approve`, {
+    read_scope: readScope,
+    note
+  })
+}
+
+export const rejectSkillShareRequest = async (requestId, note = '') => {
+  return apiAdminPost(`${USER_BASE_URL}/share-requests/${encodeURIComponent(requestId)}/reject`, {
+    note
+  })
+}
+
 export const deleteSkillsBatch = async (slugs) => {
   return apiPost(`${BASE_URL}/delete-batch`, { slugs })
 }
@@ -126,6 +213,9 @@ export const deleteSkillsBatch = async (slugs) => {
 export const skillApi = {
   listSkills,
   listSkillCards,
+  listPersonalSkillCatalog,
+  getPersonalSkillCatalogFile,
+  publishPersonalSkillDirectly,
   listAccessibleSkills,
   prepareSkillUpload,
   listRemoteSkills,
@@ -140,15 +230,28 @@ export const skillApi = {
   getSkillTree,
   getSkillFile,
   getPersonalSkillFile,
+  getPersonalSkillTree,
+  createPersonalSkillFile,
+  updatePersonalSkillFile,
+  deletePersonalSkillFile,
+  exportPersonalSkill,
   createSkillFile,
   updateSkillFile,
   updateSkillDependencies,
+  updatePersonalSkillDependencies,
   updateSkillShareConfig,
   updateSkillEnabled,
   deleteSkillFile,
   exportSkill,
   deleteSkill,
   deletePersonalSkill,
+  submitSkillShareRequest,
+  listSkillShareRequests,
+  getSkillShareSnapshot,
+  getSkillShareSnapshotTree,
+  exportSkillShareSnapshot,
+  approveSkillShareRequest,
+  rejectSkillShareRequest,
   deleteSkillsBatch
 }
 

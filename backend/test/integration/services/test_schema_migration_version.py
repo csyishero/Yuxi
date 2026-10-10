@@ -278,6 +278,66 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 
 
+async def test_skill_share_request_table_migrates_from_previous_business_schema() -> None:
+    """旧业务库升级后可持久审核快照，且重复迁移不会重复建表。"""
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_skill_share_schema")
+    try:
+        await manager.create_business_tables()
+        async with scoped_engine.begin() as connection:
+            await connection.execute(text("DROP TABLE skill_share_requests"))
+
+        await manager.create_schema_version_table()
+        await manager.record_schema_version("business", 8)
+        await manager.ensure_skill_share_request_schema()
+        async with scoped_engine.begin() as connection:
+            await connection.execute(text("ALTER TABLE skill_share_requests DROP COLUMN read_scope"))
+            await connection.execute(
+                text("ALTER TABLE skill_share_requests ALTER COLUMN owner_department_id SET NOT NULL")
+            )
+        await manager.ensure_skill_share_request_schema()
+        async with scoped_engine.connect() as connection:
+            columns = set(
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT column_name FROM information_schema.columns "
+                            "WHERE table_schema = :schema AND table_name = 'skill_share_requests'"
+                        ),
+                        {"schema": schema},
+                    )
+                ).scalars()
+            )
+            indexes = set(
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT indexname FROM pg_indexes "
+                            "WHERE schemaname = :schema AND tablename = 'skill_share_requests'"
+                        ),
+                        {"schema": schema},
+                    )
+                ).scalars()
+            )
+        assert {"owner_uid", "owner_department_id", "content_hash", "status", "published_slug", "read_scope"}.issubset(
+            columns
+        )
+        async with scoped_engine.connect() as connection:
+            nullable = await connection.scalar(
+                text(
+                    "SELECT is_nullable FROM information_schema.columns "
+                    "WHERE table_schema = :schema AND table_name = 'skill_share_requests' "
+                    "AND column_name = 'owner_department_id'"
+                ),
+                {"schema": schema},
+            )
+        assert nullable == "YES"
+        assert "uq_skill_share_requests_pending" in indexes
+        assert BUSINESS_SCHEMA_VERSION == 8
+        assert (await manager.get_schema_versions())["business"] == 8
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
 async def test_release_upgrade_adds_audit_columns_idempotently() -> None:
     """发布版缺失的 Trace 与 Message 审计列由完整升级补齐，且可安全重放。"""
     schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_audit_schema")

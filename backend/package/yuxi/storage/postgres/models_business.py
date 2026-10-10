@@ -416,6 +416,65 @@ class Skill(Base):
         }
 
 
+class SkillShareRequest(Base):
+    """保存个人 Skill 快照的共享审核记录。"""
+
+    __tablename__ = "skill_share_requests"
+
+    id = Column(String(36), primary_key=True)
+    owner_uid = Column(String(64), nullable=False, index=True)
+    owner_department_id = Column(Integer, nullable=True, index=True)
+    personal_slug = Column(String(128), nullable=False)
+    name = Column(String(128), nullable=False)
+    description = Column(Text, nullable=False)
+    content_hash = Column(String(128), nullable=False)
+    status = Column(String(16), nullable=False, default="pending", index=True)
+    review_note = Column(Text, nullable=True)
+    reviewer_uid = Column(String(64), nullable=True)
+    published_slug = Column(String(128), nullable=True)
+    department_ids = Column(JSON_VALUE, nullable=False, default=list)
+    read_scope = Column(JSON_VALUE, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+    reviewed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'approved', 'rejected')", name="ck_skill_share_requests_status"),
+        Index(
+            "uq_skill_share_requests_pending",
+            "owner_uid",
+            "personal_slug",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        """返回申请状态和可审计的发布信息。"""
+        return {
+            "id": self.id,
+            "owner_uid": self.owner_uid,
+            "owner_department_id": self.owner_department_id,
+            "personal_slug": self.personal_slug,
+            "name": self.name,
+            "description": self.description,
+            "content_hash": self.content_hash,
+            "status": self.status,
+            "review_note": self.review_note,
+            "reviewer_uid": self.reviewer_uid,
+            "published_slug": self.published_slug,
+            "department_ids": self.department_ids or [],
+            "read_scope": self.read_scope
+            or (
+                {"access_level": "department", "department_ids": self.department_ids, "user_uids": []}
+                if self.status == "approved" and self.department_ids
+                else None
+            ),
+            "created_at": format_utc_datetime(self.created_at),
+            "reviewed_at": format_utc_datetime(self.reviewed_at),
+        }
+
+
 class Conversation(Base):
     """Conversation table - 对话表"""
 

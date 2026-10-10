@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypedDict
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.agents.backends.paths import VIRTUAL_PERSONAL_SKILLS_PATH, VIRTUAL_SKILLS_PATH
+from yuxi.agents.mcp.service import get_enabled_mcp_server_slugs
 from yuxi.agents.skills.service import list_accessible_skills, normalize_string_list
 from yuxi.agents.toolkits import get_all_tool_instances
 from yuxi.storage.postgres.models_business import User
@@ -92,6 +94,27 @@ async def resolve_runtime_skills_for_context(
 ) -> dict:
     """从已授权 Skill 派生当前 Agent Run 的运行时 scope 与预加载快照。"""
     skill_items = [item for item in await list_accessible_skills(db, user) if item.slug]
+    if any(
+        item.source_scope == "personal" and (item.tool_dependencies or item.mcp_dependencies or item.skill_dependencies)
+        for item in skill_items
+    ):
+        available_tools = {tool.name for tool in get_all_tool_instances()}
+        enabled_mcps = set(await get_enabled_mcp_server_slugs(db=db))
+        available_skills = {item.slug for item in skill_items}
+        skill_items = [
+            replace(
+                item,
+                tool_dependencies=[name for name in item.tool_dependencies if name in available_tools],
+                mcp_dependencies=[name for name in item.mcp_dependencies if name in enabled_mcps],
+                skill_dependencies=[
+                    name for name in item.skill_dependencies if name in available_skills and name != item.slug
+                ],
+            )
+            if item.source_scope == "personal"
+            and (item.tool_dependencies or item.mcp_dependencies or item.skill_dependencies)
+            else item
+            for item in skill_items
+        ]
     runtime_skills = build_runtime_skills(skill_items)
     available = set(runtime_skills)
     selected = normalize_string_list(getattr(context, "skills", None))

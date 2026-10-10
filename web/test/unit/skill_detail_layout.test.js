@@ -54,17 +54,31 @@ test('共享权限开关的可访问名称包含当前状态', () => {
 
   assert.match(
     source,
-    /:aria-label="`\$\{scope\.title\}\$\{scopes\[scope\.key\] \? '已开启' : '已关闭'\}`"/
+    /:aria-label="`\$\{scope\.profileTitle \|\| scope\.title\}\$\{scopes\[scope\.key\] \? '已开启' : '已关闭'\}`"/
   )
 })
 
 test('保存运行依赖不会重载并覆盖同页尚未保存的范围配置', () => {
   const source = readSource('../../src/components/extensions/SkillDetailView.vue')
   const saveStart = source.indexOf('const saveDependencies = async () =>')
-  const saveDependencies = source.slice(saveStart, source.indexOf('onMounted(', saveStart))
+  const saveDependencies = source.slice(saveStart, source.indexOf('watch([slug, isPersonalRoute]', saveStart))
 
   assert.ok(saveStart >= 0)
   assert.doesNotMatch(saveDependencies, /fetchSkillDetail\(\)/)
+})
+
+test('同 slug 的个人与共享详情切换时清空旧内容并重新加载', () => {
+  const source = readSource('../../src/components/extensions/SkillDetailView.vue')
+  const watcher = source.slice(source.indexOf('watch([slug, isPersonalRoute]'))
+
+  assert.match(watcher, /detailRequestId \+= 1/)
+  assert.match(watcher, /currentSkill\.value = null/)
+  assert.match(watcher, /treeData\.value = \[\]/)
+  assert.match(watcher, /resetFileState\(\)/)
+  assert.match(watcher, /fetchSkillDetail\(\)/)
+  assert.match(source, /if \(!isCurrent\(\)\) return/)
+  assert.match(source, /requestId !== detailRequestId \|\| selectedPath\.value !== path/)
+  assert.match(source, /if \(requestId !== detailRequestId\) return/)
 })
 
 test('无预览 header 的 HTML 文件在编辑态隐藏模式控件', () => {

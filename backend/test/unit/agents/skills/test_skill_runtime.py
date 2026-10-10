@@ -4,6 +4,7 @@ import pytest
 
 import yuxi.agents.skills.runtime as skill_runtime
 from yuxi.agents.skills.runtime import build_dependency_bundle, expand_skill_closure, resolve_runtime_skills_for_context
+from yuxi.agents.skills.service import ResolvedSkill
 
 
 def _skill(tmp_path, slug: str, *, dependencies: list[str] | None = None, content: str | None = None):
@@ -72,6 +73,46 @@ async def test_resolve_runtime_skills_derives_authorized_scope(monkeypatch):
     assert scope["runtime_skills"]["alpha"]["path"] == "/home/gem/skills/alpha/SKILL.md"
     assert scope["runtime_skills"]["beta"]["path"] == "/home/gem/user-data/agents/skills/beta/SKILL.md"
     assert scope["runtime_skills"]["alpha"]["skills"] == ["beta"]
+
+
+@pytest.mark.asyncio
+async def test_personal_skill_runtime_excludes_unavailable_file_dependencies(monkeypatch, tmp_path):
+    """直接改写个人文件也不能装配未知工具、禁用 MCP 或不可访问 Skill。"""
+    personal = ResolvedSkill(
+        id="personal:demo",
+        slug="demo",
+        name="Demo",
+        description="demo",
+        source_type="personal",
+        source_scope="personal",
+        source_dir=tmp_path / "demo",
+        enabled=True,
+        created_by="alice",
+        share_config=None,
+        tool_dependencies=["calculator", "unknown-tool"],
+        mcp_dependencies=["reports", "disabled-mcp"],
+        skill_dependencies=["base", "private-skill"],
+    )
+    base = _skill(tmp_path, "base")
+
+    async def accessible(_db, _user):
+        return [personal, base]
+
+    async def enabled_mcps(*, db):
+        return ["reports"]
+
+    monkeypatch.setattr(skill_runtime, "list_accessible_skills", accessible)
+    monkeypatch.setattr(skill_runtime, "get_enabled_mcp_server_slugs", enabled_mcps)
+    monkeypatch.setattr(
+        skill_runtime,
+        "get_all_tool_instances",
+        lambda: [SimpleNamespace(name="calculator")],
+    )
+
+    scope = await resolve_runtime_skills_for_context(SimpleNamespace(skills=["demo"]), db=object(), user=object())
+    assert scope["runtime_skills"]["demo"]["tools"] == ["calculator"]
+    assert scope["runtime_skills"]["demo"]["mcps"] == ["reports"]
+    assert scope["runtime_skills"]["demo"]["skills"] == ["base"]
 
 
 def test_expand_skill_closure_handles_cycles_missing_and_duplicates():
