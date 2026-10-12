@@ -13,14 +13,6 @@
           >
             <span>批量管理</span>
           </a-button>
-          <a-button
-            @click="handleOpenRemoteInstall"
-            :disabled="loading || importing"
-            class="lucide-icon-btn"
-          >
-            <Computer :size="14" />
-            <span>远程安装</span>
-          </a-button>
           <a-upload
             accept=".zip,.md"
             :show-upload-list="false"
@@ -96,7 +88,7 @@
           {{
             searchQuery
               ? '换个关键词试试，或清空搜索条件。'
-              : '可以从远程仓库安装，或上传本地 Skill 文件。'
+              : '可以上传本地 Skill 文件。'
           }}
         </div>
       </div>
@@ -674,7 +666,6 @@ import { message, Modal } from 'ant-design-vue'
 import {
   RefreshCw,
   Upload,
-  Computer,
   WandSparkles,
   History,
   Trash2,

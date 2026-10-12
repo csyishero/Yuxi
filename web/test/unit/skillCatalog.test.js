@@ -7,12 +7,14 @@ const source = readFileSync(
   'utf8'
 )
 
-test('Skill 目录移除固定推荐区但保留自主安装入口', () => {
+test('Skill 目录隐藏远程安装入口，保留上传入口', () => {
   assert.doesNotMatch(source, /RECOMMENDED_SUITES/)
   assert.doesNotMatch(source, /key: 'recommended'/)
   assert.doesNotMatch(source, /title: '推荐'/)
   assert.doesNotMatch(source, /SkillSuiteCard/)
-  assert.match(source, />远程安装</)
+  assert.doesNotMatch(source, /@click="handleOpenRemoteInstall"/)
+  assert.doesNotMatch(source, /可以从远程仓库安装/)
+  assert.match(source, /可以上传本地 Skill 文件/)
   assert.match(source, />上传 Skill</)
 })
 

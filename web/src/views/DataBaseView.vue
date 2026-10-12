@@ -29,7 +29,7 @@
           v-if="canCreateDatabase"
           type="primary"
           class="lucide-icon-btn"
-          :disabled="!kbTypes.length"
+          :disabled="!Object.keys(creatableKbTypes).length"
           @click="state.openNewDatabaseModel = true"
         >
           <Plus :size="16" /> 新建知识库
@@ -39,7 +39,7 @@
 
     <DatabaseCreateFlowModal
       v-model:open="state.openNewDatabaseModel"
-      :supported-kb-types="supportedKbTypes"
+      :supported-kb-types="creatableKbTypes"
     />
 
     <!-- 加载状态 -->
@@ -65,7 +65,7 @@
           type="primary"
           size="large"
           class="lucide-icon-btn"
-          :disabled="!kbTypes.length"
+          :disabled="!Object.keys(creatableKbTypes).length"
           @click="state.openNewDatabaseModel = true"
         >
           <template #icon>
@@ -140,6 +140,7 @@ import InfoCard from '@/components/shared/InfoCard.vue'
 import dayjs, { parseToShanghai } from '@/utils/time'
 import { getKbTypeLabel, getKbTypeIcon, getKbTypeColor, kbUtils } from '@/utils/kb_utils'
 import { getShareConfigLabel } from '@/utils/shareConfig'
+import { getCreatableKbTypes } from '@/utils/databaseCreateForm'
 
 const route = useRoute()
 const router = useRouter()
@@ -159,6 +160,7 @@ const knowledgeViewItems = [
 ]
 
 const kbTypes = computed(() => Object.keys(supportedKbTypes.value))
+const creatableKbTypes = computed(() => getCreatableKbTypes(supportedKbTypes.value))
 const canCreateDatabase = computed(() => userStore.isAdmin)
 const hasDatabaseCapability = (database, capability) =>
   (database.effective_capabilities || []).includes(capability)

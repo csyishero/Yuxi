@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   buildDatabaseRequest,
   createEmptyDatabaseForm,
+  getCreatableKbTypes,
   selectDatabaseType,
   validateDatabaseConfig
 } from '../../src/utils/databaseCreateForm.js'
@@ -17,6 +18,12 @@ const difyType = {
     ]
   }
 }
+
+test('创建入口排除 Notion，同时保留原始类型供已有知识库展示', () => {
+  const supported = { milvus: { name: '联合智擎' }, dify: difyType, notion: { name: 'Notion' } }
+  assert.deepEqual(Object.keys(getCreatableKbTypes(supported)), ['milvus', 'dify'])
+  assert.equal(supported.notion.name, 'Notion')
+})
 
 test('切换知识库类型保留通用字段并重置类型参数', () => {
   const form = { ...createEmptyDatabaseForm('embed/model'), name: '产品资料', description: '说明' }

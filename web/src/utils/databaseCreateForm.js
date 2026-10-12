@@ -77,3 +77,7 @@ export const buildDatabaseRequest = (form, typeInfo, shareConfig, defaultEmbeddi
   return request
 }
 import { DEFAULT_CHUNK_PRESET_ID } from './chunkUtils.js'
+
+/** 创建入口暂不展示 Notion，已有知识库仍按服务端类型展示。 */
+export const getCreatableKbTypes = (supportedTypes) =>
+  Object.fromEntries(Object.entries(supportedTypes).filter(([type]) => type !== 'notion'))
