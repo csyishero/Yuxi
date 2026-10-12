@@ -245,6 +245,13 @@ export const documentApi = {
     return apiDelete(`/api/knowledge/databases/${kbId}/documents/${docId}`)
   },
 
+  deleteVirtualFolder: async (kbId, parentId, pathPrefix) => {
+    return apiDelete(`/api/knowledge/databases/${kbId}/virtual-folders`, {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parent_id: parentId, path_prefix: pathPrefix })
+    })
+  },
+
   /**
    * 批量删除文档
    * @param {string} kbId - 知识库ID

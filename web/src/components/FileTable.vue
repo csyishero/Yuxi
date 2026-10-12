@@ -363,7 +363,7 @@
       <template #row-actions="{ row }">
         <div class="table-row-actions">
           <a-popover
-            v-if="!row.is_virtual_folder"
+            v-if="!row.is_virtual_folder || (!readonly && canDelete)"
             placement="bottomRight"
             trigger="click"
             overlayClassName="file-action-popover"
@@ -373,7 +373,7 @@
               <div class="file-action-list">
                 <template v-if="row.is_folder">
                   <a-button
-                    v-if="canUseFileMutations"
+                    v-if="canUseFileMutations && !row.is_virtual_folder"
                     type="text"
                     block
                     @click="showRenameFolderModal(row)"
@@ -382,7 +382,7 @@
                     重命名
                   </a-button>
                   <a-button
-                    v-if="canMetadata"
+                    v-if="canMetadata && !row.is_virtual_folder"
                     type="text"
                     block
                     @click="showCreateFolderModal(row.file_id)"
@@ -1072,7 +1072,11 @@ const handleDeleteFolder = (record) => {
     cancelText: '取消',
     onOk: async () => {
       try {
-        await store.deleteFile(record.file_id)
+        if (record.is_virtual_folder) {
+          await store.deleteVirtualFolder(record)
+        } else {
+          await store.deleteFile(record.file_id)
+        }
         message.success('删除成功')
       } catch {
         // Error handled in store but we can add extra handling if needed

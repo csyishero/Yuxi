@@ -17,7 +17,14 @@ from yuxi.knowledge.graphs.milvus_graph_service import GRAPH_TASK_TYPE, MilvusGr
 from yuxi.knowledge.read_models import KnowledgeBaseDetail
 from yuxi.knowledge.parser.capabilities import SUPPORTED_FILE_EXTENSIONS, is_supported_file_extension
 from yuxi.knowledge.runtime import knowledge_base
-from yuxi.knowledge.utils import calculate_content_hash, is_minio_url, params_for_uploaded_document, parse_minio_url
+from yuxi.knowledge.utils import (
+    calculate_content_hash,
+    is_minio_url,
+    normalize_source_path,
+    params_for_uploaded_document,
+    parse_minio_url,
+)
+from yuxi.knowledge.utils.file_delete import delete_document_storage_objects as _delete_document_storage_objects
 from yuxi.knowledge.utils.mindmap_utils import (
     batch_remove_files_from_mindmap,
     generate_database_mindmap,
@@ -99,6 +106,11 @@ class MoveDocumentRequest(BaseModel):
     new_parent_id: str | None
 
 
+class DeleteVirtualFolderRequest(BaseModel):
+    parent_id: str | None = None
+    path_prefix: str
+
+
 class ParseDocumentsRequest(BaseModel):
     file_ids: list[str] = Field(default_factory=list)
     params: dict | None = None
@@ -146,27 +158,6 @@ media_types = {
     ".h": "text/x-chdr",
     ".hpp": "text/x-c++hdr",
 }
-
-
-async def _delete_document_storage_objects(kb_id: str, doc_id: str, file_path: str) -> None:
-    minio_client = get_minio_client()
-
-    if is_minio_url(file_path):
-        try:
-            bucket_name, object_name = parse_minio_url(file_path)
-            await minio_client.adelete_file(bucket_name, object_name)
-        except Exception as minio_error:
-            logger.warning(f"从MinIO删除原始文件失败: {minio_error}")
-
-    try:
-        await minio_client.adelete_file(minio_client.KB_BUCKETS["parsed"], f"{kb_id}/parsed/{doc_id}.md")
-    except Exception as minio_error:
-        logger.warning(f"从MinIO删除解析结果失败: {minio_error}")
-
-    try:
-        await minio_client.adelete_file(minio_client.KB_BUCKETS["parsed"], f"{kb_id}/preview/{doc_id}.pdf")
-    except Exception as minio_error:
-        logger.warning(f"从MinIO删除预览 PDF 失败: {minio_error}")
 
 
 async def _require_upload_permission_if_kb_id(kb_id: str | None, current_user: User) -> None:
@@ -238,6 +229,22 @@ def _validate_uploaded_document_items(items: list[str], params: dict) -> None:
     preprocessed_map = params.get("_preprocessed_map")
     if preprocessed_map is not None and not isinstance(preprocessed_map, dict):
         raise HTTPException(status_code=400, detail="params._preprocessed_map must be an object")
+
+    source_paths = params.get("source_paths")
+    if source_paths is not None:
+        if not isinstance(source_paths, dict) or set(source_paths) - set(items):
+            raise HTTPException(status_code=400, detail="params.source_paths must map uploaded items")
+        normalized_paths: set[str] = set()
+        for source_path in source_paths.values():
+            try:
+                normalized = normalize_source_path(source_path)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if normalized is None:
+                raise HTTPException(status_code=400, detail="params.source_paths must contain paths")
+            if normalized in normalized_paths:
+                raise HTTPException(status_code=400, detail="params.source_paths contains duplicate paths")
+            normalized_paths.add(normalized)
 
     for item in items:
         if not isinstance(item, str) or not item.strip():
@@ -1559,6 +1566,21 @@ async def detect_virtual_folders(
     """检测知识库中的历史路径型虚拟文件夹。"""
     await _ensure_database_supports_documents(kb_id, "虚拟文件夹检测")
     return await knowledge_folder_service.detect_virtual_folder_data(kb_id)
+
+
+@knowledge.delete("/databases/{kb_id}/virtual-folders")
+async def delete_virtual_folder(
+    kb_id: str,
+    request: DeleteVirtualFolderRequest,
+    current_user: User = Depends(require_knowledge_base_delete_document),
+):
+    """按当前知识库和父目录删除指定历史虚拟文件夹。"""
+    await _ensure_database_supports_documents(kb_id, "虚拟文件夹删除")
+    try:
+        deleted = await knowledge_base.delete_virtual_folder(kb_id, request.parent_id, request.path_prefix)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"message": "文件夹删除成功", "deleted_count": deleted}
 
 
 @knowledge.post("/databases/{kb_id}/virtual-folders/migrate")

@@ -233,7 +233,20 @@ class KnowledgeBase(ABC):
         if operator_id:
             metadata["created_by"] = operator_id
 
-        await self._persist_file_meta(file_id, metadata)
+        source_path = metadata.pop("source_path", None)
+        if source_path and "/" in source_path:
+            from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
+
+            parent_id = await KnowledgeFileRepository().persist_uploaded_file_in_tree(
+                file_id=file_id,
+                data=self._file_meta_to_record_data(metadata),
+                source_path=source_path,
+                operator_id=operator_id,
+            )
+            metadata["parent_id"] = parent_id
+            metadata["filename"] = source_path.rsplit("/", 1)[-1]
+        else:
+            await self._persist_file_meta(file_id, metadata)
 
         return metadata
 
@@ -1081,6 +1094,30 @@ class KnowledgeBase(ABC):
         # We call delete_file which should handle the actual removal.
         # Implementations should ensure they handle folder deletion gracefully (e.g. skip vector deletion)
         await self.delete_file(kb_id, folder_id)
+
+    async def delete_virtual_folder(self, kb_id: str, parent_id: str | None, path_prefix: str) -> int:
+        """在删除动作中按路径清除历史虚拟文件夹包含的文件。"""
+        from yuxi.knowledge.utils.file_delete import delete_document_storage_objects
+        from yuxi.knowledge.utils.mindmap_utils import remove_file_from_mindmap
+        from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
+
+        repository = KnowledgeFileRepository()
+        deleted = 0
+        async with repository.lock_file_tree(kb_id):
+            while file_ids := await repository.list_virtual_folder_file_ids(
+                kb_id=kb_id,
+                parent_id=parent_id,
+                path_prefix=path_prefix,
+            ):
+                for file_id in file_ids:
+                    metadata = await self._load_file_meta(kb_id, file_id)
+                    await delete_document_storage_objects(kb_id, file_id, metadata.get("path", ""))
+                    await self.delete_file(kb_id, file_id)
+                    await remove_file_from_mindmap(kb_id, file_id, metadata.get("filename"))
+                    deleted += 1
+        if deleted == 0:
+            raise ValueError("虚拟文件夹不存在")
+        return deleted
 
     async def move_file(self, kb_id: str, file_id: str, new_parent_id: str | None) -> dict:
         """

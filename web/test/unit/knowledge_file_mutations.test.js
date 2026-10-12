@@ -88,6 +88,7 @@ test('知识库文件夹移动与重命名 API 使用管理端 PUT 契约', asyn
     await databaseApi.streamVirtualFolderMigration('kb-1', 'task-1')
     await documentApi.renameFolder('kb-1', 'folder-1', '新名称')
     await documentApi.moveDocument('kb-1', 'file-1', 'folder-2')
+    await documentApi.deleteVirtualFolder('kb-1', 'folder-2', 'old/sub/')
 
     assert.deepEqual(requests, [
       {
@@ -114,6 +115,11 @@ test('知识库文件夹移动与重命名 API 使用管理端 PUT 契约', asyn
         url: '/api/knowledge/databases/kb-1/documents/file-1/move',
         method: 'PUT',
         body: { new_parent_id: 'folder-2' }
+      },
+      {
+        url: '/api/knowledge/databases/kb-1/virtual-folders',
+        method: 'DELETE',
+        body: { parent_id: 'folder-2', path_prefix: 'old/sub/' }
       }
     ])
   } finally {

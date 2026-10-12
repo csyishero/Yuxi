@@ -1062,6 +1062,14 @@ class KnowledgeBaseManager:
         kb_instance = await self.get_kb_executor(kb_id)
         await self._run_with_stats_refresh(kb_id, kb_instance.delete_folder(kb_id, folder_id))
 
+    async def delete_virtual_folder(self, kb_id: str, parent_id: str | None, path_prefix: str) -> int:
+        """删除历史虚拟文件夹并刷新知识库统计。"""
+        kb_instance = await self.get_kb_executor(kb_id)
+        return await self._run_with_stats_refresh(
+            kb_id,
+            kb_instance.delete_virtual_folder(kb_id, parent_id, path_prefix),
+        )
+
     async def delete_file(self, kb_id: str, file_id: str) -> None:
         """删除文件"""
         kb_instance = await self.get_kb_executor(kb_id)

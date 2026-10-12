@@ -132,23 +132,15 @@
                   <span class="file-stat-label">待入库</span>
                 </div>
               </button>
-              <button
-                type="button"
+              <div
                 class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-summary"
-                :class="{ 'file-stat-warning': virtualFolderStatus.has_virtual_folders }"
-                :disabled="!virtualFolderStatus.has_virtual_folders || !canConfigureDatabase"
-                :title="
-                  virtualFolderStatus.has_virtual_folders ? '存在历史虚拟文件夹，点击转换' : ''
-                "
-                @click="virtualFolderModalVisible = true"
               >
-                <CircleAlert v-if="virtualFolderStatus.has_virtual_folders" :size="16" />
-                <FileText v-else :size="16" />
+                <FileText :size="16" />
                 <div class="file-stat-inline">
                   <span class="file-stat-value">{{ fileStats.count }}</span>
                   <span class="file-stat-label">文件</span>
                 </div>
-              </button>
+              </div>
               <div
                 v-if="fileStats.sizeText"
                 class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-summary"
@@ -262,38 +254,6 @@
       :kb-id="kbId"
       @select="onFileSearchSelect"
     />
-
-    <a-modal v-model:open="virtualFolderModalVisible" title="转换历史虚拟文件夹">
-      <p>该知识库存在历史兼容数据创建的虚拟文件夹，需要转换为真实目录结构。</p>
-      <p>
-        转换按批次提交；关闭弹窗或进度连接中断不会撤销已经完成的部分，再次执行会从剩余数据继续。
-      </p>
-      <a-progress
-        v-if="virtualFolderTask"
-        :percent="Math.round(virtualFolderTask.progress || 0)"
-        :status="
-          virtualFolderTask.status === 'failed'
-            ? 'exception'
-            : virtualFolderTask.status === 'success'
-              ? 'success'
-              : 'active'
-        "
-      />
-      <p v-if="virtualFolderTask?.message" class="virtual-folder-migration-message">
-        {{ virtualFolderTask.message }}
-      </p>
-      <template #footer>
-        <a-button @click="virtualFolderModalVisible = false">关闭</a-button>
-        <a-button
-          type="primary"
-          :loading="virtualFolderStarting"
-          :disabled="virtualFolderRunning"
-          @click="startVirtualFolderMigration"
-        >
-          开始转换
-        </a-button>
-      </template>
-    </a-modal>
 
     <a-modal
       v-model:open="mindmapModalVisible"
@@ -451,7 +411,6 @@ import {
   BarChart3,
   ChevronDown,
   ChevronRight,
-  CircleAlert,
   Copy,
   Database as DatabaseIcon,
   FileText,
@@ -613,14 +572,6 @@ const formatTokenStatNumber = (value) => {
 }
 
 const statsRepairing = ref(false)
-const virtualFolderStatus = ref({ has_virtual_folders: false, file_count: 0, remaining_steps: 0 })
-const virtualFolderModalVisible = ref(false)
-const virtualFolderStarting = ref(false)
-const virtualFolderTask = ref(null)
-const virtualFolderStreamController = ref(null)
-const virtualFolderRunning = computed(() =>
-  ['pending', 'running'].includes(virtualFolderTask.value?.status)
-)
 
 const fileStats = computed(() => {
   const stats = store.database.stats || {}
@@ -634,67 +585,6 @@ const fileStats = computed(() => {
     tokenText: formatTokenStatNumber(stats.token_count)
   }
 })
-
-const detectVirtualFolders = async () => {
-  if (!kbId.value || !canConfigureDatabase.value) return
-  try {
-    virtualFolderStatus.value = await databaseApi.detectVirtualFolders(kbId.value)
-  } catch (error) {
-    console.error(error)
-  }
-}
-
-const consumeVirtualFolderEvents = async (taskId) => {
-  virtualFolderStreamController.value?.abort()
-  const controller = new AbortController()
-  virtualFolderStreamController.value = controller
-  try {
-    const response = await databaseApi.streamVirtualFolderMigration(
-      kbId.value,
-      taskId,
-      controller.signal
-    )
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const events = buffer.split('\n\n')
-      buffer = events.pop() || ''
-      for (const event of events) {
-        const data = event
-          .split('\n')
-          .find((line) => line.startsWith('data: '))
-          ?.slice(6)
-        if (data) virtualFolderTask.value = JSON.parse(data)
-      }
-    }
-    await detectVirtualFolders()
-    await store.getDatabaseInfo(undefined, true, true)
-  } catch (error) {
-    if (error.name !== 'AbortError') {
-      console.error(error)
-      message.warning('进度连接已中断，转换任务会继续执行')
-    }
-  }
-}
-
-const startVirtualFolderMigration = async () => {
-  if (!kbId.value || virtualFolderStarting.value || virtualFolderRunning.value) return
-  virtualFolderStarting.value = true
-  try {
-    const result = await databaseApi.startVirtualFolderMigration(kbId.value)
-    virtualFolderTask.value = { status: 'pending', progress: 0, message: '等待任务执行' }
-    consumeVirtualFolderEvents(result.task_id)
-  } catch (error) {
-    console.error(error)
-    message.error(error.message || '启动转换失败')
-  } finally {
-    virtualFolderStarting.value = false
-  }
-}
 
 const repairDatabaseStats = async () => {
   if (!kbId.value || statsRepairing.value) return
@@ -838,9 +728,6 @@ const resetFileSelectionState = () => {
 watch(
   () => route.params.kbId,
   async (nextKbId) => {
-    virtualFolderStreamController.value?.abort()
-    virtualFolderTask.value = null
-    virtualFolderStatus.value = { has_virtual_folders: false, file_count: 0, remaining_steps: 0 }
     isInitialLoad.value = true
     detailLoading.value = true
     store.kbId = nextKbId
@@ -857,7 +744,6 @@ watch(
         await router.replace({ path: '/extensions', query: { tab: 'knowledge' } })
         return
       }
-      await detectVirtualFolders()
       store.startAutoRefresh()
     } finally {
       detailLoading.value = false
@@ -1145,7 +1031,6 @@ onMounted(() => {
 
 onUnmounted(() => {
   store.stopAutoRefresh()
-  virtualFolderStreamController.value?.abort()
   document.removeEventListener('click', onUploadMenuOutsideClick)
 })
 </script>
@@ -1423,11 +1308,6 @@ onUnmounted(() => {
     cursor: not-allowed;
     opacity: 0.6;
   }
-}
-
-.virtual-folder-migration-message {
-  margin-top: 8px;
-  color: var(--gray-600);
 }
 
 .file-stat-repair {

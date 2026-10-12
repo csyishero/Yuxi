@@ -32,6 +32,95 @@ class KnowledgeFileRepository:
             await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(kb_id))))
             yield
 
+    async def persist_uploaded_file_in_tree(
+        self,
+        *,
+        file_id: str,
+        data: dict[str, Any],
+        source_path: str,
+        operator_id: str | None,
+    ) -> str:
+        """在一个知识库目录事务中建立上传目录链及文件记录。"""
+        kb_id = data["kb_id"]
+        parent_id = data.get("parent_id")
+        segments = source_path.split("/")
+        async with pg_manager.get_async_session_context() as session:
+            await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(kb_id))))
+            if parent_id:
+                parent = await session.scalar(
+                    select(KnowledgeFile).where(
+                        KnowledgeFile.kb_id == kb_id,
+                        KnowledgeFile.file_id == parent_id,
+                    )
+                )
+                if parent is None or not parent.is_folder:
+                    raise ValueError("目标文件夹不存在")
+
+            for segment in segments[:-1]:
+                legacy_path = await session.scalar(
+                    select(KnowledgeFile.file_id)
+                    .where(
+                        KnowledgeFile.kb_id == kb_id,
+                        self._parent_condition(parent_id),
+                        KnowledgeFile.filename.like(self._like_prefix(f"{segment}/"), escape="\\"),
+                    )
+                    .limit(1)
+                )
+                if legacy_path:
+                    raise ValueError("旧文件夹正在后台整理，请稍后重试")
+
+                siblings = list(
+                    (
+                        await session.scalars(
+                            select(KnowledgeFile).where(
+                                KnowledgeFile.kb_id == kb_id,
+                                self._parent_condition(parent_id),
+                                KnowledgeFile.filename == segment,
+                            )
+                        )
+                    ).all()
+                )
+                if len(siblings) > 1 or (siblings and not siblings[0].is_folder):
+                    raise ValueError(f"文件夹名称冲突: {segment}")
+                if siblings:
+                    parent_id = siblings[0].file_id
+                    continue
+
+                folder = KnowledgeFile(
+                    file_id=f"folder-{uuid.uuid4()}",
+                    kb_id=kb_id,
+                    parent_id=parent_id,
+                    filename=segment,
+                    path=segment,
+                    file_type="folder",
+                    status="done",
+                    is_folder=True,
+                    file_size=0,
+                    chunk_count=0,
+                    token_count=0,
+                    created_by=operator_id,
+                )
+                session.add(folder)
+                await session.flush()
+                parent_id = folder.file_id
+
+            record_data = self._sanitize_data(data)
+            record_data.update(parent_id=parent_id, filename=segments[-1])
+            existing_folder = await session.scalar(
+                select(KnowledgeFile.file_id)
+                .where(
+                    KnowledgeFile.kb_id == kb_id,
+                    self._parent_condition(parent_id),
+                    KnowledgeFile.filename == segments[-1],
+                    KnowledgeFile.is_folder.is_(True),
+                )
+                .limit(1)
+            )
+            if existing_folder:
+                raise ValueError(f"文件名与文件夹冲突: {segments[-1]}")
+            session.add(KnowledgeFile(file_id=file_id, **record_data))
+        return parent_id
+
     async def detect_virtual_folder_data(self, kb_id: str) -> dict[str, int | bool]:
         """检测仍以相对路径保存的历史文件记录。"""
         path_record = KnowledgeFile.filename.contains("/")
@@ -59,6 +148,54 @@ class KnowledgeFileRepository:
             "file_count": count,
             "remaining_steps": int(remaining_steps or 0),
         }
+
+    async def list_virtual_folder_file_ids(
+        self,
+        *,
+        kb_id: str,
+        parent_id: str | None,
+        path_prefix: str,
+        limit: int = 500,
+    ) -> list[str]:
+        """按真实父目录和虚拟路径前缀读取待删除文件。"""
+        normalized = self._normalize_path_prefix(path_prefix)
+        if not normalized or normalized != path_prefix:
+            raise ValueError("虚拟文件夹路径无效")
+        async with pg_manager.get_async_session_context() as session:
+            if parent_id:
+                parent = await session.scalar(
+                    select(KnowledgeFile.file_id).where(
+                        KnowledgeFile.kb_id == kb_id,
+                        KnowledgeFile.file_id == parent_id,
+                        KnowledgeFile.is_folder.is_(True),
+                    )
+                )
+                if parent is None:
+                    raise ValueError("父文件夹不存在")
+            unknown_type = await session.scalar(
+                select(KnowledgeFile.file_id)
+                .where(
+                    KnowledgeFile.kb_id == kb_id,
+                    self._parent_condition(parent_id),
+                    KnowledgeFile.filename.like(self._like_prefix(normalized), escape="\\"),
+                    KnowledgeFile.is_folder.is_(None),
+                )
+                .limit(1)
+            )
+            if unknown_type:
+                raise ValueError("文件夹包含类型不明的历史记录，删除已停止")
+            records = await session.scalars(
+                select(KnowledgeFile.file_id)
+                .where(
+                    KnowledgeFile.kb_id == kb_id,
+                    self._parent_condition(parent_id),
+                    KnowledgeFile.filename.like(self._like_prefix(normalized), escape="\\"),
+                    KnowledgeFile.is_folder.is_(False),
+                )
+                .order_by(KnowledgeFile.file_id)
+                .limit(limit)
+            )
+            return list(records.all())
 
     async def migrate_virtual_folder_batch(
         self,

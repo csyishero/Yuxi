@@ -10,7 +10,7 @@ Owner：backend/package/yuxi/services/knowledge_folder_service.py
 
 ## 决策
 
-知识库详情调用临时检测接口识别仍含路径段的文件。存在历史数据时，文件数统计卡显示 warning 图标和样式；具备管理权限的用户点击后通过弹窗启动知识库级唯一迁移任务。
+知识库级迁移由管理者显式调用后台任务接口，前端文件列表不在页面进入时启动任务。虚拟目录在用户确认删除时按所选目录前缀执行删除，行为由[目录上传与按需删除决策](2026-10-12-knowledge-folder-upload.md)说明。
 
 任务每批扫描最多 500 条文件，每个事务在知识库目录树锁内只剥离一层路径，复用同名真实文件夹或以任务启动者作为 `created_by` 创建目录，再提交文件的新 `parent_id` 和剩余名称。SSE 只轮询并发布任务快照，连接断开不取消任务。进程中断或冲突不回滚已经提交的批次，再次启动从仍包含路径段的数据继续。
 
@@ -24,7 +24,7 @@ Owner：backend/package/yuxi/services/knowledge_folder_service.py
 
 ## 后果
 
-迁移允许部分完成且可重复执行，数据库已提交批次是恢复事实。检测接口和 warning 卡在剩余路径归零后消失。新的目录上传自动实体化仍由[路径型目录实体化提案](../proposed/2026-08-24-knowledge-folder-materialization.md)跟踪。
+迁移允许部分完成且可重复执行，数据库已提交批次是恢复事实。新目录上传的行为由[目录上传与按需删除决策](2026-10-12-knowledge-folder-upload.md)说明。
 
 ## 验证
 

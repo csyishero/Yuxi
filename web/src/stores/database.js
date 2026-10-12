@@ -222,6 +222,25 @@ export const useDatabaseStore = defineStore('database', () => {
     }
   }
 
+  async function deleteVirtualFolder(record) {
+    state.lock = true
+    try {
+      await documentApi.deleteVirtualFolder(kbId.value, record.parent_id, record.path_prefix)
+    } catch (error) {
+      console.error(error)
+      message.error(error.message || '删除失败')
+      throw error
+    } finally {
+      try {
+        await getDatabaseInfo(undefined, true)
+        await loadDocumentFiles({ isBackground: true })
+      } catch (refreshError) {
+        console.error(refreshError)
+      }
+      state.lock = false
+    }
+  }
+
   function handleDeleteFile(fileId) {
     Modal.confirm({
       title: '删除文件',
@@ -847,6 +866,7 @@ export const useDatabaseStore = defineStore('database', () => {
     updateDatabaseInfo,
     deleteDatabase,
     deleteFile,
+    deleteVirtualFolder,
     handleDeleteFile,
     handleBatchDelete,
     addFiles,

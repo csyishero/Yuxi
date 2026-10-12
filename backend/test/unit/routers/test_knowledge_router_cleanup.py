@@ -675,6 +675,18 @@ async def test_virtual_folder_migration_uses_registered_durable_handler(monkeypa
     )
 
 
+@pytest.mark.parametrize("source_path", ["/absolute/a.md", "folder/../a.md", "folder//a.md", "", None])
+async def test_folder_upload_rejects_unsafe_paths_before_queueing(source_path):
+    """目录清单中的非法路径在创建任务前被拒绝。"""
+    item = "minio://knowledgebases/kb_1/upload/a.md"
+    with pytest.raises(HTTPException) as error:
+        knowledge_router._validate_uploaded_document_items(
+            [item],
+            {"content_hashes": {item: "hash-a"}, "source_paths": {item: source_path}},
+        )
+    assert error.value.status_code == 400
+
+
 async def test_parse_documents_accepts_payload_with_params(monkeypatch):
     """parse_documents 支持传入包含 params 的对象并更新文件参数。"""
     captured = {"updated": [], "parsed": []}
