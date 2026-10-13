@@ -25,6 +25,7 @@ from yuxi.services.agent_request_queue_service import (
     stream_request_events,
 )
 from yuxi.services.agent_config_service import prepare_agent_config_write
+from yuxi.services.mcp_reference_service import get_visible_mcp_reference_slugs, project_mcp_references
 from yuxi.services.agent_run_service import (
     cancel_agent_run_view,
     create_resume_run_view,
@@ -103,6 +104,7 @@ async def _serialize_agent(
     *,
     include_configurable_items: bool = False,
     backend_info_cache: dict[tuple[str, bool, str], dict] | None = None,
+    visible_mcp_slugs: set[str] | None = None,
 ) -> dict:
     data = await repo.serialize(
         item,
@@ -111,6 +113,11 @@ async def _serialize_agent(
         backend_info_cache=backend_info_cache,
     )
     data["config_json"] = _filter_agent_config_json(item.backend_id, data.get("config_json"))
+    context = data["config_json"].get("context")
+    if isinstance(context, dict) and isinstance(context.get("mcps"), list) and context["mcps"]:
+        if visible_mcp_slugs is None and user.role not in {"admin", "superadmin"}:
+            visible_mcp_slugs = await get_visible_mcp_reference_slugs(repo.db, user)
+        context["mcps"] = project_mcp_references(context["mcps"], visible_mcp_slugs)
     return data
 
 
@@ -142,7 +149,22 @@ async def list_agents(
     await repo.ensure_default_agent()
     items = await repo.list_visible(user=current_user, include_subagent_definitions=include_subagents)
     backend_info_cache: dict[tuple[str, bool, str], dict] = {}
-    agents = [await _serialize_agent(repo, item, current_user, backend_info_cache=backend_info_cache) for item in items]
+    has_mcp_references = any(
+        isinstance((getattr(item, "config_json", None) or {}).get("context"), dict)
+        and (item.config_json["context"].get("mcps") or [])
+        for item in items
+    )
+    visible_mcp_slugs = await get_visible_mcp_reference_slugs(db, current_user) if has_mcp_references else None
+    agents = [
+        await _serialize_agent(
+            repo,
+            item,
+            current_user,
+            backend_info_cache=backend_info_cache,
+            visible_mcp_slugs=visible_mcp_slugs,
+        )
+        for item in items
+    ]
     return {"agents": agents}
 
 

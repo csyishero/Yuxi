@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from yuxi.agents.mcp import service as mcp_service
 from yuxi.storage.postgres import manager as postgres_manager
-from yuxi.storage.postgres.models_business import MCPServer
+from yuxi.storage.postgres.models_business import Department, MCPServer, User
 
 
 class _AsyncSessionContext:
@@ -34,6 +34,8 @@ class _FailingSessionContext:
 async def mcp_session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
+        await conn.run_sync(Department.__table__.create)
+        await conn.run_sync(User.__table__.create)
         await conn.run_sync(MCPServer.__table__.create)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -49,6 +51,174 @@ class _FakeClient:
 
     async def get_tools(self):
         return self._tools
+
+
+async def test_mcp_new_server_is_private_and_sharing_requires_management(mcp_session):
+    mcp_session.add_all(
+        [
+            Department(id=1, name="研发"),
+            Department(id=2, name="市场"),
+            User(uid="user-1", username="Alice", password_hash="x", department_id=1),
+            User(uid="user-2", username="Other", password_hash="x", department_id=2),
+        ]
+    )
+    await mcp_session.commit()
+    server = await mcp_service.create_mcp_server(
+        mcp_session,
+        slug="new-private",
+        name="New private",
+        transport="streamable_http",
+        url="https://example.com/mcp",
+        created_by="admin",
+    )
+    assert server.share_config == {"version": 2, "read_scope": None, "edit_scope": None, "manage_scope": None}
+    server_slug = server.slug
+
+    user = SimpleNamespace(uid="user-1", username="Alice", role="user", department_id=1)
+    with pytest.raises(mcp_service.MCPServerNotFoundError, match="does not exist"):
+        await mcp_service.update_mcp_share_config(
+            mcp_session,
+            slug=server_slug,
+            share_config={
+                "version": 2,
+                "read_scope": {"access_level": "global"},
+                "edit_scope": None,
+                "manage_scope": None,
+            },
+            operator=user,
+        )
+    await mcp_session.rollback()
+
+    admin = SimpleNamespace(uid="admin", username="admin", role="admin", department_id=1)
+    updated = await mcp_service.update_mcp_share_config(
+        mcp_session,
+        slug=server_slug,
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "global"},
+            "edit_scope": {"access_level": "global"},
+            "manage_scope": {"access_level": "user", "user_uids": ["user-1"]},
+        },
+        operator=admin,
+    )
+    assert updated.updated_by == "admin"
+    assert await mcp_service.get_usable_mcp_server_slugs(mcp_session, user) == {"new-private"}
+
+    with pytest.raises(PermissionError, match="全员授权"):
+        await mcp_service.update_mcp_share_config(
+            mcp_session,
+            slug=server_slug,
+            share_config={
+                "version": 2,
+                "read_scope": {"access_level": "user", "user_uids": ["user-1"]},
+                "edit_scope": {"access_level": "user", "user_uids": ["user-1"]},
+                "manage_scope": {"access_level": "user", "user_uids": ["user-1"]},
+            },
+            operator=user,
+        )
+    await mcp_session.rollback()
+
+    await mcp_service.update_mcp_share_config(
+        mcp_session,
+        slug=server_slug,
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "department", "department_ids": [1]},
+            "edit_scope": {"access_level": "user", "user_uids": ["user-1"]},
+            "manage_scope": {"access_level": "user", "user_uids": ["user-1"]},
+        },
+        operator=admin,
+    )
+    with pytest.raises(PermissionError, match="只能给本部门授权"):
+        await mcp_service.update_mcp_share_config(
+            mcp_session,
+            slug=server_slug,
+            share_config={
+                "version": 2,
+                "read_scope": {"access_level": "user", "user_uids": ["user-2"]},
+                "edit_scope": None,
+                "manage_scope": None,
+            },
+            operator=user,
+        )
+    await mcp_session.rollback()
+
+    delegated = await mcp_service.update_mcp_share_config(
+        mcp_session,
+        slug=server_slug,
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "user", "user_uids": ["user-1"]},
+            "edit_scope": {"access_level": "user", "user_uids": ["user-1"]},
+            "manage_scope": {"access_level": "user", "user_uids": ["user-1"]},
+        },
+        operator=user,
+    )
+    assert delegated.updated_by == "Alice"
+
+    outsider = SimpleNamespace(uid="other", username="Other", role="user", department_id=2)
+    assert await mcp_service.get_usable_mcp_server_slugs(mcp_session, outsider) == set()
+
+
+async def test_mcp_sharing_rejects_use_without_view(mcp_session):
+    server = await mcp_service.create_mcp_server(
+        mcp_session,
+        slug="new-private",
+        name="New private",
+        transport="streamable_http",
+        url="https://example.com/mcp",
+        created_by="admin",
+    )
+    admin = SimpleNamespace(uid="admin", username="admin", role="admin", department_id=1)
+    server_slug = server.slug
+
+    with pytest.raises(ValueError, match="查看范围"):
+        await mcp_service.update_mcp_share_config(
+            mcp_session,
+            slug=server_slug,
+            share_config={
+                "version": 2,
+                "read_scope": None,
+                "edit_scope": {"access_level": "global"},
+                "manage_scope": None,
+            },
+            operator=admin,
+        )
+    await mcp_session.rollback()
+
+    reloaded = await mcp_service.get_mcp_server(mcp_session, server_slug)
+    assert reloaded.share_config["read_scope"] is None
+
+    for member_scope in (
+        {"access_level": "department", "department_ids": 1},
+        {"access_level": "user", "user_uids": 1},
+    ):
+        with pytest.raises(ValueError, match="必须是数组"):
+            await mcp_service.update_mcp_share_config(
+                mcp_session,
+                slug=server_slug,
+                share_config={
+                    "version": 2,
+                    "read_scope": member_scope,
+                    "edit_scope": None,
+                    "manage_scope": None,
+                },
+                operator=admin,
+            )
+        await mcp_session.rollback()
+
+    with pytest.raises(ValueError, match="只能授予指定用户"):
+        await mcp_service.update_mcp_share_config(
+            mcp_session,
+            slug=server_slug,
+            share_config={
+                "version": 2,
+                "read_scope": {"access_level": "global"},
+                "edit_scope": {"access_level": "global"},
+                "manage_scope": {"access_level": "global"},
+            },
+            operator=admin,
+        )
 
 
 async def test_ensure_builtin_mcp_servers_removes_retired_system_servers(monkeypatch, mcp_session):
@@ -89,6 +259,30 @@ async def test_ensure_builtin_mcp_servers_removes_retired_system_servers(monkeyp
         select(MCPServer).where(MCPServer.slug.in_(("sequentialthinking", "mcp-server-chart")))
     )
     assert list(remaining) == []
+
+
+async def test_new_builtin_mcp_is_private_without_rewriting_existing_sharing(monkeypatch, mcp_session):
+    monkeypatch.setattr(
+        mcp_service,
+        "_DEFAULT_MCP_SERVERS",
+        {"builtin-demo": {"name": "Built-in demo", "transport": "streamable_http", "url": "https://example.com/mcp"}},
+    )
+    monkeypatch.setattr(mcp_service, "_BUILTIN_MCP_SERVER_SLUGS", ("builtin-demo",))
+    monkeypatch.setattr(
+        postgres_manager.pg_manager,
+        "get_async_session_context",
+        lambda: _AsyncSessionContext(mcp_session),
+    )
+
+    await mcp_service.ensure_builtin_mcp_servers_in_db()
+    server = await mcp_session.scalar(select(MCPServer).where(MCPServer.slug == "builtin-demo"))
+    assert server.share_config == {"version": 2, "read_scope": None, "edit_scope": None, "manage_scope": None}
+
+    server.share_config = None
+    await mcp_session.commit()
+    await mcp_service.ensure_builtin_mcp_servers_in_db()
+    await mcp_session.refresh(server)
+    assert server.share_config is None
 
 
 async def test_ensure_builtin_mcp_servers_preserves_user_server_with_retired_slug(monkeypatch, mcp_session):

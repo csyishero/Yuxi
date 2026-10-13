@@ -70,7 +70,7 @@ kb_tools = get_common_kb_tools()
 1. `prepare_agent_runtime_context` 按当前用户权限过滤工具、知识库、MCP、Skills 和子智能体。
 2. `resolve_configured_runtime_tools(context)` 注册 Agent 配置和可见 Skill 依赖的可执行本地工具，并加载配置的 MCP 工具。
 3. `SkillsMiddleware` 根据当前已预加载或已激活的 Skill，向模型请求开放相应工具 schema。
-4. 工具执行器再次检查具体文件、知识库、MCP 和用户身份。
+4. 文件和知识库等工具在执行处检查具体目标和当前身份；MCP 在每次工具调用前复核服务授权和启停状态。
 
 ```text
 Agent 配置 + 用户权限
@@ -79,14 +79,14 @@ Agent 配置 + 用户权限
         ↓
 可执行工具注册 ──→ Skill 激活门控 ──→ 模型可见工具
         ↓
-执行处的目标授权
+执行处的目标授权（文件、知识库等）
 ```
 
 “可执行”与“模型可见”是两件事：工具可以先注册到 ToolNode，等 Skill 激活后才对模型开放；模型看见某个工具也不代表它可以访问任意资源。
 
 ## MCP 和 Skills
 
-MCP 工具由已启用的 MCP 服务器提供，服务器配置和工具禁用列表由 MCP 管理链路读取。Skills 可以声明本地工具、MCP 和其他 Skill 依赖：预加载 Skill 从首轮开放依赖，普通 Skill 在读取 `SKILL.md` 激活后开放依赖。
+MCP 工具由已启用且当前用户有使用权的 MCP 服务器提供，服务器配置和工具禁用列表由 MCP 管理链路读取。Skills 可以声明本地工具、MCP 和其他 Skill 依赖：预加载 Skill 从首轮开放依赖，普通 Skill 在读取 `SKILL.md` 激活后开放依赖。已装配工具在每次调用前复核授权；撤权或停用后，下次调用会被拒绝，已有运行图不会自动中断。
 
 - 工具实现放在 `toolkits`；
 - Skill 的使用说明和依赖放在 Skill 目录；

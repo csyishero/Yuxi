@@ -34,6 +34,7 @@ def _build_app(*, allow_admin: bool = True) -> FastAPI:
             uid="admin" if allow_admin else "user",
             password_hash="x",
             role="admin" if allow_admin else "user",
+            department_id=1,
         )
 
     app.dependency_overrides[get_db] = fake_db
@@ -146,8 +147,190 @@ def test_get_mcp_servers_normal_user_is_stripped(monkeypatch):
     assert "headers" not in data_user
     assert "transport" not in data_user  # NOTE: 进一步验证连 transport 等配置层元数据也一并过滤
     assert data_user["name"] == "test-mcp"
+    assert data_user["slug"] == "test-mcp"
+    assert data_user["permission"] == "edit"
+    assert data_user["can_manage_sharing"] is False
     assert data_user["description"] == "test mcp description"
     assert data_user["enabled"] is True
+
+
+def test_mcp_list_and_detail_hide_private_servers_and_connection_secrets(monkeypatch):
+    class DummyServer:
+        slug = "scoped-mcp"
+        name = "Scoped MCP"
+        description = "description"
+        icon = None
+        tags = []
+        transport = "streamable_http"
+        enabled = 1
+        share_config = {
+            "version": 2,
+            "read_scope": {"access_level": "user", "user_uids": ["user"]},
+            "edit_scope": {"access_level": "user", "user_uids": ["user"]},
+            "manage_scope": None,
+        }
+
+        def to_dict(self):
+            return {"slug": self.slug, "url": "https://secret.example/mcp", "headers": {"Authorization": "secret"}}
+
+    server = DummyServer()
+
+    async def fake_list(_db):
+        return [server]
+
+    async def fake_get(_db, _slug):
+        return server
+
+    monkeypatch.setattr("server.routers.mcp_router.get_all_mcp_servers", fake_list)
+    monkeypatch.setattr("server.routers.mcp_router.get_mcp_server", fake_get)
+    client = TestClient(_build_app(allow_admin=False))
+
+    listed = client.get("/api/system/mcp-servers")
+    assert listed.status_code == 200
+    assert listed.json()["data"] == [
+        {
+            "slug": "scoped-mcp",
+            "name": "Scoped MCP",
+            "description": "description",
+            "icon": None,
+            "enabled": True,
+            "tags": [],
+            "permission": "edit",
+            "can_manage_sharing": False,
+        }
+    ]
+
+    detail = client.get("/api/system/mcp-servers/scoped-mcp")
+    assert detail.status_code == 200
+    assert detail.json()["data"] == listed.json()["data"][0]
+    assert "secret" not in detail.text
+
+    server.share_config = {"version": 2, "read_scope": None, "edit_scope": None, "manage_scope": None}
+    assert client.get("/api/system/mcp-servers").json()["data"] == []
+    assert client.get("/api/system/mcp-servers/scoped-mcp").status_code == 404
+    assert client.get("/api/system/mcp-servers/scoped-mcp/sharing/options").status_code == 404
+
+
+def test_mcp_tools_require_use_scope_and_sharing_requires_manage(monkeypatch):
+    class DummyServer:
+        slug = "scoped-mcp"
+        name = "Scoped MCP"
+        description = None
+        icon = None
+        tags = []
+        transport = "streamable_http"
+        enabled = 1
+        disabled_tools = []
+        share_config = {
+            "version": 2,
+            "read_scope": {"access_level": "global"},
+            "edit_scope": None,
+            "manage_scope": None,
+        }
+
+        def to_dict(self):
+            return {"url": "https://secret.example/mcp", "headers": {"Authorization": "secret"}}
+
+    server = DummyServer()
+    tool_calls = []
+
+    async def fake_get(_db, _slug):
+        return server
+
+    async def fake_tools(_slug):
+        tool_calls.append(_slug)
+        return []
+
+    monkeypatch.setattr("server.routers.mcp_router.get_mcp_server", fake_get)
+    monkeypatch.setattr("server.routers.mcp_router.get_all_mcp_tools", fake_tools)
+    client = TestClient(_build_app(allow_admin=False))
+
+    assert client.get("/api/system/mcp-servers/scoped-mcp/tools").status_code == 403
+    assert client.get("/api/system/mcp-servers/scoped-mcp/sharing/options").status_code == 403
+    assert tool_calls == []
+
+    server.share_config["edit_scope"] = {"access_level": "global"}
+    tools = client.get("/api/system/mcp-servers/scoped-mcp/tools")
+    assert tools.status_code == 200
+    assert tools.json()["data"] == []
+    assert tool_calls == ["scoped-mcp"]
+
+    async def failing_tools(_slug):
+        raise RuntimeError("Bearer secret https://secret.example/mcp")
+
+    monkeypatch.setattr("server.routers.mcp_router.get_all_mcp_tools", failing_tools)
+    failed = client.get("/api/system/mcp-servers/scoped-mcp/tools")
+    assert failed.status_code == 500
+    assert failed.json()["detail"] == "获取工具失败"
+    assert "secret" not in failed.text
+
+
+def test_mcp_delegated_manager_gets_sharing_without_connection_secrets(monkeypatch):
+    from types import SimpleNamespace
+
+    class DummyServer:
+        slug = "shared-mcp"
+        name = "Shared MCP"
+        description = None
+        icon = None
+        tags = []
+        transport = "streamable_http"
+        enabled = 1
+        share_config = {
+            "version": 2,
+            "read_scope": {"access_level": "global"},
+            "edit_scope": {"access_level": "global"},
+            "manage_scope": {"access_level": "user", "user_uids": ["user"]},
+        }
+
+        def to_dict(self):
+            return {"url": "https://secret.example/mcp", "headers": {"Authorization": "secret"}}
+
+    server = DummyServer()
+
+    async def fake_get(_db, _slug):
+        return server
+
+    async def fake_department(_self, department_id):
+        assert department_id == 1
+        return SimpleNamespace(id=1, name="研发")
+
+    async def fake_users(_self, *, limit, department_id):
+        assert limit is None
+        assert department_id == 1
+        return [(SimpleNamespace(uid="user", username="Alice", role="user", department_id=1), "研发")]
+
+    monkeypatch.setattr("server.routers.mcp_router.get_mcp_server", fake_get)
+    monkeypatch.setattr("yuxi.agents.mcp.service.DepartmentRepository.get_by_id", fake_department)
+    monkeypatch.setattr("yuxi.agents.mcp.service.UserRepository.list_with_department", fake_users)
+    client = TestClient(_build_app(allow_admin=False))
+
+    detail = client.get("/api/system/mcp-servers/shared-mcp")
+    assert detail.status_code == 200
+    data = detail.json()["data"]
+    assert data["permission"] == "manage"
+    assert data["can_manage_sharing"] is True
+    assert "share_config" not in data
+    assert "secret" not in detail.text
+
+    options = client.get("/api/system/mcp-servers/shared-mcp/sharing/options")
+    assert options.status_code == 200
+    assert options.json() == {
+        "success": True,
+        "data": {
+            "departments": [{"id": 1, "name": "研发"}],
+            "users": [
+                {"uid": "user", "username": "Alice", "role": "user", "department_id": 1, "department_name": "研发"}
+            ],
+            "share_config": {
+                "version": 2,
+                "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []},
+                "edit_scope": {"access_level": "global", "department_ids": [], "user_uids": []},
+                "manage_scope": {"access_level": "user", "department_ids": [], "user_uids": ["user"]},
+            },
+            "protected_scopes": {"read_scope": True, "edit_scope": True, "manage_scope": False},
+        },
+    }
 
 
 def test_create_mcp_server_rejects_extra_config_fields():

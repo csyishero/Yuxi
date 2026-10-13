@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from importlib import import_module
 import io
 import shutil
 import zipfile
@@ -156,7 +157,10 @@ async def test_personal_skill_dependencies_are_saved_for_owner_and_rejected_for_
     source = service.get_personal_skills_root_dir("alice") / "credit-check"
     source.mkdir(parents=True)
     skill_file = source / "SKILL.md"
-    skill_file.write_text("---\nname: credit-check\ndescription: test\n---\n# Credit\n", encoding="utf-8")
+    skill_file.write_text(
+        "---\nname: credit-check\ndescription: test\nmcp_dependencies:\n- read-only\n- legacy-private\n---\n# Credit\n",
+        encoding="utf-8",
+    )
     current = User(uid="alice", username="alice", password_hash="x", role="user", department_id=1)
 
     department_skill = service.Skill(
@@ -171,11 +175,16 @@ async def test_personal_skill_dependencies_are_saved_for_owner_and_rejected_for_
     async def shared_skills(_db, _user):
         return [department_skill]
 
-    async def enabled_mcps(*, db):
-        return []
+    async def usable_mcps(db, user):
+        return set()
+
+    async def visible_mcps(db, user):
+        return {"read-only"}
 
     monkeypatch.setattr(service, "_list_accessible_shared_skills", shared_skills)
-    monkeypatch.setattr(service, "get_enabled_mcp_server_slugs", enabled_mcps)
+    monkeypatch.setattr(service, "get_usable_mcp_server_slugs", usable_mcps)
+    monkeypatch.setattr(service, "get_visible_mcp_reference_slugs", visible_mcps)
+    monkeypatch.setattr(import_module("server.routers.skill_router"), "get_visible_mcp_reference_slugs", visible_mcps)
     monkeypatch.setattr(service, "_get_all_tool_names", lambda: ["calculator"])
 
     app = FastAPI()
@@ -197,8 +206,11 @@ async def test_personal_skill_dependencies_are_saved_for_owner_and_rejected_for_
         )
         assert saved.status_code == 200, saved.text
         assert saved.json()["data"]["tool_dependencies"] == ["calculator"]
+        assert saved.json()["data"]["mcp_dependencies"] == []
         assert (await service.list_personal_skills("alice"))[0].tool_dependencies == ["calculator"]
         assert "tool_dependencies:\n- calculator" in skill_file.read_text(encoding="utf-8")
+        assert "- legacy-private" in skill_file.read_text(encoding="utf-8")
+        assert "- read-only" not in skill_file.read_text(encoding="utf-8")
 
         department_dependency = await client.put(
             url,
@@ -215,6 +227,10 @@ async def test_personal_skill_dependencies_are_saved_for_owner_and_rejected_for_
         before = skill_file.read_text(encoding="utf-8")
         invalid = await client.put(url, json={"tool_dependencies": ["unknown-tool"]})
         assert invalid.status_code == 400, invalid.text
+        assert skill_file.read_text(encoding="utf-8") == before
+
+        forbidden_mcp = await client.put(url, json={"mcp_dependencies": ["never-granted"]})
+        assert forbidden_mcp.status_code == 400, forbidden_mcp.text
         assert skill_file.read_text(encoding="utf-8") == before
 
         current = User(uid="bob", username="bob", password_hash="x", role="user")

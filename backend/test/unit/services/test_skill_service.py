@@ -670,6 +670,100 @@ def test_unchanged_skill_projection_does_not_create_staging(tmp_path: Path, monk
     assert sorted(path.name for path in projection.iterdir()) == ["demo"]
 
 
+def test_user_skill_projection_redacts_private_mcp_frontmatter_and_tracks_visibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "sources/demo"
+    source.mkdir(parents=True)
+    original = (
+        "---\nname: demo\ndescription: Demo\n"
+        "mcp_dependencies: [read-only-mcp, private-mcp]\n---\n"
+        "The author's body can mention private-mcp.\n"
+    )
+    source_file = source / "SKILL.md"
+    source_file.write_text(original, encoding="utf-8")
+    source_file.chmod(0o444)
+
+    copied_to: list[Path] = []
+    original_copy = svc.copy_skill_tree_no_symlinks
+
+    def copy_into_private_staging(source_dir: Path, target_dir: Path, **kwargs) -> None:
+        copied_to.append(target_dir)
+        assert target_dir.parent == tmp_path / "skill-projections/.staging"
+        assert target_dir.parent.stat().st_mode & 0o077 == 0
+        original_copy(source_dir, target_dir, **kwargs)
+        assert "private-mcp" not in (target_dir / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[1]
+
+    monkeypatch.setattr(svc, "copy_skill_tree_no_symlinks", copy_into_private_staging)
+
+    projection = svc.sync_user_accessible_skills("user-1", {"demo": source}, {"read-only-mcp"})
+    skill_file = projection / "demo/SKILL.md"
+    projected = skill_file.read_text(encoding="utf-8")
+    frontmatter, body = projected.split("---", 2)[1:]
+    assert "read-only-mcp" in frontmatter
+    assert "private-mcp" not in frontmatter
+    assert "private-mcp" in body
+    assert (source / "SKILL.md").read_text(encoding="utf-8") == original
+    assert skill_file.stat().st_mode & 0o777 == 0o444
+    assert len(copied_to) == 1
+    assert sorted(path.name for path in projection.iterdir()) == ["demo"]
+
+    original_inode = skill_file.stat().st_ino
+    svc.sync_user_accessible_skills("user-1", {"demo": source}, {"read-only-mcp"})
+    assert skill_file.stat().st_ino == original_inode
+
+    svc.sync_user_accessible_skills("user-1", {"demo": source}, set())
+    assert "read-only-mcp" not in skill_file.read_text(encoding="utf-8").split("---", 2)[1]
+    assert "private-mcp" not in skill_file.read_text(encoding="utf-8").split("---", 2)[1]
+    assert len(copied_to) == 2
+
+    default_projection = svc.sync_user_accessible_skills("user-2", {"demo": source})
+    default_frontmatter = (default_projection / "demo/SKILL.md").read_text(encoding="utf-8").split("---", 2)[1]
+    assert "read-only-mcp" not in default_frontmatter
+    assert "private-mcp" not in default_frontmatter
+
+
+def test_user_skill_projection_rebuilds_and_revokes_legacy_read_only_directories(tmp_path: Path):
+    source = tmp_path / "sources/demo"
+    nested = source / "references"
+    nested.mkdir(parents=True)
+    (source / "SKILL.md").write_text("# before\n", encoding="utf-8")
+    (nested / "note.txt").write_text("source file\n", encoding="utf-8")
+    source.chmod(0o555)
+    nested.chmod(0o555)
+
+    projection = svc.sync_user_accessible_skills("user-1", {"demo": source})
+    projected_skill = projection / "demo"
+    assert projected_skill.stat().st_mode & 0o700 == 0o700
+    assert (projected_skill / "references").stat().st_mode & 0o700 == 0o700
+    assert source.stat().st_mode & 0o777 == 0o555
+    assert nested.stat().st_mode & 0o777 == 0o555
+
+    # 模拟升级前已经物化的只读目录；新内容仍须能替换，随后撤权能删除。
+    projected_skill.chmod(0o555)
+    (projected_skill / "references").chmod(0o555)
+    (source / "SKILL.md").write_text("# after\n", encoding="utf-8")
+    svc.sync_user_accessible_skills("user-1", {"demo": source})
+    assert (projected_skill / "SKILL.md").read_text(encoding="utf-8") == "# after\n"
+    assert projected_skill.stat().st_mode & 0o700 == 0o700
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "untouched.txt").write_text("untouched\n", encoding="utf-8")
+    (projected_skill / "references/escape").symlink_to(outside, target_is_directory=True)
+    projected_skill.chmod(0o555)
+    (projected_skill / "references").chmod(0o555)
+    svc.sync_user_accessible_skills("user-1", {})
+    assert not projected_skill.exists()
+    assert (outside / "untouched.txt").read_text(encoding="utf-8") == "untouched\n"
+
+    # 审核快照仍保留来源权限，不受用户投影清理策略影响。
+    snapshot = tmp_path / "snapshot"
+    svc.copy_skill_tree_no_symlinks(source, snapshot)
+    assert snapshot.stat().st_mode & 0o777 == 0o555
+    assert (snapshot / "references").stat().st_mode & 0o777 == 0o555
+
+
 @pytest.mark.parametrize("linked_side", ["source", "projection"])
 def test_projection_comparison_does_not_accept_equal_symlink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked_side: str
@@ -717,7 +811,7 @@ async def test_sync_user_accessible_skills_async_runs_in_thread(monkeypatch: pyt
     assert calls == [
         (
             svc.sync_user_accessible_skills,
-            ("user-1", {"alpha": "/tmp/alpha"}),
+            ("user-1", {"alpha": "/tmp/alpha"}, frozenset()),
         )
     ]
 
@@ -969,13 +1063,13 @@ async def test_refresh_user_skill_projection_serializes_authorization_snapshots(
 
     async def get_user(_self, _db, uid):
         assert uid == "user-1"
-        return SimpleNamespace(is_deleted=0)
+        return SimpleNamespace(is_deleted=0, role="admin")
 
     async def list_shared(_db, _user, *, require_enabled=True):
         del require_enabled
         return list(current_items)
 
-    async def to_thread(_func, _uid, sources):
+    async def to_thread(_func, _uid, sources, _visible_mcp_slugs):
         if not synchronized_sources:
             first_sync_started.set()
             await allow_first_sync.wait()
@@ -1023,7 +1117,7 @@ async def test_refresh_user_skill_projection_excludes_personal_skills(monkeypatc
             return None
 
     async def get_user(_self, _db, _uid):
-        return SimpleNamespace(is_deleted=0)
+        return SimpleNamespace(is_deleted=0, role="admin")
 
     async def list_shared(_db, _user, *, require_enabled=True):
         del require_enabled
@@ -1032,7 +1126,7 @@ async def test_refresh_user_skill_projection_excludes_personal_skills(monkeypatc
     async def fail_combined_list(*_args, **_kwargs):
         raise AssertionError("共享投影不得扫描或合并个人 Skill")
 
-    async def sync_projection(_uid, sources):
+    async def sync_projection(_uid, sources, _visible_mcp_slugs):
         synchronized_sources.append(dict(sources))
 
     monkeypatch.setattr(postgres_manager.pg_manager, "get_async_session_context", lambda: FakeSessionContext())
@@ -1059,11 +1153,11 @@ async def test_get_skill_dependency_options(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(tool_service, "get_tool_metadata", fake_get_tool_metadata)
 
-    async def fake_get_enabled_mcp_server_slugs(db=None):
-        del db
-        return ["mcp-a", "mcp-b"]
+    async def fake_get_usable_mcp_server_slugs(db, user):
+        assert user.uid == "user"
+        return {"mcp-a", "mcp-b"}
 
-    monkeypatch.setattr(svc, "get_enabled_mcp_server_slugs", fake_get_enabled_mcp_server_slugs)
+    monkeypatch.setattr(svc, "get_usable_mcp_server_slugs", fake_get_usable_mcp_server_slugs)
 
     user = SimpleNamespace(uid="user")
 
@@ -1474,11 +1568,11 @@ async def test_update_skill_dependencies(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(tool_service, "get_tool_metadata", fake_get_tool_metadata)
 
-    async def fake_get_enabled_mcp_server_slugs(db=None):
-        del db
-        return ["mcp-a"]
+    async def fake_get_usable_mcp_server_slugs(db, user):
+        assert user.uid == "root"
+        return {"mcp-a"}
 
-    monkeypatch.setattr(svc, "get_enabled_mcp_server_slugs", fake_get_enabled_mcp_server_slugs)
+    monkeypatch.setattr(svc, "get_usable_mcp_server_slugs", fake_get_usable_mcp_server_slugs)
 
     async def fake_get_skill_or_raise(_db, _operator, slug: str):
         assert slug == "alpha"
@@ -1531,6 +1625,16 @@ async def test_update_skill_dependencies(monkeypatch: pytest.MonkeyPatch):
     assert captured["skill_dependencies"] == ["beta"]
     assert captured["updated_by"] == "root"
     assert updated.skill_dependencies == ["beta"]
+
+    with pytest.raises(ValueError, match="无效 MCP 依赖: mcp-b"):
+        await svc.update_skill_dependencies(
+            _UnitOfWork(),
+            slug="alpha",
+            tool_dependencies=[],
+            mcp_dependencies=["mcp-b"],
+            skill_dependencies=[],
+            operator=_user("root"),
+        )
 
 
 def test_skill_dependency_scope_covers_read_and_manage_audiences():

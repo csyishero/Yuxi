@@ -5,13 +5,26 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import text
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+from langchain_core.tools import StructuredTool
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from yuxi.agents.mcp import service as mcp_service
+from yuxi.agents.toolkits import service as tool_service
+from yuxi.permissions import ResourcePermissionDenied, normalize_permission_config
 from yuxi.storage.postgres.manager import BUSINESS_SCHEMA_VERSION, KNOWLEDGE_SCHEMA_VERSION, PostgresManager
+from yuxi.storage.postgres.manager import pg_manager
+from yuxi.storage.postgres.models_business import Department, MCPServer, User
 from yuxi.storage.postgres.models_knowledge import KnowledgeBase
+
+from server.routers.mcp_router import mcp
+from server.utils.auth_middleware import get_db, get_required_user
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -273,7 +286,7 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
             "ix_scheduled_agent_runs_job_created",
             "ix_scheduled_agent_runs_dispatching",
         }.issubset(scheduled_indexes)
-        assert BUSINESS_SCHEMA_VERSION == 8
+        assert BUSINESS_SCHEMA_VERSION == 10
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 
@@ -332,8 +345,374 @@ async def test_skill_share_request_table_migrates_from_previous_business_schema(
             )
         assert nullable == "YES"
         assert "uq_skill_share_requests_pending" in indexes
-        assert BUSINESS_SCHEMA_VERSION == 8
+        assert BUSINESS_SCHEMA_VERSION == 10
         assert (await manager.get_schema_versions())["business"] == 8
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
+async def test_skill_share_reason_migrates_v9_rows_without_inventing_history() -> None:
+    """v9 历史申请保留审核信息，原因仍为空；新列重复迁移安全。"""
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_skill_share_reason")
+    try:
+        await manager.create_business_tables()
+        async with scoped_engine.begin() as connection:
+            await connection.execute(text("ALTER TABLE skill_share_requests DROP COLUMN application_reason"))
+            await connection.execute(
+                text(
+                    "INSERT INTO skill_share_requests "
+                    "(id, owner_uid, owner_department_id, personal_slug, name, description, "
+                    "content_hash, status, review_note, reviewer_uid, department_ids, created_at, reviewed_at) "
+                    "VALUES ('legacy-approved', 'owner', 1, 'credit-check', 'Credit Check', "
+                    "'legacy description', 'legacy-hash', 'approved', '已通过', 'reviewer', '[]'::jsonb, NOW(), NOW())"
+                )
+            )
+        await manager.create_schema_version_table()
+        await manager.record_schema_version("business", 9)
+        await manager.ensure_skill_share_request_schema()
+
+        async with scoped_engine.connect() as connection:
+            before = await connection.scalar(
+                text(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE table_schema = :schema AND table_name = 'skill_share_requests' "
+                    "AND column_name = 'application_reason'"
+                ),
+                {"schema": schema},
+            )
+        assert before == 0
+
+        await manager.upgrade_skill_share_request_reason_schema()
+        await manager.upgrade_skill_share_request_reason_schema()
+        async with scoped_engine.connect() as connection:
+            row = (
+                await connection.execute(
+                    text(
+                        "SELECT application_reason, status, review_note, reviewer_uid "
+                        "FROM skill_share_requests WHERE id = 'legacy-approved'"
+                    )
+                )
+            ).one()
+        assert tuple(row) == (None, "approved", "已通过", "reviewer")
+        assert (await manager.get_schema_versions())["business"] == 9
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
+async def test_mcp_sharing_migration_preserves_legacy_rows() -> None:
+    """v8 旧 MCP 行升级后仍为 NULL，重复迁移不扩大或改写权限。"""
+
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_mcp_sharing")
+    try:
+        await manager.create_business_tables()
+        async with scoped_engine.begin() as connection:
+            await connection.execute(text("ALTER TABLE mcp_servers DROP COLUMN share_config"))
+            await connection.execute(
+                text(
+                    "INSERT INTO mcp_servers (slug, name, transport, url, enabled, created_by, updated_by) "
+                    "VALUES ('legacy-mcp', 'Legacy MCP', 'streamable_http', "
+                    "'https://example.com/mcp', 1, 'admin', 'admin')"
+                )
+            )
+
+        await manager.ensure_business_schema()
+        await manager.ensure_business_schema()
+
+        async with scoped_engine.connect() as connection:
+            column_type = await connection.scalar(
+                text(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_schema = :schema AND table_name = 'mcp_servers' AND column_name = 'share_config'"
+                ),
+                {"schema": schema},
+            )
+            legacy_config = await connection.scalar(
+                text("SELECT share_config FROM mcp_servers WHERE slug = 'legacy-mcp'")
+            )
+            legacy_count = await connection.scalar(text("SELECT COUNT(*) FROM mcp_servers WHERE slug = 'legacy-mcp'"))
+        assert column_type == "jsonb"
+        assert legacy_config is None
+        assert legacy_count == 1
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
+async def test_mcp_sharing_authorization_over_http_and_postgres() -> None:
+    """真实 HTTP 与 PostgreSQL 同时验证历史可用、新资源私有、委派和脱敏。"""
+
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_mcp_http")
+    try:
+        await manager.create_business_tables()
+        session_factory = async_sessionmaker(scoped_engine, expire_on_commit=False)
+        async with session_factory() as session:
+            session.add_all(
+                [
+                    Department(id=1, name="研发"),
+                    Department(id=2, name="市场"),
+                    User(uid="delegate", username="Delegate", role="user", password_hash="x", department_id=1),
+                    User(uid="viewer", username="Viewer", role="user", password_hash="x", department_id=1),
+                    User(uid="outsider", username="Outsider", role="user", password_hash="x", department_id=2),
+                    MCPServer(
+                        slug="legacy-mcp",
+                        name="Legacy MCP",
+                        transport="streamable_http",
+                        url="https://secret.example/legacy",
+                        headers={"Authorization": "Bearer secret"},
+                        enabled=1,
+                        created_by="admin",
+                        updated_by="admin",
+                    ),
+                    MCPServer(
+                        slug="private-mcp",
+                        name="Private MCP",
+                        transport="streamable_http",
+                        url="https://secret.example/private",
+                        headers={"Authorization": "Bearer secret"},
+                        enabled=1,
+                        share_config={"version": 2, "read_scope": None, "edit_scope": None, "manage_scope": None},
+                        created_by="admin",
+                        updated_by="admin",
+                    ),
+                ]
+            )
+            await session.commit()
+
+        actor = {"user": User(uid="viewer", username="Viewer", role="user", password_hash="x")}
+
+        async def fake_user():
+            return actor["user"]
+
+        async def fake_db():
+            async with session_factory() as session:
+                yield session
+
+        app = FastAPI()
+        app.include_router(mcp, prefix="/api")
+        app.dependency_overrides[get_required_user] = fake_user
+        app.dependency_overrides[get_db] = fake_db
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            listed = await client.get("/api/system/mcp-servers")
+            assert listed.status_code == 200
+            assert [item["slug"] for item in listed.json()["data"]] == ["legacy-mcp"]
+            assert "secret" not in listed.text
+
+            private = await client.get("/api/system/mcp-servers/private-mcp")
+            assert private.status_code == 404
+
+            share_config = {
+                "version": 2,
+                "read_scope": {"access_level": "department", "department_ids": [1]},
+                "edit_scope": {"access_level": "user", "user_uids": ["delegate"]},
+                "manage_scope": {"access_level": "user", "user_uids": ["delegate"]},
+            }
+            normalized_share_config = normalize_permission_config(share_config, strict=True)
+            denied = await client.put(
+                "/api/system/mcp-servers/private-mcp/sharing", json={"share_config": share_config}
+            )
+            assert denied.status_code == 404
+            hidden_options = await client.get("/api/system/mcp-servers/private-mcp/sharing/options")
+            assert hidden_options.status_code == 404
+
+            actor["user"] = User(uid="admin", username="admin", role="admin", password_hash="x")
+            malformed = await client.put(
+                "/api/system/mcp-servers/private-mcp/sharing",
+                json={
+                    "share_config": {
+                        "version": 2,
+                        "read_scope": {"access_level": "user", "user_uids": 1},
+                        "edit_scope": None,
+                        "manage_scope": None,
+                    }
+                },
+            )
+            assert malformed.status_code == 400
+            granted = await client.put(
+                "/api/system/mcp-servers/private-mcp/sharing", json={"share_config": share_config}
+            )
+            assert granted.status_code == 200
+            admin_options = await client.get("/api/system/mcp-servers/private-mcp/sharing/options")
+            assert admin_options.status_code == 200
+            assert {item["uid"] for item in admin_options.json()["data"]["users"]} == {"delegate", "viewer", "outsider"}
+
+            actor["user"] = User(uid="delegate", username="Delegate", role="user", password_hash="x", department_id=1)
+            detail = await client.get("/api/system/mcp-servers/private-mcp")
+            assert detail.status_code == 200
+            assert detail.json()["data"]["permission"] == "manage"
+            assert "share_config" not in detail.json()["data"]
+            assert "secret" not in detail.text
+
+            options = await client.get("/api/system/mcp-servers/private-mcp/sharing/options")
+            assert options.status_code == 200
+            assert options.json()["data"]["departments"] == [{"id": 1, "name": "研发"}]
+            assert {item["uid"] for item in options.json()["data"]["users"]} == {"delegate", "viewer"}
+            assert options.json()["data"]["share_config"] == normalized_share_config
+
+            cross_department = await client.put(
+                "/api/system/mcp-servers/private-mcp/sharing",
+                json={
+                    "share_config": {
+                        "version": 2,
+                        "read_scope": {"access_level": "user", "user_uids": ["outsider"]},
+                        "edit_scope": None,
+                        "manage_scope": None,
+                    }
+                },
+            )
+            assert cross_department.status_code == 403
+
+            saved = await client.put("/api/system/mcp-servers/private-mcp/sharing", json={"share_config": share_config})
+            assert saved.status_code == 200
+            assert "secret" not in saved.text
+
+            actor["user"] = User(uid="viewer", username="Viewer", role="user", password_hash="x", department_id=1)
+            read_only = await client.get("/api/system/mcp-servers/private-mcp")
+            assert read_only.status_code == 200
+            assert read_only.json()["data"]["permission"] == "read"
+            assert "share_config" not in read_only.json()["data"]
+            assert (await client.get("/api/system/mcp-servers/private-mcp/tools")).status_code == 403
+
+            actor["user"] = User(uid="admin", username="admin", role="admin", password_hash="x")
+            mixed_config = {
+                "version": 2,
+                "read_scope": {"access_level": "user", "user_uids": ["delegate", "outsider"]},
+                "edit_scope": {"access_level": "user", "user_uids": ["delegate", "outsider"]},
+                "manage_scope": {"access_level": "user", "user_uids": ["delegate"]},
+            }
+            assert (
+                await client.put("/api/system/mcp-servers/private-mcp/sharing", json={"share_config": mixed_config})
+            ).status_code == 200
+            actor["user"] = User(uid="delegate", username="Delegate", role="user", password_hash="x", department_id=1)
+            detail = await client.get("/api/system/mcp-servers/private-mcp")
+            assert "share_config" not in detail.json()["data"]
+            options = await client.get("/api/system/mcp-servers/private-mcp/sharing/options")
+            assert options.status_code == 200
+            assert "outsider" not in options.text
+            assert options.json()["data"]["share_config"] == {
+                "version": 2,
+                "read_scope": {"access_level": "user", "department_ids": [], "user_uids": ["delegate"]},
+                "edit_scope": {"access_level": "user", "department_ids": [], "user_uids": ["delegate"]},
+                "manage_scope": {"access_level": "user", "department_ids": [], "user_uids": ["delegate"]},
+            }
+            assert options.json()["data"]["protected_scopes"] == {
+                "read_scope": True,
+                "edit_scope": True,
+                "manage_scope": False,
+            }
+            projected_config = options.json()["data"]["share_config"]
+            rejected_scope_change = {
+                **projected_config,
+                "read_scope": {"access_level": "department", "department_ids": [1]},
+            }
+            denied = await client.put(
+                "/api/system/mcp-servers/private-mcp/sharing", json={"share_config": rejected_scope_change}
+            )
+            assert denied.status_code == 403
+            projected_config["read_scope"]["user_uids"].append("viewer")
+            projected_config["edit_scope"]["user_uids"].append("viewer")
+            saved = await client.put(
+                "/api/system/mcp-servers/private-mcp/sharing", json={"share_config": projected_config}
+            )
+            assert saved.status_code == 200
+            assert "outsider" not in saved.text
+            expected_config = normalize_permission_config(
+                {
+                    **mixed_config,
+                    "read_scope": {"access_level": "user", "user_uids": ["delegate", "viewer", "outsider"]},
+                    "edit_scope": {"access_level": "user", "user_uids": ["delegate", "viewer", "outsider"]},
+                },
+                strict=True,
+            )
+
+        async with session_factory() as session:
+            persisted = await session.scalar(select(MCPServer).where(MCPServer.slug == "private-mcp"))
+            assert persisted.share_config == expected_config
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
+async def test_assembled_mcp_tool_rechecks_committed_postgres_permissions(monkeypatch) -> None:
+    """已装配工具每次调用都读取真实 PostgreSQL 的最新授权与开关。"""
+
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_mcp_guard")
+    try:
+        await manager.create_business_tables()
+        session_factory = async_sessionmaker(scoped_engine, expire_on_commit=False)
+
+        @asynccontextmanager
+        async def session_context():
+            async with session_factory() as session:
+                yield session
+
+        monkeypatch.setattr(pg_manager, "get_async_session_context", session_context)
+        async with session_factory() as session:
+            session.add_all(
+                [
+                    User(uid="guard-user", username="Guard User", role="user", password_hash="x"),
+                    MCPServer(
+                        slug="guard-mcp",
+                        name="Guard MCP",
+                        transport="streamable_http",
+                        url="https://example.invalid/mcp",
+                        enabled=1,
+                        created_by="admin",
+                        updated_by="admin",
+                    ),
+                ]
+            )
+            await session.commit()
+
+        calls = []
+
+        async def remote_call(query: str) -> str:
+            calls.append(query)
+            return f"remote:{query}"
+
+        remote_tool = StructuredTool.from_function(
+            coroutine=remote_call,
+            name="remote_tool",
+            description="Remote test tool",
+        )
+
+        async def load_tools(slug):
+            assert slug == "guard-mcp"
+            return [remote_tool]
+
+        monkeypatch.setattr(mcp_service, "get_enabled_mcp_tools", load_tools)
+        monkeypatch.setattr(tool_service, "get_tool_instances_by_category", lambda _category: [])
+        (guarded_tool,) = await tool_service.resolve_configured_runtime_tools(
+            SimpleNamespace(uid="guard-user", tools=[], mcps=["guard-mcp"], _skill_runtime_snapshot={})
+        )
+        assert await guarded_tool.ainvoke({"query": "allowed"}) == "remote:allowed"
+
+        async with session_factory() as session:
+            server = await session.scalar(select(MCPServer).where(MCPServer.slug == "guard-mcp"))
+            server.share_config = {
+                "version": 2,
+                "read_scope": {"access_level": "global"},
+                "edit_scope": None,
+                "manage_scope": None,
+            }
+            await session.commit()
+        with pytest.raises(ResourcePermissionDenied):
+            await guarded_tool.ainvoke({"query": "revoked"})
+
+        async with session_factory() as session:
+            server = await session.scalar(select(MCPServer).where(MCPServer.slug == "guard-mcp"))
+            server.share_config = None
+            server.disabled_tools = ["remote_tool"]
+            await session.commit()
+        with pytest.raises(ResourcePermissionDenied):
+            await guarded_tool.ainvoke({"query": "tool-disabled"})
+
+        async with session_factory() as session:
+            server = await session.scalar(select(MCPServer).where(MCPServer.slug == "guard-mcp"))
+            server.disabled_tools = []
+            server.enabled = 0
+            await session.commit()
+        with pytest.raises(ResourcePermissionDenied):
+            await guarded_tool.ainvoke({"query": "server-disabled"})
+        assert calls == ["allowed"]
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 

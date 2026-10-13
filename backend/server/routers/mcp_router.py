@@ -10,13 +10,16 @@ from yuxi.agents.mcp.service import (
     get_all_mcp_servers,
     get_all_mcp_tools,
     get_mcp_server,
+    get_mcp_sharing_options_for_operator,
     get_mcp_tools_stats,
     is_builtin_mcp_server,
     requires_mcp_stdio_migration,
     set_server_enabled,
     toggle_tool_enabled,
+    update_mcp_share_config,
     update_mcp_server,
 )
+from yuxi.permissions import ResourcePermission, resolve_mcp_permission
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
 
@@ -63,6 +66,12 @@ class UpdateMcpServerStatusRequest(BaseModel):
     enabled: bool = Field(..., description="是否启用")
 
 
+class UpdateMcpSharingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    share_config: dict = Field(..., description="MCP 权限树共享配置")
+
+
 # =============================================================================
 # === Helpers ===
 # =============================================================================
@@ -86,6 +95,26 @@ def serialize_mcp_server(server) -> dict:
     return data
 
 
+def serialize_mcp_server_for_user(server, user: User) -> dict:
+    """按当前用户权限返回 MCP 元数据，非管理员不暴露连接凭据。"""
+
+    permission = resolve_mcp_permission(user, server)
+    if user.role in {"admin", "superadmin"}:
+        data = serialize_mcp_server(server)
+    else:
+        data = {
+            "slug": getattr(server, "slug", ""),
+            "name": getattr(server, "name", ""),
+            "description": getattr(server, "description", None),
+            "icon": getattr(server, "icon", None),
+            "enabled": bool(getattr(server, "enabled", True)) and not requires_mcp_stdio_migration(server),
+            "tags": getattr(server, "tags", None) or [],
+        }
+    data["permission"] = permission.value
+    data["can_manage_sharing"] = permission == ResourcePermission.MANAGE
+    return data
+
+
 def ensure_mcp_server_runnable(server) -> None:
     """拒绝连接尚未迁移的历史用户 stdio MCP。"""
     if requires_mcp_stdio_migration(server):
@@ -105,20 +134,11 @@ async def get_mcp_servers(
     """获取所有 MCP 服务器配置（普通用户仅获取脱敏的基础信息）"""
     try:
         servers = await get_all_mcp_servers(db)
-        if current_user.role in ["admin", "superadmin"]:
-            return {"success": True, "data": [serialize_mcp_server(s) for s in servers]}
-
-        data = []
-        for s in servers:
-            data.append(
-                {
-                    "name": getattr(s, "name", ""),
-                    "description": getattr(s, "description", None),
-                    "icon": getattr(s, "icon", None),
-                    "enabled": bool(getattr(s, "enabled", True)) and not requires_mcp_stdio_migration(s),
-                    "tags": getattr(s, "tags", None) or [],
-                }
-            )
+        data = [
+            serialize_mcp_server_for_user(server, current_user)
+            for server in servers
+            if resolve_mcp_permission(current_user, server) != ResourcePermission.NONE
+        ]
         return {"success": True, "data": data}
     except HTTPException:
         raise
@@ -171,18 +191,67 @@ async def create_mcp_server_route(
 @mcp.get("/{slug}")
 async def get_mcp_server_route(
     slug: str,
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
     """获取单个 MCP 服务器配置"""
     try:
         server = await get_server_or_404(db, slug)
-        return {"success": True, "data": serialize_mcp_server(server)}
+        if resolve_mcp_permission(current_user, server) == ResourcePermission.NONE:
+            raise HTTPException(status_code=404, detail=f"服务器 '{slug}' 不存在")
+        return {"success": True, "data": serialize_mcp_server_for_user(server, current_user)}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to get MCP server: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@mcp.put("/{slug}/sharing")
+async def update_mcp_sharing_route(
+    slug: str,
+    request: UpdateMcpSharingRequest,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """由系统管理员或被委派的 MCP 管理员修改共享范围。"""
+
+    try:
+        server = await update_mcp_share_config(
+            db,
+            slug=slug,
+            share_config=request.share_config,
+            operator=current_user,
+        )
+        return {"success": True, "data": serialize_mcp_server_for_user(server, current_user)}
+    except MCPServerNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@mcp.get("/{slug}/sharing/options")
+async def get_mcp_sharing_options(
+    slug: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """返回当前 MCP 管理员可选择的部门和用户。"""
+
+    server = await get_server_or_404(db, slug)
+    permission = resolve_mcp_permission(current_user, server)
+    if permission == ResourcePermission.NONE:
+        raise HTTPException(status_code=404, detail=f"服务器 '{slug}' 不存在")
+    if permission != ResourcePermission.MANAGE:
+        raise HTTPException(status_code=403, detail="当前用户无权管理此 MCP 的共享范围")
+
+    try:
+        data = await get_mcp_sharing_options_for_operator(db, server, current_user)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return {"success": True, "data": data}
 
 
 @mcp.put("/{slug}")
@@ -320,12 +389,19 @@ async def update_mcp_server_status_route(
 @mcp.get("/{slug}/tools")
 async def get_mcp_server_tools(
     slug: str,
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
     """获取 MCP 服务器的工具列表"""
     try:
         server = await get_server_or_404(db, slug)
+        permission = resolve_mcp_permission(current_user, server)
+        if permission == ResourcePermission.NONE:
+            raise HTTPException(status_code=404, detail=f"服务器 '{slug}' 不存在")
+        if permission == ResourcePermission.READ:
+            raise HTTPException(status_code=403, detail="当前用户无权使用此 MCP")
+        if current_user.role not in {"admin", "superadmin"} and not server.enabled:
+            raise HTTPException(status_code=403, detail="此 MCP 尚未启用")
         ensure_mcp_server_runnable(server)
         disabled_tools = server.disabled_tools or []
 
@@ -363,12 +439,14 @@ async def get_mcp_server_tools(
             raise
         except Exception as tool_error:
             logger.error(f"Failed to get tools from MCP server '{slug}': {tool_error}")
-            raise HTTPException(status_code=500, detail=f"获取工具失败: {str(tool_error)}")
+            detail = f"获取工具失败: {tool_error}" if current_user.role in {"admin", "superadmin"} else "获取工具失败"
+            raise HTTPException(status_code=500, detail=detail)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to get MCP server tools: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        detail = str(e) if current_user.role in {"admin", "superadmin"} else "获取工具失败"
+        raise HTTPException(status_code=500, detail=detail)
 
 
 @mcp.post("/{slug}/tools/refresh")

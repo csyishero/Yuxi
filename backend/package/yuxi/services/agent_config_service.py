@@ -24,7 +24,8 @@ async def prepare_agent_config_write(
     submitted_fields = {
         field_name
         for field_name in AGENT_RESOURCE_CONFIG_FIELDS & context.keys()
-        if isinstance(context[field_name], list) and context[field_name]
+        if (isinstance(context[field_name], list) and context[field_name])
+        or (field_name == "mcps" and user.role not in {"admin", "superadmin"} and isinstance(context[field_name], list))
     }
     if not submitted_fields:
         return filtered, {}

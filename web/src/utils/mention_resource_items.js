@@ -26,6 +26,8 @@ export const buildMentionResourceItems = (mention = {}) => {
       )
       .filter(Boolean),
     mcps: mcps
+      // Agent 配置选项已经由后端按使用权过滤；提及项不重复要求目录接口的权限字段。
+      .filter((m) => m.enabled !== false && (!m.permission || ['edit', 'manage'].includes(m.permission)))
       .map((m) =>
         toResourceItem('mcp', {
           value: m.slug || m.value || m.id || m.name,

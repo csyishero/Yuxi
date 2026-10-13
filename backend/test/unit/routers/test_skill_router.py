@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import io
+import zipfile
+
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from yuxi.agents.skills import service as skill_service
 from yuxi.storage.postgres.models_business import Skill, User
 
 from server.routers.skill_router import skills, user_skills
@@ -128,8 +132,10 @@ def test_list_accessible_skills_route(monkeypatch):
 def test_list_skill_cards_route_scans_personal_source(monkeypatch):
     captured = {}
 
-    async def fake_list_skill_cards(_db, user):
+    async def fake_list_skill_cards(_db, user, *, audience_search=None, audience_department_id=None):
         captured["uid"] = user.uid
+        assert audience_search is None
+        assert audience_department_id is None
         item = _skill(source_type="personal", created_by="user")
         return [item]
 
@@ -308,6 +314,119 @@ def test_skill_tree_and_file_routes_check_management_read_permission(monkeypatch
     assert captured["tree_slug"] == "demo"
     assert captured["tree_operator"] == "user"
     assert captured["file"] == {"slug": "demo", "path": "SKILL.md", "operator_uid": "user"}
+
+
+def test_shared_skill_file_projects_private_mcp_frontmatter_and_preserves_it_on_save(monkeypatch, tmp_path):
+    """真实文件服务在 HTTP 读写时隐藏私有引用，并保留原文件中的旧依赖。"""
+
+    skill_dir = tmp_path / "demo"
+    skill_dir.mkdir()
+    source = skill_dir / "SKILL.md"
+    original = (
+        "---\nslug: demo\nname: demo\ndescription: Demo\n"
+        "mcp_dependencies:\n- visible-mcp\n- read-only-mcp\n- private-mcp\n"
+        "---\n# Guide\n"
+    )
+    source.write_text(original, encoding="utf-8")
+    (skill_dir / "alias.md").symlink_to(source)
+    item = _skill(slug="demo", created_by="user", user_uids=["user"])
+    item.dir_path = str(skill_dir)
+
+    class FakeDB:
+        async def commit(self):
+            pass
+
+    class FakeRepo:
+        def __init__(self, _db):
+            pass
+
+        async def get_by_slug(self, slug):
+            return item if slug == "demo" else None
+
+        async def update_metadata(self, _item, *, name, description, updated_by):
+            item.name = name
+            item.description = description
+            item.updated_by = updated_by
+            return item
+
+    async def visible_mcps(_db, _user):
+        return {"visible-mcp", "read-only-mcp"}
+
+    async def usable_mcps(_db, _user):
+        return {"visible-mcp"}
+
+    monkeypatch.setattr(skill_service, "SkillRepository", FakeRepo)
+    monkeypatch.setattr(skill_service, "get_visible_mcp_reference_slugs", visible_mcps)
+    monkeypatch.setattr(skill_service, "get_usable_mcp_server_slugs", usable_mcps)
+
+    app = _build_app(role="user")
+    app.dependency_overrides[get_db] = lambda: FakeDB()
+    client = TestClient(app)
+    url = "/api/system/skills/demo/file"
+    read = client.get(url, params={"path": "SKILL.md"})
+    assert read.status_code == 200, read.text
+    projected = read.json()["data"]["content"]
+    assert "- visible-mcp" in projected
+    assert "- read-only-mcp" in projected
+    assert "private-mcp" not in projected
+    assert projected.endswith("# Guide\n")
+    assert source.read_text(encoding="utf-8") == original
+    alias_read = client.get(url, params={"path": "./SKILL.md"})
+    assert alias_read.json()["data"]["content"] == projected
+    symlink_read = client.get(url, params={"path": "alias.md"})
+    assert symlink_read.json()["data"]["content"] == projected
+    for path in ("./SKILL.md", "alias.md"):
+        denied_delete = client.delete(url, params={"path": path})
+        assert denied_delete.status_code == 400, denied_delete.text
+    assert source.read_text(encoding="utf-8") == original
+
+    admin = TestClient(_build_app(role="superadmin"))
+    admin_read = admin.get(url, params={"path": "SKILL.md"})
+    assert admin_read.status_code == 200, admin_read.text
+    assert admin_read.json()["data"]["content"] == original
+
+    user_archive = client.get("/api/system/skills/demo/export")
+    assert user_archive.status_code == 200, user_archive.text
+    with zipfile.ZipFile(io.BytesIO(user_archive.content)) as zipped:
+        assert zipped.read("demo/SKILL.md").decode("utf-8") == projected
+        assert zipped.read("demo/alias.md").decode("utf-8") == projected
+    admin_archive = admin.get("/api/system/skills/demo/export")
+    assert admin_archive.status_code == 200, admin_archive.text
+    with zipfile.ZipFile(io.BytesIO(admin_archive.content)) as zipped:
+        assert zipped.read("demo/SKILL.md").decode("utf-8") == original
+    assert source.read_text(encoding="utf-8") == original
+
+    edited = projected.replace("- read-only-mcp\n", "").replace("# Guide\n", "# Revised\n")
+    saved = client.put(url, json={"path": "./SKILL.md", "content": edited})
+    assert saved.status_code == 200, saved.text
+    on_disk = source.read_text(encoding="utf-8")
+    assert "- read-only-mcp" not in on_disk
+    assert "- private-mcp" in on_disk
+    assert on_disk.endswith("# Revised\n")
+    assert skill_service.parse_skill_dir_metadata(skill_dir)["mcp_dependencies"] == ["visible-mcp", "private-mcp"]
+
+    forbidden = client.put(
+        url,
+        json={"path": "SKILL.md", "content": edited.replace("- visible-mcp\n", "- visible-mcp\n- new-mcp\n")},
+    )
+    assert forbidden.status_code == 400, forbidden.text
+    assert source.read_text(encoding="utf-8") == on_disk
+
+    for malformed in (
+        "---\nslug: demo\nname: demo\ndescription: Demo\nmcp_dependencies: [private-mcp\n---\n# Guide\n",
+        "---\nslug: demo\nname: demo\ndescription: Demo\nmcp_dependencies: private-mcp\n---\n# Guide\n",
+    ):
+        source.write_text(malformed, encoding="utf-8")
+        failed_read = client.get(url, params={"path": "SKILL.md"})
+        assert failed_read.status_code == 400, failed_read.text
+        assert "private-mcp" not in failed_read.text
+        failed_archive = client.get("/api/system/skills/demo/export")
+        assert failed_archive.status_code == 400, failed_archive.text
+        assert "private-mcp" not in failed_archive.text
+        failed_write = client.put(url, json={"path": "SKILL.md", "content": edited})
+        assert failed_write.status_code == 400, failed_write.text
+        assert source.read_text(encoding="utf-8") == malformed
+        assert admin.get(url, params={"path": "SKILL.md"}).json()["data"]["content"] == malformed
 
 
 def test_skill_export_route_still_checks_manage_permission(monkeypatch, tmp_path):

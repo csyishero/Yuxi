@@ -18,13 +18,13 @@
     </template>
 
     <template #actions>
-      <div class="extension-detail-actions">
+      <div v-if="userStore.isAdmin" class="extension-detail-actions">
         <a-space :size="8">
           <button
             type="button"
             :aria-label="testLoading ? '正在测试 MCP' : '测试 MCP'"
             @click="handleTestServer"
-            :disabled="testLoading || server?.requires_migration"
+            :disabled="testLoading || !server?.enabled || server?.requires_migration"
             :title="server?.requires_migration ? '请先迁移为远程 MCP' : ''"
             class="lucide-icon-btn extension-panel-action extension-panel-action-secondary"
           >
@@ -49,14 +49,27 @@
             :class="[
               'lucide-icon-btn',
               'extension-panel-action',
-              server?.enabled === false && !server?.requires_migration
-                ? 'extension-panel-action-primary'
-                : 'extension-panel-action-danger'
+              server?.requires_migration
+                ? 'extension-panel-action-danger'
+                : server?.enabled === false
+                  ? 'extension-panel-action-primary'
+                  : 'extension-panel-action-secondary'
             ]"
           >
             <Plus v-if="server?.enabled === false && !server?.requires_migration" :size="14" />
+            <PowerOff v-else-if="!server?.requires_migration" :size="14" />
             <Trash2 v-else :size="14" />
             <span>{{ actionLabel }}</span>
+          </button>
+          <button
+            v-if="server && !server.is_builtin && !server.requires_migration"
+            type="button"
+            aria-label="删除 MCP"
+            @click="confirmDeleteServer(server)"
+            class="lucide-icon-btn extension-panel-action extension-panel-action-danger"
+          >
+            <Trash2 :size="14" />
+            <span>删除</span>
           </button>
         </a-space>
       </div>
@@ -64,6 +77,13 @@
 
     <template #panel-general>
       <div class="extension-detail-view mcp-general-view">
+        <a-alert
+          v-if="server.enabled === false && !server.requires_migration"
+          type="info"
+          show-icon
+          class="migration-alert"
+          :message="userStore.isAdmin ? '此 MCP 已停用。可先配置权限，再启用服务。' : '此 MCP 已停用，当前无法在智能体中使用。'"
+        />
         <a-alert
           v-if="server.requires_migration"
           type="warning"
@@ -204,7 +224,7 @@
             <label>描述</label>
             <span>{{ server.description }}</span>
           </div>
-          <div class="info-item">
+          <div class="info-item" v-if="server.transport">
             <label>传输类型</label>
             <span>
               <a-tag :color="getTransportColor(server.transport)">{{ server.transport }}</a-tag>
@@ -216,7 +236,12 @@
               <a-tag v-for="tag in server.tags" :key="tag">{{ tag }}</a-tag>
             </span>
           </div>
-          <template v-if="server.transport === 'streamable_http' || server.transport === 'sse'">
+          <template
+            v-if="
+              userStore.isAdmin &&
+              (server.transport === 'streamable_http' || server.transport === 'sse')
+            "
+          >
             <div class="info-item" v-if="server.url">
               <label>MCP URL</label>
               <span class="code-inline text-break-all">{{ server.url }}</span>
@@ -234,7 +259,7 @@
               <span>{{ server.sse_read_timeout }} 秒</span>
             </div>
           </template>
-          <template v-if="server.transport === 'stdio'">
+          <template v-if="userStore.isAdmin && server.transport === 'stdio'">
             <div class="info-item" v-if="server.command">
               <label>命令</label>
               <span class="code-inline">{{ server.command }}</span>
@@ -252,17 +277,21 @@
               <pre class="code-pre">{{ JSON.stringify(server.env, null, 2) }}</pre>
             </div>
           </template>
-          <div class="info-item">
+          <div class="info-item" v-if="server.created_at">
             <label>创建时间</label>
             <span>{{ formatTime(server.created_at) }}</span>
           </div>
-          <div class="info-item">
+          <div class="info-item" v-if="server.updated_at">
             <label>更新时间</label>
             <span>{{ formatTime(server.updated_at) }}</span>
           </div>
-          <div class="info-item">
+          <div class="info-item" v-if="server.created_by">
             <label>创建人</label>
             <span>{{ server.created_by }}</span>
+          </div>
+          <div class="info-item" v-if="server.permission && !userStore.isAdmin">
+            <label>我的权限</label>
+            <span>{{ permissionLabel }}</span>
           </div>
         </div>
       </div>
@@ -307,12 +336,14 @@
                 </div>
                 <div class="tool-actions">
                   <a-switch
+                    v-if="userStore.isAdmin"
                     :checked="tool.enabled"
                     :aria-label="`${tool.name} ${tool.enabled ? '已启用' : '已禁用'}`"
                     @change="handleToggleTool(tool)"
                     :loading="toggleToolLoading === tool.name"
                     size="small"
                   />
+                  <a-tag v-else>{{ tool.enabled ? '已启用' : '已禁用' }}</a-tag>
                   <a-tooltip title="复制工具名称">
                     <a-button
                       type="text"
@@ -356,6 +387,58 @@
         </a-spin>
       </div>
     </template>
+
+    <template #panel-sharing>
+      <div v-if="canManageSharing" class="extension-detail-view mcp-sharing-view">
+        <div class="sharing-header">
+          <div>
+            <h3>共享权限</h3>
+            <p>分别选择可查看 MCP、在智能体中使用工具，以及可调整授权范围的成员。</p>
+          </div>
+          <a-button
+            type="primary"
+            size="small"
+            :disabled="!sharingOptionsLoaded || Boolean(sharingOptionsError)"
+            :loading="savingSharing"
+            @click="saveSharing"
+          >
+            <Save :size="14" />
+            <span>保存权限</span>
+          </a-button>
+        </div>
+        <a-alert
+          type="info"
+          show-icon
+          :message="userStore.isAdmin
+            ? '被授权的管理者可调整此 MCP 的共享范围；连接配置、测试、启停和工具开关仍由系统管理员管理。'
+            : '你只能给本部门或本部门成员授权。既有全员和其他部门授权会保留，由系统管理员调整。'"
+          class="sharing-hint"
+        />
+        <a-alert v-if="sharingOptionsError" type="error" show-icon class="sharing-hint">
+          <template #message>
+            无法加载可授权成员。<a-button type="link" size="small" @click="fetchSharingOptions"
+              >重试</a-button
+            >
+          </template>
+        </a-alert>
+        <a-spin :spinning="sharingOptionsLoading">
+          <ShareConfigForm
+            ref="shareConfigFormRef"
+            v-model="shareConfigForm"
+            resource-kind="mcp"
+            :show-edit-scope="true"
+            :show-manage-scope="true"
+            :disabled="!sharingOptionsLoaded || Boolean(sharingOptionsError)"
+            :available-departments="sharingDepartments"
+            :available-users="sharingUsers"
+            :allowed-access-levels="['global', 'department', 'user']"
+            :restrict-new-global="!userStore.isAdmin"
+            :existing-share-config="sharingBaseline"
+            :protected-scopes="protectedScopes"
+          />
+        </a-spin>
+      </div>
+    </template>
   </ExtensionDetailLayout>
 </template>
 
@@ -369,20 +452,25 @@ import {
   Pencil,
   Trash2,
   Plus,
+  PowerOff,
   RotateCw,
   Info,
   Copy,
   Settings2,
   Wrench,
+  ShieldCheck,
   Save,
   X
 } from '@lucide/vue'
 import ExtensionDetailLayout from '@/components/shared/ExtensionDetailLayout.vue'
+import ShareConfigForm from '@/components/ShareConfigForm.vue'
 import { mcpApi } from '@/apis/mcp_api'
+import { useUserStore } from '@/stores/user'
 import { formatFullDateTime } from '@/utils/time'
 
 const route = useRoute()
 const router = useRouter()
+const userStore = useUserStore()
 const slug = computed(() => decodeURIComponent(route.params.slug ?? route.params.name))
 
 const loading = ref(false)
@@ -395,14 +483,115 @@ const toolsLoading = ref(false)
 const toolsError = ref(null)
 const toolSearchText = ref('')
 const toggleToolLoading = ref(null)
+const canUse = computed(
+  () =>
+    server.value?.enabled !== false &&
+    (userStore.isAdmin || ['edit', 'manage'].includes(server.value?.permission))
+)
+const canManageSharing = computed(
+  () => userStore.isAdmin || server.value?.can_manage_sharing === true
+)
+const permissionLabel = computed(
+  () =>
+    ({
+      read: '查看',
+      edit: '使用',
+      manage: '授权'
+    })[server.value?.permission] || '查看'
+)
 
 const mcpDetailTabs = computed(() => {
   const tabs = [{ key: 'general', label: '信息', icon: Settings2 }]
-  if (!server.value?.requires_migration) {
+  if (canUse.value && !server.value?.requires_migration) {
     tabs.push({ key: 'tools', label: `工具 (${tools.value.length})`, icon: Wrench })
+  }
+  if (canManageSharing.value) {
+    tabs.push({ key: 'sharing', label: '权限', icon: ShieldCheck })
   }
   return tabs
 })
+
+const savingSharing = ref(false)
+const sharingOptionsLoading = ref(false)
+const sharingOptionsLoaded = ref(false)
+const sharingOptionsError = ref(false)
+const sharingDepartments = ref([])
+const sharingUsers = ref([])
+const shareConfigFormRef = ref(null)
+const shareConfigForm = ref({ version: 2, read_scope: null, edit_scope: null, manage_scope: null })
+const sharingBaseline = ref(null)
+const protectedScopes = ref({})
+
+/** 为旧 MCP 保留原有的全员查看、使用范围。 */
+const cloneSharing = (config) => {
+  const source = config || {
+    version: 2,
+    read_scope: { access_level: 'global', department_ids: [], user_uids: [] },
+    edit_scope: { access_level: 'global', department_ids: [], user_uids: [] },
+    manage_scope: null
+  }
+  return {
+    version: 2,
+    read_scope: source.read_scope ? structuredClone(source.read_scope) : null,
+    edit_scope: source.edit_scope ? structuredClone(source.edit_scope) : null,
+    manage_scope: source.manage_scope ? structuredClone(source.manage_scope) : null
+  }
+}
+
+/** 加载当前 MCP 可授予的部门与用户。 */
+const fetchSharingOptions = async () => {
+  if (!server.value || !canManageSharing.value || sharingOptionsLoading.value) return
+  try {
+    sharingOptionsLoading.value = true
+    sharingOptionsError.value = false
+    const result = await mcpApi.getMcpServerSharingOptions(server.value.slug)
+    if (!result.success) throw new Error(result.message || '加载失败')
+    sharingDepartments.value = result.data?.departments || []
+    sharingUsers.value = result.data?.users || []
+    protectedScopes.value = result.data?.protected_scopes || {}
+    sharingBaseline.value = cloneSharing(result.data?.share_config)
+    shareConfigForm.value = cloneSharing(result.data?.share_config)
+    sharingOptionsLoaded.value = true
+  } catch {
+    sharingOptionsLoaded.value = false
+    sharingOptionsError.value = true
+  } finally {
+    sharingOptionsLoading.value = false
+  }
+}
+
+/** 校验并保存 MCP 的共享范围，以服务端返回的配置为准。 */
+const saveSharing = async () => {
+  if (!server.value || !canManageSharing.value) return
+  const validation = shareConfigFormRef.value?.validate?.()
+  if (validation && !validation.valid) {
+    message.warning(validation.message || '请检查授权范围')
+    return
+  }
+  try {
+    savingSharing.value = true
+    const result = await mcpApi.updateMcpServerSharing(server.value.slug, shareConfigForm.value)
+    if (!result.success) {
+      message.error(result.message || '保存权限失败')
+      return
+    }
+    if (result.data) {
+      server.value = result.data
+      if (canManageSharing.value) {
+        await fetchSharingOptions()
+      } else {
+        detailTab.value = 'general'
+      }
+    } else {
+      await fetchServer()
+    }
+    message.success('权限已保存')
+  } catch (err) {
+    message.error(err.message || '保存权限失败')
+  } finally {
+    savingSharing.value = false
+  }
+}
 
 const isEditing = ref(false)
 const editLoading = ref(false)
@@ -422,8 +611,8 @@ const editForm = reactive({
 
 const actionLabel = computed(() => {
   if (server.value?.requires_migration) return '删除'
-  if (server.value?.enabled === false) return '添加'
-  return server.value?.is_builtin ? '移除' : '删除'
+  if (server.value?.enabled === false) return '启用'
+  return '停用'
 })
 
 const filteredTools = computed(() => {
@@ -463,7 +652,7 @@ const resetEditForm = (data) => {
 }
 
 const startEdit = () => {
-  if (!server.value) return
+  if (!userStore.isAdmin || !server.value) return
   detailTab.value = 'general'
   resetEditForm(server.value)
   isEditing.value = true
@@ -515,7 +704,7 @@ const validateEditPayload = (data) => {
 }
 
 const handleSaveEdit = async () => {
-  if (!server.value) return
+  if (!userStore.isAdmin || !server.value) return
   const data = buildEditPayload()
   if (!data || !validateEditPayload(data)) return
 
@@ -541,13 +730,13 @@ const fetchServer = async () => {
     loading.value = true
     const result = await mcpApi.getMcpServer(slug.value)
     if (result.success) {
-      if (result.data?.enabled === false && !result.data?.requires_migration) {
-        server.value = null
-        message.info('请先添加 MCP 后再查看详情')
-        router.replace({ path: '/extensions', query: { tab: 'mcp' } })
-        return
-      }
       server.value = result.data
+      if (canManageSharing.value && userStore.isAdmin) {
+        sharingBaseline.value = cloneSharing(result.data.share_config)
+        shareConfigForm.value = cloneSharing(result.data.share_config)
+      }
+      if (detailTab.value === 'sharing' && !canManageSharing.value) detailTab.value = 'general'
+      if (detailTab.value === 'tools' && !canUse.value) detailTab.value = 'general'
     } else {
       message.error(result.message || '获取 MCP 详情失败')
     }
@@ -559,7 +748,7 @@ const fetchServer = async () => {
 }
 
 const fetchTools = async () => {
-  if (!server.value) return
+  if (!server.value || !canUse.value) return
   try {
     toolsLoading.value = true
     toolsError.value = null
@@ -579,7 +768,7 @@ const fetchTools = async () => {
 }
 
 const handleToggleTool = async (tool) => {
-  if (!server.value) return
+  if (!userStore.isAdmin || !server.value) return
   try {
     toggleToolLoading.value = tool.name
     const result = await mcpApi.toggleMcpServerTool(server.value.slug, tool.name)
@@ -607,7 +796,7 @@ const copyToolName = async (toolName) => {
 }
 
 const handleTestServer = async () => {
-  if (!server.value) return
+  if (!userStore.isAdmin || !server.value) return
   try {
     testLoading.value = server.value.name
     const result = await mcpApi.testMcpServer(server.value.slug)
@@ -624,7 +813,7 @@ const handleTestServer = async () => {
 }
 
 const handleDangerAction = async () => {
-  if (!server.value) return
+  if (!userStore.isAdmin || !server.value) return
   if (server.value.requires_migration) {
     confirmDeleteServer(server.value)
     return
@@ -633,18 +822,15 @@ const handleDangerAction = async () => {
     await handleSetServerEnabled(server.value, true)
     return
   }
-  if (server.value.is_builtin) {
-    await handleSetServerEnabled(server.value, false)
-    return
-  }
-  confirmDeleteServer(server.value)
+  await handleSetServerEnabled(server.value, false)
 }
 
 const handleSetServerEnabled = async (srv, enabled) => {
+  if (!userStore.isAdmin) return
   try {
     const result = await mcpApi.updateMcpServerStatus(srv.slug, enabled)
     if (result.success) {
-      message.success(result.message || `MCP 已${enabled ? '添加' : '移除'}`)
+      message.success(result.message || `MCP 已${enabled ? '启用' : '停用'}`)
       await fetchServer()
     } else {
       message.error(result.message || '操作失败')
@@ -655,6 +841,7 @@ const handleSetServerEnabled = async (srv, enabled) => {
 }
 
 const confirmDeleteServer = (srv) => {
+  if (!userStore.isAdmin) return
   Modal.confirm({
     title: '确认删除 MCP',
     content: `确定要删除 MCP "${srv.name}" 吗？此操作不可撤销。`,
@@ -681,6 +868,9 @@ watch(detailTab, (tab) => {
   if (tab === 'tools' && server.value) {
     fetchTools()
   }
+  if (tab === 'sharing' && server.value && canManageSharing.value && !sharingOptionsLoaded.value) {
+    fetchSharingOptions()
+  }
 })
 
 onMounted(() => {
@@ -701,6 +891,33 @@ onMounted(() => {
   .info-item {
     padding: 16px 0;
     border-bottom: 1px solid var(--gray-150);
+  }
+}
+
+.mcp-sharing-view {
+  .sharing-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+
+    h3 {
+      margin: 0 0 4px;
+      color: var(--gray-900);
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    p {
+      margin: 0;
+      color: var(--gray-500);
+      font-size: 13px;
+    }
+  }
+
+  .sharing-hint {
+    margin-bottom: 16px;
   }
 }
 
@@ -957,6 +1174,10 @@ onMounted(() => {
 }
 
 @media (max-width: 768px) {
+  .mcp-sharing-view .sharing-header {
+    flex-direction: column;
+  }
+
   .edit-panel {
     .form-grid,
     .form-grid-three {

@@ -280,6 +280,107 @@ async def test_delegated_manager_resource_patch_preserves_hidden_config_and_reje
         await conn.close()
 
 
+async def test_mcp_permission_revocation_preserves_saved_agent_config_and_rejects_new_reference(
+    test_client,
+    admin_headers,
+    standard_user,
+):
+    """撤销 MCP 使用权后，普通管理用户不能新增私有引用，保存不抹除既有配置。"""
+
+    suffix = uuid.uuid4().hex[:10]
+    agent_slug = f"pytest-mcp-resource-agent-{suffix}"
+    visible_slug = f"pytest-mcp-visible-{suffix}"
+    hidden_slug = f"pytest-mcp-hidden-{suffix}"
+    hidden_new_slug = f"pytest-mcp-new-hidden-{suffix}"
+    manager_uid = str(standard_user["user"]["uid"])
+    manager_headers = standard_user["headers"]
+    private_config = {"version": 2, "read_scope": None, "edit_scope": None, "manage_scope": None}
+    usable_config = {
+        "version": 2,
+        "read_scope": {"access_level": "user", "user_uids": [manager_uid]},
+        "edit_scope": {"access_level": "user", "user_uids": [manager_uid]},
+        "manage_scope": None,
+    }
+    conn = await asyncpg.connect(os.environ["POSTGRES_URL"].replace("+asyncpg", ""))
+    created_agent = False
+    try:
+        for slug, config in (
+            (visible_slug, usable_config),
+            (hidden_slug, private_config),
+            (hidden_new_slug, private_config),
+        ):
+            await conn.execute(
+                """
+                INSERT INTO mcp_servers
+                    (slug, name, transport, url, enabled, share_config, created_by, updated_by)
+                VALUES ($1, $1, 'streamable_http', 'https://example.com/mcp', 1, $2::jsonb, 'admin', 'admin')
+                """,
+                slug,
+                json.dumps(config),
+            )
+
+        agent_scope = {"access_level": "user", "user_uids": [manager_uid]}
+        created = await test_client.post(
+            "/api/agent",
+            headers=admin_headers,
+            json={
+                "name": "Pytest MCP resource agent",
+                "slug": agent_slug,
+                "backend_id": "ChatbotAgent",
+                "config_json": {"context": {"mcps": [visible_slug, hidden_slug]}},
+                "share_config": {"version": 2, "read_scope": agent_scope, "manage_scope": agent_scope},
+            },
+        )
+        assert created.status_code == 200, created.text
+        created_agent = True
+
+        engine = create_async_engine(os.environ["POSTGRES_URL"])
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with session_factory() as session:
+                manager = await session.scalar(select(User).where(User.uid == manager_uid))
+                normalized = await normalize_agent_context_config(
+                    {"mcps": [visible_slug, hidden_slug, hidden_new_slug]},
+                    db=session,
+                    user=manager,
+                    context_schema=ChatBotContext,
+                )
+            assert normalized["mcps"] == [visible_slug]
+        finally:
+            await engine.dispose()
+
+        await conn.execute(
+            "UPDATE mcp_servers SET share_config = $2::jsonb WHERE slug = $1",
+            visible_slug,
+            json.dumps(private_config),
+        )
+        saved = await test_client.put(
+            f"/api/agent/{agent_slug}",
+            headers=manager_headers,
+            json={"config_json": {"context": {"mcps": []}}},
+        )
+        assert saved.status_code == 200, saved.text
+        assert (await _read_agent_config(conn, agent_slug))["context"]["mcps"] == [visible_slug, hidden_slug]
+
+        forbidden = await test_client.put(
+            f"/api/agent/{agent_slug}",
+            headers=manager_headers,
+            json={"config_json": {"context": {"mcps": [hidden_new_slug]}}},
+        )
+        assert forbidden.status_code == 422, forbidden.text
+        assert "无权新增智能体资源 mcps" in forbidden.json()["detail"]
+        assert (await _read_agent_config(conn, agent_slug))["context"]["mcps"] == [visible_slug, hidden_slug]
+    finally:
+        if created_agent:
+            deleted = await test_client.delete(f"/api/agent/{agent_slug}", headers=admin_headers)
+            assert deleted.status_code in {200, 404}, deleted.text
+        await conn.execute(
+            "DELETE FROM mcp_servers WHERE slug = ANY($1::text[])",
+            [visible_slug, hidden_slug, hidden_new_slug],
+        )
+        await conn.close()
+
+
 def _user_share_config(*uids: str) -> str:
     """生成测试资源的用户可见范围。"""
     return json.dumps(

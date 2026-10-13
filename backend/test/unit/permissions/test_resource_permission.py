@@ -13,6 +13,7 @@ from yuxi.permissions import (
     resolve_agent_permission,
     resolve_knowledge_base_capabilities,
     resolve_knowledge_base_permission,
+    resolve_mcp_permission,
     resolve_skill_permission,
 )
 
@@ -103,6 +104,58 @@ def _resource(created_by="owner", share_config=None, owner_department_id=None):
     )
 
 
+def test_mcp_legacy_config_preserves_use_without_grant():
+    server = _resource(created_by="user-1")
+
+    assert resolve_mcp_permission(_user(), server) == ResourcePermission.EDIT
+    assert resolve_mcp_permission(_user(role="admin"), server) == ResourcePermission.MANAGE
+
+
+def test_mcp_legacy_config_denies_missing_authenticated_identity():
+    server = _resource()
+
+    assert resolve_mcp_permission(None, server) == ResourcePermission.NONE
+    assert resolve_mcp_permission(SimpleNamespace(role="user"), server) == ResourcePermission.NONE
+
+
+def test_mcp_new_private_config_does_not_inherit_creator_access():
+    server = _resource(
+        created_by="user-1", share_config={"version": 2, "read_scope": None, "edit_scope": None, "manage_scope": None}
+    )
+
+    assert resolve_mcp_permission(_user(), server) == ResourcePermission.NONE
+    assert resolve_mcp_permission(_user(role="admin"), server) == ResourcePermission.MANAGE
+
+
+def test_mcp_scopes_separate_view_use_and_grant():
+    server = _resource(
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "global"},
+            "edit_scope": {"access_level": "department", "department_ids": [1]},
+            "manage_scope": {"access_level": "user", "user_uids": ["user-1"]},
+        }
+    )
+
+    assert resolve_mcp_permission(_user(uid="viewer", department_id=2), server) == ResourcePermission.READ
+    assert resolve_mcp_permission(_user(uid="operator", department_id=1), server) == ResourcePermission.EDIT
+    assert resolve_mcp_permission(_user(uid="user-1", department_id=1), server) == ResourcePermission.MANAGE
+    assert resolve_mcp_permission(_user(uid="user-1", department_id=2), server) == ResourcePermission.READ
+
+
+def test_mcp_incomplete_scope_tree_fails_closed():
+    server = _resource(
+        share_config={
+            "version": 2,
+            "read_scope": None,
+            "edit_scope": {"access_level": "global"},
+            "manage_scope": {"access_level": "global"},
+        }
+    )
+
+    assert resolve_mcp_permission(_user(), server) == ResourcePermission.NONE
+
+
 def test_knowledge_base_legacy_department_manage_scope_does_not_grant_management():
     config = {
         "version": 2,
@@ -178,12 +231,10 @@ def test_department_read_scope_accepts_in_department_user_edit_scope():
 
     resource = _resource(share_config=config)
     assert (
-        resolve_knowledge_base_permission(_user(uid="editor-1", department_id=1), resource)
-        == ResourcePermission.EDIT
+        resolve_knowledge_base_permission(_user(uid="editor-1", department_id=1), resource) == ResourcePermission.EDIT
     )
     assert (
-        resolve_knowledge_base_permission(_user(uid="editor-1", department_id=2), resource)
-        == ResourcePermission.NONE
+        resolve_knowledge_base_permission(_user(uid="editor-1", department_id=2), resource) == ResourcePermission.NONE
     )
 
 
@@ -243,13 +294,9 @@ def test_knowledge_base_owner_department_can_be_read_from_share_config():
     )
 
     assert (
-        resolve_knowledge_base_permission(_user(role="admin", department_id=7), resource)
-        == ResourcePermission.MANAGE
+        resolve_knowledge_base_permission(_user(role="admin", department_id=7), resource) == ResourcePermission.MANAGE
     )
-    assert (
-        resolve_knowledge_base_permission(_user(role="admin", department_id=8), resource)
-        == ResourcePermission.NONE
-    )
+    assert resolve_knowledge_base_permission(_user(role="admin", department_id=8), resource) == ResourcePermission.NONE
 
 
 def test_legacy_global_knowledge_base_manage_scope_is_ignored():
@@ -411,4 +458,4 @@ def test_v2_scope_validation_rejects_disallowed_access_level():
             },
             allowed_access_levels={"user"},
         )
-    resolve_knowledge_base_capabilities,
+    (resolve_knowledge_base_capabilities,)

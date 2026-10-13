@@ -35,14 +35,32 @@ async def test_personal_skill_share_requires_review_and_preserves_source(test_cl
 
     published_slug = None
     try:
-        submitted = await test_client.post(f"/api/skills/personal/{slug}/share-request", headers=headers)
+        missing_reason = await test_client.post(f"/api/skills/personal/{slug}/share-request", headers=headers)
+        assert missing_reason.status_code == 422, missing_reason.text
+        blank_reason = await test_client.post(
+            f"/api/skills/personal/{slug}/share-request",
+            headers=headers,
+            json={"application_reason": "   "},
+        )
+        assert blank_reason.status_code == 400, blank_reason.text
+
+        submitted = await test_client.post(
+            f"/api/skills/personal/{slug}/share-request",
+            headers=headers,
+            json={"application_reason": "  用于部门共同处理问题  "},
+        )
         assert submitted.status_code == 200, submitted.text
         request = submitted.json()["data"]
         assert request["status"] == "pending"
+        assert request["application_reason"] == "用于部门共同处理问题"
         assert request["owner_uid"] == standard_user["user"]["uid"]
         assert len(request["content_hash"]) == 64
 
-        duplicate = await test_client.post(f"/api/skills/personal/{slug}/share-request", headers=headers)
+        duplicate = await test_client.post(
+            f"/api/skills/personal/{slug}/share-request",
+            headers=headers,
+            json={"application_reason": "重复申请"},
+        )
         assert duplicate.status_code == 400, duplicate.text
         forbidden = await test_client.post(
             f"/api/skills/share-requests/{request['id']}/approve",
@@ -53,7 +71,16 @@ async def test_personal_skill_share_requires_review_and_preserves_source(test_cl
 
         own_list = await test_client.get("/api/skills/share-requests", headers=headers)
         assert own_list.status_code == 200, own_list.text
-        assert any(item["id"] == request["id"] for item in own_list.json()["data"])
+        assert any(
+            item["id"] == request["id"] and item["application_reason"] == "用于部门共同处理问题"
+            for item in own_list.json()["data"]
+        )
+        admin_list = await test_client.get("/api/skills/share-requests", headers=admin_headers)
+        assert admin_list.status_code == 200, admin_list.text
+        assert any(
+            item["id"] == request["id"] and item["application_reason"] == "用于部门共同处理问题" and item["owner_name"]
+            for item in admin_list.json()["data"]
+        )
         snapshot = await test_client.get(f"/api/skills/share-requests/{request['id']}/snapshot", headers=admin_headers)
         assert snapshot.status_code == 200, snapshot.text
         assert snapshot.json()["data"]["content"] == original
@@ -65,6 +92,10 @@ async def test_personal_skill_share_requires_review_and_preserves_source(test_cl
         )
         assert approved.status_code == 200, approved.text
         assert approved.json()["data"]["status"] == "approved"
+        assert approved.json()["data"]["application_reason"] == "用于部门共同处理问题"
+        assert approved.json()["data"]["review_note"] == "核验通过"
+        assert approved.json()["data"]["reviewer_uid"]
+        assert approved.json()["data"]["reviewed_at"]
         published_slug = approved.json()["data"]["published_slug"]
         assert published_slug
         assert approved.json()["data"]["department_ids"] == [department_id]

@@ -18,7 +18,10 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yuxi.storage.postgres.models_business import MCPServer
+from yuxi.permissions import ResourcePermission, normalize_permission_config, resolve_mcp_permission
+from yuxi.repositories.department_repository import DepartmentRepository
+from yuxi.repositories.user_repository import UserRepository
+from yuxi.storage.postgres.models_business import MCPServer, User
 from yuxi.utils import logger
 
 # =============================================================================
@@ -35,6 +38,7 @@ _mcp_tools_cache: dict[str, list[Callable[..., Any]]] = {}
 # MCP tools statistics (for reporting enabled/disabled counts)
 _mcp_tools_stats: dict[str, dict[str, int]] = {}
 _USER_CONFIGURABLE_TRANSPORTS = ("sse", "streamable_http")
+_PRIVATE_MCP_SHARE_CONFIG = {"version": 2, "read_scope": None, "edit_scope": None, "manage_scope": None}
 
 # Default MCP Server configurations (Imported to DB on first run)
 _DEFAULT_MCP_SERVERS: dict[str, dict[str, Any]] = {}
@@ -144,6 +148,7 @@ async def ensure_builtin_mcp_servers_in_db() -> None:
                         tags=config.get("tags"),
                         icon=config.get("icon"),
                         enabled=0,
+                        share_config=_PRIVATE_MCP_SHARE_CONFIG.copy(),
                         created_by="system",
                         updated_by="system",
                     )
@@ -400,6 +405,167 @@ async def get_all_mcp_servers(db: AsyncSession) -> list[MCPServer]:
     return list(result.scalars().all())
 
 
+async def get_usable_mcp_server_slugs(db: AsyncSession, user: Any) -> set[str]:
+    """只返回当前用户可调用、且全局启用的 MCP 标识。"""
+
+    servers = await get_all_mcp_servers(db)
+    return {
+        server.slug
+        for server in servers
+        if server.enabled
+        and not requires_mcp_stdio_migration(server)
+        and resolve_mcp_permission(user, server) in {ResourcePermission.EDIT, ResourcePermission.MANAGE}
+    }
+
+
+async def get_mcp_sharing_options_for_operator(db: AsyncSession, server: MCPServer, operator: User) -> dict:
+    """返回系统管理员或被委派管理者可编辑的授权成员。"""
+
+    department_repo = DepartmentRepository(db)
+    user_repo = UserRepository(db)
+    if operator.role in {"admin", "superadmin"}:
+        departments = await department_repo.list_departments()
+        users_with_departments = await user_repo.list_with_department(limit=None)
+        visible_config = server.share_config
+        protected_scopes = {}
+    else:
+        department_id = operator.department_id
+        if department_id is None:
+            raise PermissionError("未分配部门，不能管理 MCP 授权")
+        department = await department_repo.get_by_id(department_id)
+        departments = [department] if department is not None else []
+        users_with_departments = await user_repo.list_with_department(limit=None, department_id=department_id)
+        local_uids = {user.uid for user, _ in users_with_departments}
+        config = normalize_permission_config(server.share_config)
+        visible_config = {"version": 2}
+        protected_scopes = {}
+        for key in ("read_scope", "edit_scope", "manage_scope"):
+            scope = config[key]
+            if scope is None:
+                visible_config[key] = None
+                protected_scopes[key] = False
+                continue
+            if scope["access_level"] == "department":
+                local_ids = [identifier for identifier in scope["department_ids"] if identifier == department_id]
+                visible_config[key] = {**scope, "department_ids": local_ids}
+                protected_scopes[key] = len(local_ids) != len(scope["department_ids"])
+            elif scope["access_level"] == "user":
+                local_members = [uid for uid in scope["user_uids"] if uid in local_uids]
+                visible_config[key] = {**scope, "user_uids": local_members}
+                protected_scopes[key] = len(local_members) != len(scope["user_uids"])
+            else:
+                visible_config[key] = scope
+                protected_scopes[key] = True
+
+    return {
+        "departments": [{"id": department.id, "name": department.name} for department in departments],
+        "users": [
+            {
+                "uid": user.uid,
+                "username": user.username,
+                "role": user.role,
+                "department_id": user.department_id,
+                "department_name": department_name,
+            }
+            for user, department_name in users_with_departments
+        ],
+        "share_config": visible_config,
+        "protected_scopes": protected_scopes,
+    }
+
+
+async def update_mcp_share_config(
+    db: AsyncSession,
+    *,
+    slug: str,
+    share_config: dict,
+    operator: Any,
+) -> MCPServer:
+    """在锁定 MCP 行后校验共享管理权限并更新范围。"""
+
+    result = await db.execute(select(MCPServer).where(MCPServer.slug == slug).with_for_update())
+    server = result.scalar_one_or_none()
+    if server is None:
+        raise MCPServerNotFoundError(f"Server '{slug}' does not exist")
+    permission = resolve_mcp_permission(operator, server)
+    if permission == ResourcePermission.NONE:
+        raise MCPServerNotFoundError(f"Server '{slug}' does not exist")
+    if permission != ResourcePermission.MANAGE:
+        raise PermissionError("当前用户无权管理此 MCP 的共享范围")
+
+    if set(share_config) != {"version", "read_scope", "edit_scope", "manage_scope"}:
+        raise ValueError("MCP 共享配置必须包含 version、read_scope、edit_scope、manage_scope")
+    candidate = dict(share_config)
+    if operator.role not in {"admin", "superadmin"}:
+        department_id = operator.department_id
+        if department_id is None:
+            raise PermissionError("未分配部门，不能管理 MCP 授权")
+        previous = normalize_permission_config(server.share_config)
+        local_uids = set(
+            (await db.execute(select(User.uid).where(User.is_deleted == 0, User.department_id == department_id)))
+            .scalars()
+            .all()
+        )
+        for key in ("read_scope", "edit_scope", "manage_scope"):
+            scope = candidate[key]
+            old_scope = previous[key]
+            if scope is not None and not isinstance(scope, dict):
+                raise ValueError("权限范围必须是对象")
+            access_level = scope.get("access_level") if scope is not None else None
+            if old_scope and old_scope["access_level"] == "global" and (scope is None or access_level != "global"):
+                raise PermissionError("全员授权只能由系统管理员调整")
+            old_external_departments = (
+                set(old_scope["department_ids"]) - {department_id}
+                if old_scope and old_scope["access_level"] == "department"
+                else set()
+            )
+            old_external_users = (
+                set(old_scope["user_uids"]) - local_uids if old_scope and old_scope["access_level"] == "user" else set()
+            )
+            if (old_external_departments or old_external_users) and (
+                scope is None or access_level != old_scope["access_level"]
+            ):
+                raise PermissionError("其他部门的既有授权只能由系统管理员调整")
+            if scope is None:
+                continue
+            if access_level == "global":
+                if old_scope is None or old_scope["access_level"] != "global":
+                    raise PermissionError("被委派的 MCP 管理者只能给本部门授权")
+            elif access_level == "department":
+                raw_ids = scope.get("department_ids")
+                if not isinstance(raw_ids, list):
+                    raise ValueError("部门权限成员必须是数组")
+                try:
+                    submitted_ids = {int(identifier) for identifier in raw_ids}
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("部门权限成员必须是有效部门 ID") from exc
+                if submitted_ids - {department_id}:
+                    raise PermissionError("被委派的 MCP 管理者只能给本部门授权")
+                candidate[key] = {**scope, "department_ids": sorted(submitted_ids | old_external_departments)}
+            elif access_level == "user":
+                raw_uids = scope.get("user_uids")
+                if not isinstance(raw_uids, list):
+                    raise ValueError("指定用户权限成员必须是数组")
+                submitted_uids = {str(uid).strip() for uid in raw_uids if str(uid).strip()}
+                if submitted_uids - local_uids:
+                    raise PermissionError("被委派的 MCP 管理者只能给本部门授权")
+                candidate[key] = {**scope, "user_uids": sorted(submitted_uids | old_external_users)}
+            else:
+                raise ValueError("无效的资源权限范围")
+    normalized = normalize_permission_config(candidate, strict=True)
+    if normalized["edit_scope"] is not None and normalized["read_scope"] is None:
+        raise ValueError("使用范围需要包含在查看范围内")
+    if normalized["manage_scope"] is not None and normalized["edit_scope"] is None:
+        raise ValueError("管理范围需要包含在使用范围内")
+    if normalized["manage_scope"] is not None and normalized["manage_scope"]["access_level"] != "user":
+        raise ValueError("MCP 管理权限只能授予指定用户")
+    server.share_config = normalized
+    server.updated_by = operator.username
+    await db.commit()
+    await db.refresh(server)
+    return server
+
+
 async def create_mcp_server(
     db: AsyncSession,
     slug: str,
@@ -436,6 +602,7 @@ async def create_mcp_server(
         tags=tags,
         icon=icon,
         enabled=1,
+        share_config=_PRIVATE_MCP_SHARE_CONFIG.copy(),
         created_by=created_by,
         updated_by=created_by,
     )

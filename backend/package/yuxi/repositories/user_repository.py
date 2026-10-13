@@ -126,7 +126,7 @@ class UserRepository:
             return result.scalar_one_or_none()
 
     async def list_users(
-        self, skip: int = 0, limit: int = 100, department_id: int | None = None, role: str | None = None
+        self, skip: int = 0, limit: int | None = 100, department_id: int | None = None, role: str | None = None
     ) -> list[User]:
         """获取用户列表"""
         async with self._session() as session:

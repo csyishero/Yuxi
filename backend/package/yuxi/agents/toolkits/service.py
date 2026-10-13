@@ -96,6 +96,7 @@ def get_tool_instances_by_category(category: str) -> list[Any]:
 
 async def resolve_configured_runtime_tools(context) -> list[Any]:
     from yuxi.agents.mcp.service import get_enabled_mcp_tools
+    from yuxi.agents.toolkits.mcp_execution_guard import guard_mcp_tool
 
     selected_tools = []
     selected_tool_names: set[str] = set()
@@ -144,7 +145,7 @@ async def resolve_configured_runtime_tools(context) -> list[Any]:
                 raise RuntimeError(
                     f"工具名冲突：MCP '{server_name}' 的 '{tool.name}' 与 {selected_tool_sources[tool.name]} 工具同名"
                 )
-            selected_tools.append(tool)
+            selected_tools.append(guard_mcp_tool(tool, uid=getattr(context, "uid", ""), server_slug=server_name))
             selected_tool_names.add(tool.name)
             selected_tool_sources[tool.name] = f"MCP '{server_name}'"
 

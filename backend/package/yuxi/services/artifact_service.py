@@ -18,9 +18,15 @@ from yuxi.agents.backends.paths import (
     runtime_user_data_path,
     workspace_scope_from_runtime_path,
 )
-from yuxi.agents.skills.service import ResolvedSkill, list_accessible_skills
+from yuxi.agents.skills.service import (
+    MAX_SKILL_MARKDOWN_PROJECTION_BYTES,
+    ResolvedSkill,
+    list_accessible_skills,
+    project_skill_markdown_mcp_dependencies,
+)
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.file_preview import render_file_preview
+from yuxi.services.mcp_reference_service import get_visible_mcp_reference_slugs
 from yuxi.services.workdir_service import resolve_authorized_workdir
 from yuxi.utils.filepreview import (
     MAX_BINARY_PREVIEW_SIZE_BYTES,
@@ -50,7 +56,7 @@ def _normalize_artifact_path(workdir_path: str, path: str) -> str:
 
 async def _require_skill_artifact_access(
     *, normalized_path: str, current_uid: str, db
-) -> tuple[ResolvedSkill, str] | None:
+) -> tuple[ResolvedSkill, str, set[str] | None] | None:
     skills_prefix = f"{VIRTUAL_SKILLS_PATH}/"
     if not normalized_path.startswith(skills_prefix):
         return None
@@ -65,20 +71,49 @@ async def _require_skill_artifact_access(
     relative_path = normalized_path[len(skills_prefix) + len(slug) :].lstrip("/")
     if not relative_path:
         raise HTTPException(status_code=400, detail="artifact path is not a regular file")
-    return skill, relative_path
+    visible_mcps = (
+        await get_visible_mcp_reference_slugs(db, user)
+        if relative_path == "SKILL.md" and skill.source_scope != "personal"
+        else None
+    )
+    return skill, relative_path, visible_mcps
 
 
-def _copy_skill_file_to_path(skill: ResolvedSkill, relative_path: str, target_path: str, max_bytes: int) -> int:
+def _copy_skill_file_to_path(
+    skill: ResolvedSkill,
+    relative_path: str,
+    target_path: str,
+    max_bytes: int,
+    visible_mcp_slugs: set[str] | None,
+) -> int:
     """从已授权 Skill 真实来源有界复制普通文件。"""
     parts = tuple(PurePosixPath(relative_path).parts)
     if not parts or ".." in parts:
         raise ValueError("invalid skill artifact path")
     target_fd = None
     with open_regular_file_fd(skill.source_dir, parts) as (source_fd, source_stat):
-        if source_stat.st_size > max_bytes:
+        project_frontmatter = (
+            relative_path == "SKILL.md" and skill.source_scope != "personal" and visible_mcp_slugs is not None
+        )
+        effective_limit = min(max_bytes, MAX_SKILL_MARKDOWN_PROJECTION_BYTES) if project_frontmatter else max_bytes
+        if source_stat.st_size > effective_limit:
             raise FileTransferLimitError("file exceeds transfer limit")
         try:
             target_fd = os.open(target_path, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+            if project_frontmatter:
+                content = bytearray()
+                while chunk := os.read(source_fd, 1024 * 1024):
+                    content.extend(chunk)
+                    if len(content) > effective_limit:
+                        raise FileTransferLimitError("file exceeds transfer limit")
+                projected = project_skill_markdown_mcp_dependencies(content.decode("utf-8"), visible_mcp_slugs)
+                payload = projected.encode("utf-8")
+                if len(payload) > max_bytes:
+                    raise FileTransferLimitError("file exceeds transfer limit")
+                offset = 0
+                while offset < len(payload):
+                    offset += os.write(target_fd, payload[offset:])
+                return offset
             total = 0
             while chunk := os.read(source_fd, 1024 * 1024):
                 total += len(chunk)
@@ -116,6 +151,7 @@ async def _copy_artifact_to_path(
             skill_source[1],
             target_path,
             max_bytes,
+            skill_source[2],
         )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail="artifact access denied") from exc
@@ -123,7 +159,7 @@ async def _copy_artifact_to_path(
         raise HTTPException(status_code=400, detail="artifact path is not a regular file") from exc
     except FileTransferLimitError as exc:
         raise HTTPException(status_code=413, detail="artifact exceeds transfer limit") from exc
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, UnicodeError, ValueError) as exc:
         raise HTTPException(status_code=404, detail="artifact not found") from exc
 
 

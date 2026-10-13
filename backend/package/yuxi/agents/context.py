@@ -473,14 +473,14 @@ async def resolve_agent_resource_options(
             _resource_option(item.kb_id, item.name, item.description) for item in databases if item.kb_id
         ]
     if "mcps" in fields_to_load:
-        from yuxi.agents.mcp.service import get_all_mcp_servers, get_enabled_mcp_server_slugs
+        from yuxi.agents.mcp.service import get_all_mcp_servers, get_usable_mcp_server_slugs
 
         servers = await get_all_mcp_servers(db)
-        enabled_slugs = set(await get_enabled_mcp_server_slugs(db=db))
+        usable_slugs = await get_usable_mcp_server_slugs(db, user)
         options["mcps"] = [
             _resource_option(server.slug, server.name, server.description)
             for server in servers
-            if server.slug in enabled_slugs
+            if server.slug in usable_slugs
         ]
     if "skills" in fields_to_load:
         from yuxi.agents.skills.service import list_accessible_skills

@@ -227,6 +227,9 @@
             :message="`共享申请：${shareRequestStatusLabel(previewShareRequest.status)}${previewShareRequest.published_slug ? ` · ${previewShareRequest.published_slug}` : ''}${previewShareRequest.review_note ? ` · ${previewShareRequest.review_note}` : ''}`"
             class="skill-share-warning"
           />
+          <p v-if="previewShareRequest?.application_reason" class="skill-share-application-summary">
+            申请原因：{{ previewShareRequest.application_reason }}
+          </p>
           <div v-if="skillPreviewLoading" class="skill-preview-loading">
             <a-spin />
           </div>
@@ -256,7 +259,7 @@
               type="primary"
               :disabled="previewShareRequest?.status === 'pending'"
               :loading="submittingShareRequest"
-              @click="submitPreviewShareRequest"
+              @click="openShareApplication"
             >
               {{ previewShareRequest?.status === 'pending' ? '等待审核' : '申请共享' }}
             </a-button>
@@ -279,6 +282,30 @@
           </div>
         </div>
       </div>
+    </a-modal>
+
+    <a-modal
+      v-model:open="shareApplicationVisible"
+      title="申请共享 Skill"
+      width="560px"
+      ok-text="提交申请"
+      :confirm-loading="submittingShareRequest"
+      :ok-button-props="{ disabled: !applicationReason.trim() }"
+      @ok="submitPreviewShareRequest"
+      @cancel="closeShareApplication"
+    >
+      <p class="skill-share-application-intro">
+        将「{{ previewSkill?.name }}」的当前内容提交给管理员审核。提交后即使修改个人 Skill，本次审核内容也不会改变。
+      </p>
+      <label class="skill-share-application-label" for="skill-share-application-reason">申请原因</label>
+      <a-textarea
+        id="skill-share-application-reason"
+        v-model:value="applicationReason"
+        placeholder="说明共享用途、适用人员或使用场景"
+        :rows="4"
+        :maxlength="1000"
+        show-count
+      />
     </a-modal>
 
     <a-modal
@@ -312,7 +339,7 @@
     >
       <a-spin :spinning="shareRequestsLoading">
         <a-empty v-if="!shareRequests.length" description="暂无共享申请" />
-        <div v-for="request in shareRequests" :key="request.id" class="skill-share-request">
+        <div v-for="request in orderedShareRequests" :key="request.id" class="skill-share-request">
           <div class="skill-share-request-heading">
             <strong>{{ request.name }}</strong>
             <a-tag :color="request.status === 'pending' ? 'blue' : request.status === 'approved' ? 'green' : 'default'">
@@ -320,11 +347,18 @@
             </a-tag>
           </div>
           <div class="skill-share-request-meta">
-            {{ request.personal_slug }} · 申请人 {{ request.owner_uid }}
+            申请人 {{ request.owner_name || request.owner_uid }}<span v-if="request.owner_name && request.owner_name !== request.owner_uid">（{{ request.owner_uid }}）</span>
+            · 个人 Skill {{ request.personal_slug }} · 提交于 {{ formatDateTime(request.created_at) }}
             <span v-if="request.published_slug"> · 已发布为 {{ request.published_slug }}</span>
           </div>
-          <div class="skill-share-request-meta">内容摘要 {{ request.content_hash.slice(0, 12) }}</div>
-          <p v-if="request.review_note">审核意见：{{ request.review_note }}</p>
+          <div class="skill-share-request-reason">
+            <span>申请原因</span>
+            <p>{{ request.application_reason || '旧申请未填写原因' }}</p>
+          </div>
+          <div v-if="request.reviewed_at" class="skill-share-request-meta">
+            {{ request.reviewer_uid || '管理员' }}于 {{ formatDateTime(request.reviewed_at) }}处理
+          </div>
+          <p v-if="request.review_note" class="skill-share-request-review-note">审核意见：{{ request.review_note }}</p>
           <a-button size="small" @click="openShareSnapshot(request)">查看提交内容</a-button>
           <template v-if="userStore.isAdmin && request.status === 'pending'">
             <ShareConfigForm
@@ -686,6 +720,7 @@ import { useUserStore } from '@/stores/user'
 import { formatExtensionCardTitle } from '@/utils/extensionDisplayName'
 import { getShareConfigLabel } from '@/utils/shareConfig'
 import { getSkillIcon } from '@/utils/skill_icon_utils'
+import { formatDateTime } from '@/utils/time'
 
 const RETIRED_BUILTIN_SKILL_SLUGS = new Set(['image-gen', 'mysql-reporter'])
 
@@ -717,6 +752,8 @@ const skillPreviewLoading = ref(false)
 const skillPreviewError = ref('')
 const deletingPreviewSkill = ref(false)
 const submittingShareRequest = ref(false)
+const shareApplicationVisible = ref(false)
+const applicationReason = ref('')
 const directPublishVisible = ref(false)
 const directPublishSkill = ref(null)
 const directPublishShareConfig = ref(null)
@@ -891,6 +928,11 @@ const canDeletePreviewSkill = computed(
 const pendingShareRequestCount = computed(
   () => shareRequests.value.filter((request) => request.status === 'pending').length
 )
+const orderedShareRequests = computed(() =>
+  [...shareRequests.value].sort(
+    (left, right) => Number(right.status === 'pending') - Number(left.status === 'pending')
+  )
+)
 const previewShareRequest = computed(() => {
   if (previewSkill.value?.sourceScope !== 'personal') return null
   const ownerUid = previewSkill.value.owner_uid || userStore.uid
@@ -931,18 +973,45 @@ const loadShareUsers = async () => {
   }
 }
 
-/** 从个人 Skill 预览提交独立的审核快照。 */
+/** 打开当前个人 Skill 的共享申请。 */
+const openShareApplication = () => {
+  if (userStore.isAdmin || !previewSkill.value?.slug || previewShareRequest.value?.status === 'pending') return
+  applicationReason.value = ''
+  shareApplicationVisible.value = true
+}
+
+/** 关闭共享申请并清空未提交内容。 */
+const closeShareApplication = () => {
+  shareApplicationVisible.value = false
+  applicationReason.value = ''
+}
+
+/** 从个人 Skill 预览提交独立的审核快照与申请原因。 */
 const submitPreviewShareRequest = async () => {
   if (userStore.isAdmin || !previewSkill.value?.slug || submittingShareRequest.value) return
+  const reason = applicationReason.value.trim()
+  if (!reason) {
+    message.warning('请填写申请原因')
+    return
+  }
   submittingShareRequest.value = true
   try {
-    await skillApi.submitSkillShareRequest(previewSkill.value.slug)
-    await fetchShareRequests()
+    const result = await skillApi.submitSkillShareRequest(previewSkill.value.slug, reason)
+    if (result?.data) {
+      shareRequests.value = [result.data, ...shareRequests.value.filter((item) => item.id !== result.data.id)]
+    }
+    closeShareApplication()
     message.success('共享申请已提交，等待管理员审核')
   } catch (error) {
     message.error(error?.response?.data?.detail || '提交共享申请失败')
+    return
   } finally {
     submittingShareRequest.value = false
+  }
+  try {
+    await fetchShareRequests()
+  } catch (error) {
+    message.warning(error?.response?.data?.detail || '申请已提交，但刷新状态失败')
   }
 }
 
@@ -1819,6 +1888,24 @@ defineExpose({
   margin-bottom: 12px;
 }
 
+.skill-share-application-summary,
+.skill-share-application-intro {
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.skill-share-application-summary {
+  white-space: pre-wrap;
+}
+
+.skill-share-application-label {
+  display: block;
+  margin: 12px 0 8px;
+  color: var(--color-text);
+  font-weight: 600;
+}
+
 .skill-share-request {
   padding: 16px 0;
   border-bottom: 1px solid var(--gray-100);
@@ -1836,6 +1923,31 @@ defineExpose({
   margin: 6px 0;
   color: var(--color-text-secondary);
   overflow-wrap: anywhere;
+}
+
+.skill-share-request-reason {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--gray-150);
+  border-radius: 8px;
+  background: var(--gray-25);
+  overflow-wrap: anywhere;
+}
+
+.skill-share-request-reason span {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.skill-share-request-reason p {
+  margin: 6px 0 0;
+  color: var(--color-text);
+  white-space: pre-wrap;
+}
+
+.skill-share-request-review-note {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .skill-share-review-actions {

@@ -577,3 +577,30 @@ test('文件预览 API 绕过 HTTP 缓存读取当前字节', async () => {
     assert.ok(calls.every((call) => call.cache === 'no-store'))
   })
 })
+
+test('Skill 共享申请将填写的原因送到审核接口', async () => {
+  await withServer(async (server) => {
+    setActivePinia(createPinia())
+    const { useUserStore } = await server.ssrLoadModule('/src/stores/user.js')
+    const user = useUserStore()
+    user.token = 'test-token'
+    user.userId = 1
+    let submitted = null
+    globalThis.fetch = async (url, options) => {
+      submitted = { url, method: options.method, body: JSON.parse(options.body) }
+      return new Response(JSON.stringify({ success: true, data: { id: 'request-1' } }), {
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+
+    const { skillApi } = await server.ssrLoadModule('/src/apis/skill_api.js')
+    const result = await skillApi.submitSkillShareRequest('report-skill', '供本部门月报协作使用')
+
+    assert.deepEqual(submitted, {
+      url: '/api/skills/personal/report-skill/share-request',
+      method: 'POST',
+      body: { application_reason: '供本部门月报协作使用' }
+    })
+    assert.equal(result.data.id, 'request-1')
+  })
+})

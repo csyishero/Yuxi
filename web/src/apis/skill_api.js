@@ -166,8 +166,10 @@ export const deletePersonalSkill = async (slug) => {
   return apiDelete(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}`)
 }
 
-export const submitSkillShareRequest = async (slug) => {
-  return apiPost(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/share-request`)
+export const submitSkillShareRequest = async (slug, applicationReason) => {
+  return apiPost(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/share-request`, {
+    application_reason: applicationReason
+  })
 }
 
 export const listSkillShareRequests = async () => {

@@ -169,12 +169,21 @@ def _normalize_scope(scope: dict | None) -> dict | None:
     if access_level == "global":
         return DEFAULT_SCOPE.copy()
     if access_level == "department":
-        department_ids = sorted({int(value) for value in scope.get("department_ids") or []})
+        raw_department_ids = scope.get("department_ids") or []
+        if not isinstance(raw_department_ids, list):
+            raise ValueError("部门权限成员必须是数组")
+        try:
+            department_ids = sorted({int(value) for value in raw_department_ids})
+        except (TypeError, ValueError) as exc:
+            raise ValueError("部门权限成员必须是有效部门 ID") from exc
         if not department_ids:
             raise ValueError("部门权限至少需要选择一个部门")
         return {"access_level": access_level, "department_ids": department_ids, "user_uids": []}
 
-    user_uids = sorted({str(value).strip() for value in scope.get("user_uids") or [] if str(value).strip()})
+    raw_user_uids = scope.get("user_uids") or []
+    if not isinstance(raw_user_uids, list):
+        raise ValueError("指定用户权限成员必须是数组")
+    user_uids = sorted({str(value).strip() for value in raw_user_uids if str(value).strip()})
     if not user_uids:
         raise ValueError("指定用户权限至少需要选择一个用户")
     return {"access_level": access_level, "department_ids": [], "user_uids": user_uids}
@@ -302,9 +311,7 @@ def resolve_resource_permission(
     config = normalize_permission_config(
         raw_share_config,
     )
-    if owner_grants_manage and str(_value(resource, "created_by", "") or "") == str(
-        _value(user, "uid", "") or ""
-    ):
+    if owner_grants_manage and str(_value(resource, "created_by", "") or "") == str(_value(user, "uid", "") or ""):
         granted = ResourcePermission.MANAGE
     elif (
         scope_matches(user, config["manage_scope"])
@@ -333,6 +340,26 @@ def require_resource_permission(
 
     if RESOURCE_PERMISSION_ORDER[actual] < RESOURCE_PERMISSION_ORDER[required]:
         raise ResourcePermissionDenied(f"需要 {required.value} 权限，当前为 {actual.value}")
+
+
+def resolve_mcp_permission(user: Any, server: ShareableResource) -> ResourcePermission:
+    """解析 MCP 的查看、使用和共享管理权限。"""
+
+    if not _value(user, "uid"):
+        return ResourcePermission.NONE
+    if _value(user, "role") in {"admin", "superadmin"}:
+        return ResourcePermission.MANAGE
+    if _value(server, "share_config") is None:
+        # 历史 MCP 原本对所有登录用户可用，但不委派共享管理权限。
+        return ResourcePermission.EDIT
+    config = normalize_permission_config(_value(server, "share_config"))
+    if not scope_matches(user, config["read_scope"]):
+        return ResourcePermission.NONE
+    if not scope_matches(user, config.get("edit_scope")):
+        return ResourcePermission.READ
+    if not scope_matches(user, config["manage_scope"]):
+        return ResourcePermission.EDIT
+    return ResourcePermission.MANAGE
 
 
 def resolve_knowledge_base_permission(user: Any, resource: ShareableResource) -> ResourcePermission:

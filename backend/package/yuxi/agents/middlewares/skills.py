@@ -18,6 +18,7 @@ from yuxi.agents.mcp.service import get_enabled_mcp_tools
 from yuxi.agents.skills.runtime import RuntimeSkill, build_dependency_bundle
 from yuxi.agents.skills.service import is_valid_skill_slug, normalize_string_list
 from yuxi.agents.toolkits import get_all_tool_instances
+from yuxi.agents.toolkits.mcp_execution_guard import guard_mcp_tool
 from yuxi.utils.logging_config import logger
 
 
@@ -183,8 +184,10 @@ class SkillsMiddleware(AgentMiddleware):
         # 并行加载所有 MCP 工具
         results = await asyncio.gather(*[load_mcp_tools(name) for name in unique_mcp_names])
         selected_tools = []
-        for tools in results:
-            selected_tools.extend(tools)
+        for server_name, tools in zip(unique_mcp_names, results, strict=True):
+            selected_tools.extend(
+                guard_mcp_tool(tool, uid=getattr(context, "uid", ""), server_slug=server_name) for tool in tools
+            )
 
         return selected_tools
 

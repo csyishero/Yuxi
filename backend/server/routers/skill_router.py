@@ -59,6 +59,7 @@ from yuxi.agents.skills.sharing import (
     submit_skill_share_request,
 )
 from yuxi.permissions import resolve_skill_permission
+from yuxi.services.mcp_reference_service import get_visible_mcp_reference_slugs, project_mcp_references
 from yuxi.agents.skills.remote_install import list_remote_skills, search_remote_skills
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.logging_config import logger
@@ -126,6 +127,10 @@ class SkillShareReviewRequest(BaseModel):
     note: str = Field("", max_length=2000, description="审核意见")
 
 
+class SkillShareSubmitRequest(BaseModel):
+    application_reason: str = Field(..., min_length=1, max_length=1000, description="申请共享的原因")
+
+
 def _raise_from_value_error(e: ValueError) -> None:
     message = str(e)
     status_code = 404 if "不存在" in message or "无权" in message else 400
@@ -147,8 +152,9 @@ def _summarize_results(results: list[dict]) -> dict[str, int]:
     }
 
 
-def _serialize_skill_for_user(item, user: User) -> dict:
+def _serialize_skill_for_user(item, user: User, visible_mcp_slugs: set[str] | None) -> dict:
     data = item.to_dict()
+    data["mcp_dependencies"] = project_mcp_references(data["mcp_dependencies"], visible_mcp_slugs)
     data["can_manage"] = user_can_manage_skill(user, item)
     data["effective_permission"] = resolve_skill_permission(user, item).value
     data["is_builtin"] = is_builtin_skill(item)
@@ -169,9 +175,14 @@ async def list_skill_cards_route(
             audience_search=audience_search,
             audience_department_id=audience_department_id,
         )
+        visible_mcp_slugs = (
+            await get_visible_mcp_reference_slugs(db, current_user)
+            if any(item.mcp_dependencies for item in items)
+            else None
+        )
         return {
             "success": True,
-            "data": [_serialize_skill_for_user(item, current_user) for item in items],
+            "data": [_serialize_skill_for_user(item, current_user, visible_mcp_slugs) for item in items],
             "allowed_access_levels": get_allowed_skill_access_levels(current_user),
         }
     except HTTPException:
@@ -254,7 +265,15 @@ async def list_accessible_skills_route(
 ):
     try:
         items = await list_accessible_skills(db, current_user)
-        return {"success": True, "data": [_serialize_skill_for_user(item, current_user) for item in items]}
+        visible_mcp_slugs = (
+            await get_visible_mcp_reference_slugs(db, current_user)
+            if any(item.mcp_dependencies for item in items)
+            else None
+        )
+        return {
+            "success": True,
+            "data": [_serialize_skill_for_user(item, current_user, visible_mcp_slugs) for item in items],
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -389,12 +408,15 @@ async def confirm_personal_skill_install_draft_route(
 @user_skills.post("/personal/{slug}/share-request")
 async def submit_skill_share_request_route(
     slug: str,
+    payload: SkillShareSubmitRequest,
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
     """提交当前用户个人 Skill 的共享申请。"""
     try:
-        item = await submit_skill_share_request(db, slug=slug, operator=current_user)
+        item = await submit_skill_share_request(
+            db, slug=slug, application_reason=payload.application_reason, operator=current_user
+        )
         return {"success": True, "data": item.to_dict()}
     except ValueError as e:
         _raise_from_value_error(e)
@@ -410,7 +432,7 @@ async def list_skill_share_requests_route(
 ):
     """列出当前用户可见的共享申请。"""
     items = await list_skill_share_requests(db, operator=current_user)
-    return {"success": True, "data": [item.to_dict() for item in items]}
+    return {"success": True, "data": items}
 
 
 @user_skills.get("/share-requests/{request_id}/snapshot")
@@ -591,7 +613,11 @@ async def update_personal_skill_dependencies_route(
             skill_dependencies=payload.skill_dependencies,
             operator=current_user,
         )
-        return {"success": True, "data": {**item.to_dict(), "can_manage": True}}
+        visible_mcp_slugs = await get_visible_mcp_reference_slugs(db, current_user) if item.mcp_dependencies else None
+        data = item.to_dict()
+        data["mcp_dependencies"] = project_mcp_references(data["mcp_dependencies"], visible_mcp_slugs)
+        data["can_manage"] = True
+        return {"success": True, "data": data}
     except (ValueError, PermissionError) as exc:
         _raise_from_value_error(ValueError(str(exc)))
 
@@ -648,9 +674,14 @@ async def list_skills_route(
 ):
     try:
         items = await list_visible_skills_for_management(db, current_user)
+        visible_mcp_slugs = (
+            await get_visible_mcp_reference_slugs(db, current_user)
+            if any(item.mcp_dependencies for item in items)
+            else None
+        )
         return {
             "success": True,
-            "data": [_serialize_skill_for_user(item, current_user) for item in items],
+            "data": [_serialize_skill_for_user(item, current_user, visible_mcp_slugs) for item in items],
             "allowed_access_levels": get_allowed_skill_access_levels(current_user),
         }
     except HTTPException:
@@ -722,7 +753,8 @@ async def update_skill_share_config_route(
 ):
     try:
         item = await update_skill_share_config(db, slug=slug, share_config=payload.share_config, operator=current_user)
-        return {"success": True, "data": _serialize_skill_for_user(item, current_user)}
+        visible_mcp_slugs = await get_visible_mcp_reference_slugs(db, current_user) if item.mcp_dependencies else None
+        return {"success": True, "data": _serialize_skill_for_user(item, current_user, visible_mcp_slugs)}
     except ValueError as e:
         _raise_from_value_error(e)
     except HTTPException:
@@ -741,7 +773,8 @@ async def update_skill_enabled_route(
 ):
     try:
         item = await update_skill_enabled(db, slug=slug, enabled=payload.enabled, operator=current_user)
-        return {"success": True, "data": _serialize_skill_for_user(item, current_user)}
+        visible_mcp_slugs = await get_visible_mcp_reference_slugs(db, current_user) if item.mcp_dependencies else None
+        return {"success": True, "data": _serialize_skill_for_user(item, current_user, visible_mcp_slugs)}
     except ValueError as e:
         _raise_from_value_error(e)
     except HTTPException:
@@ -858,7 +891,8 @@ async def update_skill_dependencies_route(
             skill_dependencies=payload.skill_dependencies,
             operator=current_user,
         )
-        return {"success": True, "data": _serialize_skill_for_user(item, current_user)}
+        visible_mcp_slugs = await get_visible_mcp_reference_slugs(db, current_user) if item.mcp_dependencies else None
+        return {"success": True, "data": _serialize_skill_for_user(item, current_user, visible_mcp_slugs)}
     except ValueError as e:
         _raise_from_value_error(e)
     except HTTPException:

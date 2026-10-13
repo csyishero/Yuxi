@@ -200,9 +200,10 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
             types.SimpleNamespace(slug="mcp-b", name="MCP B", description="", enabled=True),
         ]
 
-    async def fake_get_enabled_mcp_server_slugs(*, db=None):
-        del db
-        return ["mcp-a"]
+    async def fake_get_usable_mcp_server_slugs(db, user):
+        assert db is not None
+        assert user.uid == "u1"
+        return {"mcp-a"}
 
     async def fake_list_skills(_db, _user):
         return [
@@ -241,7 +242,7 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
         "yuxi.agents.mcp.service",
         types.SimpleNamespace(
             get_all_mcp_servers=fake_get_all_mcp_servers,
-            get_enabled_mcp_server_slugs=fake_get_enabled_mcp_server_slugs,
+            get_usable_mcp_server_slugs=fake_get_usable_mcp_server_slugs,
         ),
     )
     monkeypatch.setitem(
@@ -327,9 +328,10 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
     async def fake_get_all_mcp_servers(_db):
         return [types.SimpleNamespace(slug="mcp-a", name="MCP A", description="", enabled=True)]
 
-    async def fake_get_enabled_mcp_server_slugs(*, db=None):
-        del db
-        return ["mcp-a"]
+    async def fake_get_usable_mcp_server_slugs(db, user):
+        assert db is not None
+        assert user.uid == "u1"
+        return {"mcp-a"}
 
     async def fake_list_skills(_db, _user):
         return [
@@ -438,7 +440,7 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
         "yuxi.agents.mcp.service",
         types.SimpleNamespace(
             get_all_mcp_servers=fake_get_all_mcp_servers,
-            get_enabled_mcp_server_slugs=fake_get_enabled_mcp_server_slugs,
+            get_usable_mcp_server_slugs=fake_get_usable_mcp_server_slugs,
         ),
     )
     monkeypatch.setitem(

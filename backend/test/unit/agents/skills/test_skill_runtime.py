@@ -7,6 +7,14 @@ from yuxi.agents.skills.runtime import build_dependency_bundle, expand_skill_clo
 from yuxi.agents.skills.service import ResolvedSkill
 
 
+@pytest.fixture(autouse=True)
+def _admin_mcp_visibility_by_default(monkeypatch):
+    async def visible(_db, _user):
+        return None
+
+    monkeypatch.setattr(skill_runtime, "get_visible_mcp_reference_slugs", visible)
+
+
 def _skill(tmp_path, slug: str, *, dependencies: list[str] | None = None, content: str | None = None):
     source_dir = tmp_path / slug
     source_dir.mkdir()
@@ -98,11 +106,13 @@ async def test_personal_skill_runtime_excludes_unavailable_file_dependencies(mon
     async def accessible(_db, _user):
         return [personal, base]
 
-    async def enabled_mcps(*, db):
-        return ["reports"]
+    async def usable_mcps(db, user):
+        assert db is not None
+        assert user is not None
+        return {"reports"}
 
     monkeypatch.setattr(skill_runtime, "list_accessible_skills", accessible)
-    monkeypatch.setattr(skill_runtime, "get_enabled_mcp_server_slugs", enabled_mcps)
+    monkeypatch.setattr(skill_runtime, "get_usable_mcp_server_slugs", usable_mcps)
     monkeypatch.setattr(
         skill_runtime,
         "get_all_tool_instances",
@@ -113,6 +123,40 @@ async def test_personal_skill_runtime_excludes_unavailable_file_dependencies(mon
     assert scope["runtime_skills"]["demo"]["tools"] == ["calculator"]
     assert scope["runtime_skills"]["demo"]["mcps"] == ["reports"]
     assert scope["runtime_skills"]["demo"]["skills"] == ["base"]
+
+
+@pytest.mark.asyncio
+async def test_shared_skill_runtime_excludes_mcp_without_user_use_permission(monkeypatch, tmp_path):
+    """共享 Skill 的 MCP 依赖也受当前运行用户的服务权限约束。"""
+    shared = ResolvedSkill(
+        id=1,
+        slug="shared",
+        name="Shared",
+        description="Shared skill",
+        source_type="upload",
+        source_scope="shared",
+        source_dir=tmp_path / "shared",
+        enabled=True,
+        created_by="admin",
+        share_config=None,
+        tool_dependencies=[],
+        mcp_dependencies=["allowed-mcp", "forbidden-mcp"],
+        skill_dependencies=[],
+    )
+
+    async def accessible(_db, _user):
+        return [shared]
+
+    async def usable_mcps(_db, _user):
+        return {"allowed-mcp"}
+
+    monkeypatch.setattr(skill_runtime, "list_accessible_skills", accessible)
+    monkeypatch.setattr(skill_runtime, "get_usable_mcp_server_slugs", usable_mcps)
+
+    scope = await resolve_runtime_skills_for_context(SimpleNamespace(skills=["shared"]), db=object(), user=object())
+
+    assert scope["runtime_skills"]["shared"]["mcps"] == ["allowed-mcp"]
+    assert build_dependency_bundle(["shared"], scope["runtime_skills"])["mcps"] == ["allowed-mcp"]
 
 
 def test_expand_skill_closure_handles_cycles_missing_and_duplicates():
@@ -161,6 +205,57 @@ async def test_preload_reads_authorized_dependency_closure(tmp_path, monkeypatch
         "alpha": "# Alpha\nUSE_ALPHA",
         "beta": "# Beta\nUSE_BETA",
     }
+
+
+@pytest.mark.asyncio
+async def test_preload_projects_shared_skill_frontmatter_by_read_without_granting_use(tmp_path, monkeypatch):
+    content = (
+        "---\nname: shared\ndescription: Shared skill\n"
+        "mcp_dependencies: [read-only-mcp, private-mcp]\n---\n"
+        "The author can mention private-mcp in this body.\n"
+    )
+    source_dir = tmp_path / "shared"
+    source_dir.mkdir()
+    (source_dir / "SKILL.md").write_text(content, encoding="utf-8")
+    skill = ResolvedSkill(
+        id=1,
+        slug="shared",
+        name="Shared",
+        description="Shared skill",
+        source_type="upload",
+        source_scope="shared",
+        source_dir=source_dir,
+        enabled=True,
+        created_by="admin",
+        share_config=None,
+        tool_dependencies=[],
+        mcp_dependencies=["read-only-mcp", "private-mcp"],
+        skill_dependencies=[],
+    )
+
+    async def accessible(_db, _user):
+        return [skill]
+
+    async def usable(_db, _user):
+        return set()
+
+    async def visible(_db, _user):
+        return {"read-only-mcp"}
+
+    monkeypatch.setattr(skill_runtime, "list_accessible_skills", accessible)
+    monkeypatch.setattr(skill_runtime, "get_usable_mcp_server_slugs", usable)
+    monkeypatch.setattr(skill_runtime, "get_visible_mcp_reference_slugs", visible)
+    scope = await resolve_runtime_skills_for_context(
+        SimpleNamespace(skills=["shared"], preload_skills=["shared"]), db=object(), user=object()
+    )
+
+    preloaded = scope["preloaded_skill_contents"]["shared"]
+    frontmatter = preloaded.split("---", 2)[1]
+    assert "read-only-mcp" in frontmatter
+    assert "private-mcp" not in frontmatter
+    assert "private-mcp" in preloaded.split("---", 2)[2]
+    assert (skill.source_dir / "SKILL.md").read_text(encoding="utf-8") == content
+    assert scope["runtime_skills"]["shared"]["mcps"] == []
 
 
 @pytest.mark.asyncio

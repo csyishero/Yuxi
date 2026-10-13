@@ -95,11 +95,27 @@
               size="small"
               :checked="Boolean(scopes[scope.key])"
               :aria-label="`${scope.profileTitle || scope.title}${scopes[scope.key] ? '已开启' : '已关闭'}`"
-              :disabled="disabled || (scope.key === 'read_scope' && requireReadScope)"
+              :disabled="
+                disabled ||
+                (scope.key === 'read_scope' && requireReadScope) ||
+                isProtectedMcpScope(scope.key) ||
+                (isMcpPermissionMode && scope.key === 'edit_scope' && !scopes.read_scope) ||
+                (isMcpPermissionMode && scope.key === 'manage_scope' && !scopes.edit_scope)
+              "
               @change="(enabled) => toggleScope(scope.key, enabled)"
             />
           </div>
         </div>
+
+        <a-alert
+          v-if="isProtectedMcpScope(scope.key)"
+          type="info"
+          show-icon
+          class="scope-guidance"
+          :message="isExistingGlobalScope(scope.key)
+            ? '既有全员授权由系统管理员调整。'
+            : '此范围还包含其他部门的既有授权；你可以调整本部门成员，其他授权会保留。'"
+        />
 
         <section
           v-if="showKnowledgeBaseInheritance && scope.key === 'manage_scope'"
@@ -394,6 +410,7 @@ const props = defineProps({
   requireReadScope: { type: Boolean, default: false },
   showEditScope: { type: Boolean, default: false },
   showManageScope: { type: Boolean, default: true },
+  resourceKind: { type: String, default: 'generic' },
   resourceDepartmentId: { type: [Number, String], default: null },
   showKnowledgeBaseInheritance: { type: Boolean, default: false },
   availableDepartments: { type: Array, default: null },
@@ -401,7 +418,10 @@ const props = defineProps({
   allowedAccessLevels: {
     type: Array,
     default: () => ['global', 'department', 'user']
-  }
+  },
+  restrictNewGlobal: { type: Boolean, default: false },
+  existingShareConfig: { type: Object, default: null },
+  protectedScopes: { type: Object, default: () => ({}) }
 })
 
 const emit = defineEmits(['update:modelValue'])
@@ -409,7 +429,14 @@ const emit = defineEmits(['update:modelValue'])
 const isKnowledgeBasePermissionMode = computed(
   () => props.showEditScope && props.showKnowledgeBaseInheritance
 )
-const scopeOptions = computed(() => [
+const isMcpPermissionMode = computed(() => props.resourceKind === 'mcp')
+const scopeOptions = computed(() => isMcpPermissionMode.value ? [
+  { key: 'read_scope', title: '查看权限' },
+  ...(props.showEditScope ? [{ key: 'edit_scope', title: '使用权限（包含查看权限）' }] : []),
+  ...(props.showManageScope
+    ? [{ key: 'manage_scope', title: '授权权限（包含使用与查看权限）' }]
+    : [])
+] : [
   {
     key: 'read_scope',
     title: '读取权限',
@@ -604,9 +631,24 @@ const shareModeOptions = computed(() =>
     normalizedAllowedAccessLevels.value.includes(option.value)
   )
 )
+const isExistingGlobalScope = (scopeKey) =>
+  isMcpPermissionMode.value &&
+  props.restrictNewGlobal &&
+  props.existingShareConfig?.[scopeKey]?.access_level === 'global'
+const isProtectedMcpScope = (scopeKey) =>
+  isMcpPermissionMode.value && props.restrictNewGlobal && Boolean(props.protectedScopes?.[scopeKey])
 const getShareModeOptions = (scopeKey) => {
-  if (isKnowledgeBasePermissionMode.value && scopeKey === 'manage_scope') {
+  if ((isKnowledgeBasePermissionMode.value || isMcpPermissionMode.value) && scopeKey === 'manage_scope') {
     return shareModeOptions.value.filter((option) => option.value === 'user')
+  }
+  if (isExistingGlobalScope(scopeKey)) {
+    return shareModeOptions.value.filter((option) => option.value === 'global')
+  }
+  if (isProtectedMcpScope(scopeKey)) {
+    return shareModeOptions.value.filter((option) => option.value === scopes[scopeKey]?.access_level)
+  }
+  if (isMcpPermissionMode.value && props.restrictNewGlobal) {
+    return shareModeOptions.value.filter((option) => option.value !== 'global')
   }
   return shareModeOptions.value
 }
@@ -686,7 +728,7 @@ const emitConfig = () => {
     (isKnowledgeBasePermissionMode.value && scopes.manage_scope?.access_level !== 'user')
       ? null
       : normalizeScope(scopes.manage_scope)
-  if (manageScope?.access_level === 'user') {
+  if (!isMcpPermissionMode.value && manageScope?.access_level === 'user') {
     manageScope.user_uids = manageScope.user_uids.filter(
       (uid) => !inheritedManagerUids.value.has(String(uid))
     )
@@ -698,23 +740,46 @@ const emitConfig = () => {
   }
   if (props.showEditScope) {
     config.edit_scope = normalizeScope(scopes.edit_scope)
-    config.capability_policy = normalizeKnowledgeBaseCapabilityPolicy(capabilityPolicy)
+    if (!isMcpPermissionMode.value) {
+      config.capability_policy = normalizeKnowledgeBaseCapabilityPolicy(capabilityPolicy)
+    }
   }
   emit('update:modelValue', config)
 }
 
 const toggleScope = (scopeKey, enabled) => {
-  if (props.disabled) return
+  if (props.disabled || isProtectedMcpScope(scopeKey)) return
+  if (isMcpPermissionMode.value && !enabled) {
+    if (scopeKey === 'read_scope') {
+      scopes.edit_scope = null
+      scopes.manage_scope = null
+    } else if (scopeKey === 'edit_scope') {
+      scopes.manage_scope = null
+    }
+  }
   const parentScope =
     scopeKey === 'manage_scope' && props.showEditScope
       ? scopes.edit_scope || scopes.read_scope
       : scopes.read_scope
-  const defaultAccessLevel =
-    isKnowledgeBasePermissionMode.value && scopeKey === 'manage_scope'
+  let defaultAccessLevel =
+    (isKnowledgeBasePermissionMode.value || isMcpPermissionMode.value) && scopeKey === 'manage_scope'
       ? 'user'
       : parentScope?.access_level || 'global'
+  if (isMcpPermissionMode.value && props.restrictNewGlobal && defaultAccessLevel === 'global') {
+    defaultAccessLevel = 'department'
+  }
+  const initialScope = { access_level: scopeKey === 'read_scope' ? 'global' : defaultAccessLevel }
+  if (isMcpPermissionMode.value && props.restrictNewGlobal) {
+    initialScope.access_level = defaultAccessLevel
+    if (defaultAccessLevel === 'department' && currentDepartmentId.value) {
+      initialScope.department_ids = [currentDepartmentId.value]
+    }
+    if (defaultAccessLevel === 'user' && currentUserUid.value) {
+      initialScope.user_uids = [currentUserUid.value]
+    }
+  }
   scopes[scopeKey] = enabled
-    ? normalizeScope({ access_level: scopeKey === 'read_scope' ? 'global' : defaultAccessLevel })
+    ? normalizeScope(initialScope)
     : null
 }
 
@@ -722,10 +787,11 @@ const setAccessLevel = (scopeKey, accessLevel) => {
   if (
     props.disabled ||
     !scopes[scopeKey] ||
-    (isKnowledgeBasePermissionMode.value &&
+    isProtectedMcpScope(scopeKey) ||
+    ((isKnowledgeBasePermissionMode.value || isMcpPermissionMode.value) &&
       scopeKey === 'manage_scope' &&
       accessLevel !== 'user') ||
-    !normalizedAllowedAccessLevels.value.includes(accessLevel)
+    !getShareModeOptions(scopeKey).some((option) => option.value === accessLevel)
   )
     return
   scopes[scopeKey].access_level = accessLevel
@@ -795,19 +861,23 @@ const inheritedManagerUids = computed(
   () => new Set(inheritedManagerOptions.value.map((manager) => String(manager.value)))
 )
 
-const getModeTitle = (scopeKey, option) =>
-  scopeKey === 'manage_scope' && option.value === 'user' ? '指定协管成员' : option.title
-const getModeDescription = (scopeKey, option) =>
-  scopeKey === 'manage_scope' && option.value === 'user'
-    ? '添加系统继承范围之外的协管人员'
-    : option.description
+const getModeTitle = (scopeKey, option) => {
+  if (scopeKey !== 'manage_scope' || option.value !== 'user') return option.title
+  if (isMcpPermissionMode.value) return '指定可授权成员'
+  return '指定协管成员'
+}
+const getModeDescription = (scopeKey, option) => {
+  if (scopeKey !== 'manage_scope' || option.value !== 'user') return option.description
+  if (isMcpPermissionMode.value) return '选中的用户可调整此 MCP 的共享范围'
+  return '添加系统继承范围之外的协管人员'
+}
 
 const getAccessCount = (scopeKey, accessLevel) => {
   const scope = scopes[scopeKey]
   if (accessLevel === 'department') return scope?.department_ids.length || 0
   if (accessLevel === 'user') {
     const userUids = scope?.user_uids || []
-    return scopeKey === 'manage_scope'
+    return !isMcpPermissionMode.value && scopeKey === 'manage_scope'
       ? userUids.filter((uid) => !inheritedManagerUids.value.has(String(uid))).length
       : userUids.length
   }
@@ -829,6 +899,11 @@ const getPermissionProfileSummary = (profileKey) => {
   return `系统继承已启用 · ${extraScope}`
 }
 const getScopeActionLabel = (scopeKey) => {
+  if (isMcpPermissionMode.value) {
+    if (scopeKey === 'manage_scope') return '可授权'
+    if (scopeKey === 'edit_scope') return '可使用'
+    return '可查看'
+  }
   if (scopeKey === 'manage_scope') return '可管理'
   if (scopeKey === 'edit_scope') return '可编辑'
   return '可读取'
@@ -841,7 +916,7 @@ const getAccessSummary = (scopeKey, accessLevel) => {
 }
 const getSelectionOptions = (scopeKey, accessLevel) => {
   let options = accessLevel === 'department' ? departmentOptions.value : userOptions.value
-  if (scopeKey === 'manage_scope' && accessLevel === 'user') {
+  if (!isMcpPermissionMode.value && scopeKey === 'manage_scope' && accessLevel === 'user') {
     options = options.filter((item) => !inheritedManagerUids.value.has(String(item.value)))
   }
 
@@ -858,6 +933,7 @@ const isSelected = (scopeKey, accessLevel, value) => {
 const toggleSelection = (scopeKey, accessLevel, value, checked) => {
   if (props.disabled || !scopes[scopeKey]) return
   if (
+    !isMcpPermissionMode.value &&
     scopeKey === 'manage_scope' &&
     accessLevel === 'user' &&
     inheritedManagerUids.value.has(String(value))
@@ -920,8 +996,12 @@ watch(
   { deep: true }
 )
 
-const validateScope = (scope, title) => {
+const validateScope = (scope, title, scopeKey) => {
   if (!scope || scope.access_level === 'global') return { valid: true, message: '' }
+  if (isMcpPermissionMode.value && props.protectedScopes?.[scopeKey]) {
+    if (scope.access_level === 'department' && !scope.department_ids.length) return { valid: true, message: '' }
+    if (scope.access_level === 'user' && !scope.user_uids.length) return { valid: true, message: '' }
+  }
   if (scope.access_level === 'department' && !scope.department_ids.length) {
     return { valid: false, message: `${title}至少需要选择一个部门` }
   }
@@ -932,21 +1012,36 @@ const validateScope = (scope, title) => {
 }
 
 const validate = () => {
-  const readResult = validateScope(scopes.read_scope, '读取权限')
+  if (isMcpPermissionMode.value && scopes.edit_scope && !scopes.read_scope) {
+    return { valid: false, message: '请先开启查看权限，再设置使用权限' }
+  }
+  if (isMcpPermissionMode.value && scopes.manage_scope && !scopes.edit_scope) {
+    return { valid: false, message: '请先开启使用权限，再设置授权权限' }
+  }
+  if (isMcpPermissionMode.value && scopes.manage_scope?.access_level !== 'user' && scopes.manage_scope) {
+    return { valid: false, message: '授权权限只能指定用户' }
+  }
+  const readResult = validateScope(scopes.read_scope, isMcpPermissionMode.value ? '查看权限' : '读取权限', 'read_scope')
   if (!readResult.valid) return readResult
-  const editResult = validateScope(scopes.edit_scope, '编辑权限')
+  const editResult = validateScope(scopes.edit_scope, isMcpPermissionMode.value ? '使用权限' : '编辑权限', 'edit_scope')
   if (!editResult.valid) return editResult
-  const manageResult = validateScope(scopes.manage_scope, '管理权限')
+  const manageResult = validateScope(scopes.manage_scope, isMcpPermissionMode.value ? '授权权限' : '管理权限', 'manage_scope')
   if (!manageResult.valid) return manageResult
   if (!isChildScopeWithinParent(scopes.edit_scope, scopes.read_scope)) {
-    return { valid: false, message: '编辑权限必须包含在读取权限范围内' }
+    return { valid: false, message: isMcpPermissionMode.value
+      ? '使用权限必须包含在查看权限范围内'
+      : '编辑权限必须包含在读取权限范围内' }
   }
   const manageParent =
     props.showEditScope && scopes.edit_scope ? scopes.edit_scope : scopes.read_scope
   if (!isChildScopeWithinParent(scopes.manage_scope, manageParent)) {
     return {
       valid: false,
-      message:
+      message: isMcpPermissionMode.value
+        ? props.showEditScope && scopes.edit_scope
+          ? '授权权限必须包含在使用权限范围内'
+          : '授权权限必须包含在查看权限范围内'
+        :
         props.showEditScope && scopes.edit_scope
           ? '管理权限必须包含在编辑权限范围内'
           : '管理权限必须包含在读取权限范围内'
@@ -956,12 +1051,28 @@ const validate = () => {
 }
 
 const scopeViolationMessage = computed(() => {
+  if (isMcpPermissionMode.value && scopes.edit_scope && !scopes.read_scope) {
+    return '当前使用权限缺少查看范围，请调整后再保存。'
+  }
+  if (isMcpPermissionMode.value && scopes.manage_scope && !scopes.edit_scope) {
+    return '当前授权权限缺少使用范围，请调整后再保存。'
+  }
+  if (isMcpPermissionMode.value && scopes.manage_scope?.access_level !== 'user' && scopes.manage_scope) {
+    return '当前授权权限不是指定用户范围，请调整后再保存。'
+  }
   if (scopes.edit_scope && !isChildScopeWithinParent(scopes.edit_scope, scopes.read_scope)) {
-    return '当前编辑权限范围大于读取权限范围，请调整后再保存。'
+    return isMcpPermissionMode.value
+      ? '当前使用权限范围大于查看权限范围，请调整后再保存。'
+      : '当前编辑权限范围大于读取权限范围，请调整后再保存。'
   }
   const manageParent =
     props.showEditScope && scopes.edit_scope ? scopes.edit_scope : scopes.read_scope
   if (scopes.manage_scope && !isChildScopeWithinParent(scopes.manage_scope, manageParent)) {
+    if (isMcpPermissionMode.value) {
+      return props.showEditScope && scopes.edit_scope
+        ? '当前授权权限范围大于使用权限范围，请调整后再保存。'
+        : '当前授权权限范围大于查看权限范围，请调整后再保存。'
+    }
     return props.showEditScope && scopes.edit_scope
       ? '当前管理权限范围大于编辑权限范围，请调整后再保存。'
       : '当前管理权限范围大于读取权限范围，请调整后再保存。'

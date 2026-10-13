@@ -11,9 +11,14 @@ from typing import Any, TypedDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.agents.backends.paths import VIRTUAL_PERSONAL_SKILLS_PATH, VIRTUAL_SKILLS_PATH
-from yuxi.agents.mcp.service import get_enabled_mcp_server_slugs
-from yuxi.agents.skills.service import list_accessible_skills, normalize_string_list
+from yuxi.agents.mcp.service import get_usable_mcp_server_slugs
+from yuxi.agents.skills.service import (
+    list_accessible_skills,
+    normalize_string_list,
+    project_skill_markdown_mcp_dependencies,
+)
 from yuxi.agents.toolkits import get_all_tool_instances
+from yuxi.services.mcp_reference_service import get_visible_mcp_reference_slugs
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.logging_config import logger
 from yuxi.utils.paths import open_regular_file_fd
@@ -94,24 +99,28 @@ async def resolve_runtime_skills_for_context(
 ) -> dict:
     """从已授权 Skill 派生当前 Agent Run 的运行时 scope 与预加载快照。"""
     skill_items = [item for item in await list_accessible_skills(db, user) if item.slug]
+    if any(item.mcp_dependencies for item in skill_items):
+        usable_mcps = await get_usable_mcp_server_slugs(db, user)
+        skill_items = [
+            replace(item, mcp_dependencies=[name for name in item.mcp_dependencies if name in usable_mcps])
+            if item.mcp_dependencies
+            else item
+            for item in skill_items
+        ]
     if any(
-        item.source_scope == "personal" and (item.tool_dependencies or item.mcp_dependencies or item.skill_dependencies)
-        for item in skill_items
+        item.source_scope == "personal" and (item.tool_dependencies or item.skill_dependencies) for item in skill_items
     ):
         available_tools = {tool.name for tool in get_all_tool_instances()}
-        enabled_mcps = set(await get_enabled_mcp_server_slugs(db=db))
         available_skills = {item.slug for item in skill_items}
         skill_items = [
             replace(
                 item,
                 tool_dependencies=[name for name in item.tool_dependencies if name in available_tools],
-                mcp_dependencies=[name for name in item.mcp_dependencies if name in enabled_mcps],
                 skill_dependencies=[
                     name for name in item.skill_dependencies if name in available_skills and name != item.slug
                 ],
             )
-            if item.source_scope == "personal"
-            and (item.tool_dependencies or item.mcp_dependencies or item.skill_dependencies)
+            if item.source_scope == "personal" and (item.tool_dependencies or item.skill_dependencies)
             else item
             for item in skill_items
         ]
@@ -125,7 +134,12 @@ async def resolve_runtime_skills_for_context(
     preloaded_skills = expand_skill_closure(context_preload_skills, runtime_skills)
     items_by_slug = {item.slug: item for item in skill_items}
     preloaded_contents = (
-        await asyncio.to_thread(_read_preloaded_skill_contents, preloaded_skills, items_by_slug)
+        await asyncio.to_thread(
+            _read_preloaded_skill_contents,
+            preloaded_skills,
+            items_by_slug,
+            await get_visible_mcp_reference_slugs(db, user),
+        )
         if preloaded_skills
         else {}
     )
@@ -147,7 +161,9 @@ async def resolve_runtime_skills_for_context(
     }
 
 
-def _read_preloaded_skill_contents(slugs: list[str], skill_items: dict[str, Any]) -> dict[str, str]:
+def _read_preloaded_skill_contents(
+    slugs: list[str], skill_items: dict[str, Any], visible_mcp_slugs: set[str] | None = None
+) -> dict[str, str]:
     """从授权解析得到的真实来源读取根级 SKILL.md。"""
 
     contents: dict[str, str] = {}
@@ -161,8 +177,8 @@ def _read_preloaded_skill_contents(slugs: list[str], skill_items: dict[str, Any]
                 (*source_dir.parts[1:], "SKILL.md"),
             ) as (file_fd, _file_stat):
                 with os.fdopen(os.dup(file_fd), encoding="utf-8") as skill_file:
-                    contents[slug] = skill_file.read()
-        except (OSError, UnicodeError) as exc:
+                    contents[slug] = project_skill_markdown_mcp_dependencies(skill_file.read(), visible_mcp_slugs)
+        except (OSError, UnicodeError, ValueError) as exc:
             raise RuntimeError(f"预加载 Skill '{slug}' 失败：根级 SKILL.md 不可读") from exc
     return contents
 

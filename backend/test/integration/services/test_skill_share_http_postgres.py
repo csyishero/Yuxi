@@ -94,6 +94,7 @@ async def test_skill_share_http_uses_snapshot_and_department_review(monkeypatch,
         async with sessions() as db:
             db.add_all(
                 [
+                    User(uid="owner", username="Owner Display", password_hash="x", department_id=1),
                     User(uid="target-credit", username="target-credit", password_hash="x", department_id=1),
                     User(uid="target-risk", username="target-risk", password_hash="x", department_id=2),
                     User(uid="deleted-risk", username="deleted-risk", password_hash="x", department_id=2, is_deleted=1),
@@ -102,13 +103,25 @@ async def test_skill_share_http_uses_snapshot_and_department_review(monkeypatch,
             await db.commit()
 
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            submitted = await client.post("/api/skills/personal/credit-check/share-request")
+            missing_reason = await client.post("/api/skills/personal/credit-check/share-request")
+            assert missing_reason.status_code == 422
+            blank_reason = await client.post(
+                "/api/skills/personal/credit-check/share-request", json={"application_reason": "  "}
+            )
+            assert blank_reason.status_code == 400
+            submitted = await client.post(
+                "/api/skills/personal/credit-check/share-request",
+                json={"application_reason": "  给信贷团队复用  "},
+            )
             assert submitted.status_code == 200, submitted.text
             request = submitted.json()["data"]
             assert request["status"] == "pending"
             assert request["owner_department_id"] == 1
+            assert request["application_reason"] == "给信贷团队复用"
 
-            duplicate = await client.post("/api/skills/personal/credit-check/share-request")
+            duplicate = await client.post(
+                "/api/skills/personal/credit-check/share-request", json={"application_reason": "再次申请"}
+            )
             assert duplicate.status_code == 400, duplicate.text
             unauthorized = await client.post(
                 f"/api/skills/share-requests/{request['id']}/approve", json={"department_ids": [1]}
@@ -132,6 +145,11 @@ async def test_skill_share_http_uses_snapshot_and_department_review(monkeypatch,
             current = User(
                 uid="credit-admin", username="credit-admin", password_hash="x", role="admin", department_id=1
             )
+            review_queue = await client.get("/api/skills/share-requests")
+            assert review_queue.status_code == 200, review_queue.text
+            assert review_queue.json()["data"][0]["application_reason"] == "给信贷团队复用"
+            assert review_queue.json()["data"][0]["owner_name"] == "Owner Display"
+            assert review_queue.json()["data"][0]["status"] == "pending"
             snapshot = await client.get(f"/api/skills/share-requests/{request['id']}/snapshot")
             assert snapshot.status_code == 200, snapshot.text
             assert snapshot.json()["data"]["content"] == original
@@ -163,6 +181,10 @@ async def test_skill_share_http_uses_snapshot_and_department_review(monkeypatch,
             )
             assert approved.status_code == 200, approved.text
             assert approved.json()["data"]["status"] == "approved"
+            assert approved.json()["data"]["application_reason"] == "给信贷团队复用"
+            assert approved.json()["data"]["review_note"] == "可共享"
+            assert approved.json()["data"]["reviewer_uid"] == "credit-admin"
+            assert approved.json()["data"]["reviewed_at"]
             assert approved.json()["data"]["published_slug"] == "credit-check"
             assert (shared_root / "credit-check" / "SKILL.md").read_text(encoding="utf-8") == original
             assert (shared_root / "credit-check" / "scripts" / "check.py").read_text(
@@ -219,7 +241,9 @@ async def test_skill_share_http_uses_snapshot_and_department_review(monkeypatch,
             assert delegated_manager.status_code == 400, delegated_manager.text
 
             current = User(uid="owner", username="owner", password_hash="x", role="user", department_id=1)
-            second_request = await client.post("/api/skills/personal/credit-check/share-request")
+            second_request = await client.post(
+                "/api/skills/personal/credit-check/share-request", json={"application_reason": "更新版本"}
+            )
             assert second_request.status_code == 200, second_request.text
             current = User(
                 uid="credit-admin", username="credit-admin", password_hash="x", role="admin", department_id=1
@@ -242,6 +266,7 @@ async def test_skill_share_http_uses_snapshot_and_department_review(monkeypatch,
             saved_request = await db.get(SkillShareRequest, request["id"])
             published = await db.get(Skill, 1)
             assert saved_request.reviewer_uid == "credit-admin"
+            assert saved_request.application_reason == "给信贷团队复用"
             assert saved_request.published_slug == published.slug
             assert saved_request.read_scope["department_ids"] == [1]
             assert published.share_config["read_scope"] == user_scope
@@ -348,6 +373,7 @@ async def test_department_admin_direct_publish_keeps_owner_file(monkeypatch, tmp
             assert record["owner_uid"] == "member"
             assert record["reviewer_uid"] == "credit-admin"
             assert record["review_note"] == "管理员直接发布：已核对"
+            assert record["application_reason"] == "管理员直接发布"
             assert record["published_slug"] == "member-skill"
             assert (shared_root / "member-skill" / "SKILL.md").read_text(encoding="utf-8") == original
             assert (source / "SKILL.md").read_text(encoding="utf-8") == original
@@ -371,7 +397,9 @@ async def test_department_admin_direct_publish_keeps_owner_file(monkeypatch, tmp
             assert (shared_root / "member-skill-v2" / "SKILL.md").read_text(encoding="utf-8").endswith("# Owner copy\n")
 
             current = User(uid="member", username="member", password_hash="x", role="user", department_id=1)
-            pending = await client.post("/api/skills/personal/member-skill/share-request")
+            pending = await client.post(
+                "/api/skills/personal/member-skill/share-request", json={"application_reason": "申请公开"}
+            )
             assert pending.status_code == 200, pending.text
             current = User(
                 uid="credit-admin", username="credit-admin", password_hash="x", role="admin", department_id=1

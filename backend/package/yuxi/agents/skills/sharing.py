@@ -65,8 +65,16 @@ def _snapshot_root() -> Path:
     return root
 
 
-async def submit_skill_share_request(db: AsyncSession, *, slug: str, operator: User) -> SkillShareRequest:
+async def submit_skill_share_request(
+    db: AsyncSession, *, slug: str, application_reason: str, operator: User
+) -> SkillShareRequest:
     """复制本人个人 Skill 为不可变待审快照。"""
+    reason = application_reason.strip()
+    if not reason:
+        raise ValueError("请填写共享申请原因")
+    if len(reason) > 1000:
+        raise ValueError("共享申请原因不能超过 1000 字")
+
     source = resolve_personal_skill_dir(personal_skills_root(str(operator.uid)), slug)
     if not source.is_dir():
         raise ValueError("个人 Skill 不存在")
@@ -101,6 +109,7 @@ async def submit_skill_share_request(db: AsyncSession, *, slug: str, operator: U
             name=parsed["name"],
             description=parsed["description"],
             content_hash=await asyncio.to_thread(compute_skill_dir_hash, snapshot),
+            application_reason=reason,
             status="pending",
             created_at=utc_now_naive(),
         )
@@ -130,7 +139,7 @@ async def publish_personal_skill_directly(
 ) -> SkillShareRequest:
     """管理员对授权成员的当前原件创建快照并发布共享副本。"""
     owner = await get_manageable_personal_skill_owner(db, operator=operator, owner_uid=owner_uid)
-    request = await submit_skill_share_request(db, slug=slug, operator=owner)
+    request = await submit_skill_share_request(db, slug=slug, application_reason="管理员直接发布", operator=owner)
     request_id = request.id
     review_note = "管理员直接发布" + (f"：{note.strip()}" if note.strip() else "")
     try:
@@ -152,9 +161,9 @@ async def publish_personal_skill_directly(
         raise
 
 
-async def list_skill_share_requests(db: AsyncSession, *, operator: User) -> list[SkillShareRequest]:
-    """申请人只看自己的记录，管理员查看待审和历史。"""
-    query = select(SkillShareRequest)
+async def list_skill_share_requests(db: AsyncSession, *, operator: User) -> list[dict]:
+    """申请人只看自己的记录，管理员查看本部门待审和历史。"""
+    query = select(SkillShareRequest, User.username).outerjoin(User, User.uid == SkillShareRequest.owner_uid)
     if operator.role == "admin":
         query = query.where(
             SkillShareRequest.owner_department_id == operator.department_id
@@ -163,7 +172,8 @@ async def list_skill_share_requests(db: AsyncSession, *, operator: User) -> list
         )
     elif operator.role != "superadmin":
         query = query.where(SkillShareRequest.owner_uid == operator.uid)
-    return list((await db.scalars(query.order_by(SkillShareRequest.created_at.desc()))).all())
+    rows = (await db.execute(query.order_by(SkillShareRequest.created_at.desc()))).all()
+    return [{**item.to_dict(), "owner_name": name} for item, name in rows]
 
 
 async def _authorized_snapshot_path(db: AsyncSession, *, request_id: str, operator: User) -> Path:
@@ -308,6 +318,8 @@ async def approve_skill_share_request(
     parent = Skill(slug=slug, share_config=share_config, created_by=str(operator.uid), enabled=True)
     available = {skill.slug: skill for skill in await repo.list_enabled()}
     tools, mcps, skills = await validate_skill_dependencies(
+        db=db,
+        user=operator,
         parent=parent,
         tool_dependencies=parsed["tool_dependencies"],
         mcp_dependencies=parsed["mcp_dependencies"],

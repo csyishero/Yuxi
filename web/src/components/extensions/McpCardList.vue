@@ -2,7 +2,7 @@
   <div class="mcp-cards-page extension-page-root">
     <PageShoulder search-placeholder="搜索 MCP..." v-model:search="searchQuery">
       <template #actions>
-        <a-button type="primary" @click="handleMcpAdd" class="lucide-icon-btn">
+        <a-button v-if="userStore.isAdmin" type="primary" @click="handleMcpAdd" class="lucide-icon-btn">
           <Plus :size="14" />
           <span>添加 MCP</span>
         </a-button>
@@ -20,12 +20,12 @@
     >
       <a-empty
         :image="false"
-        :description="searchQuery ? '无匹配 MCP' : '暂无 MCP，点击上方按钮添加'"
+        :description="searchQuery ? '无匹配 MCP' : userStore.isAdmin ? '暂无 MCP，点击上方按钮添加' : '暂无可见的 MCP'"
       />
     </div>
 
     <template v-else>
-      <div v-if="filteredEnabledServers.length" class="extension-section-header">已添加</div>
+      <div v-if="filteredEnabledServers.length" class="extension-section-header">已启用</div>
       <ExtensionCardGrid v-if="filteredEnabledServers.length" :min-width="300">
         <InfoCard
           v-for="server in filteredEnabledServers"
@@ -33,27 +33,31 @@
           variant="mini"
           :title="formatExtensionCardTitle(server.name)"
           :description="server.description || '暂无描述'"
-          @click="handleCardClick(server)"
+          @click="navigateToDetail(server)"
         >
           <template #icon>
             <span class="info-card-emoji-icon">{{ server.icon || '🔌' }}</span>
           </template>
-          <template #action>
+          <template v-if="userStore.isAdmin" #action>
             <button
               type="button"
-              class="mcp-card-action mcp-card-action-danger"
+              class="mcp-card-action"
               :disabled="isActionLoading(server)"
-              :aria-label="server.is_builtin ? '移除 MCP' : '删除 MCP'"
-              @click.stop="handleRemoveServer(server)"
+              aria-label="停用 MCP"
+              @click.stop="handleSetServerEnabled(server, false)"
             >
-              <Check :size="15" class="action-icon action-icon-check" />
-              <Trash2 :size="15" class="action-icon action-icon-trash" />
+              <PowerOff :size="15" class="action-icon" />
             </button>
+          </template>
+          <template v-else #action>
+            <span class="mcp-card-permission">{{ permissionLabel(server) }}</span>
           </template>
         </InfoCard>
       </ExtensionCardGrid>
 
-      <div v-if="filteredDisabledServers.length" class="extension-section-header">可添加</div>
+      <div v-if="filteredDisabledServers.length" class="extension-section-header">
+        已停用
+      </div>
       <ExtensionCardGrid v-if="filteredDisabledServers.length" :min-width="300">
         <InfoCard
           v-for="server in filteredDisabledServers"
@@ -63,20 +67,20 @@
           :description="
             server.requires_migration ? '需要迁移为远程 MCP' : server.description || '暂无描述'
           "
-          @click="handleCardClick(server)"
+          @click="navigateToDetail(server)"
         >
           <template #icon>
             <span class="info-card-emoji-icon">{{ server.icon || '🔌' }}</span>
           </template>
-          <template #action>
+          <template v-if="userStore.isAdmin" #action>
             <button
               type="button"
               :class="['mcp-card-action', { 'mcp-card-action-danger': server.requires_migration }]"
               :disabled="isActionLoading(server)"
-              :aria-label="server.requires_migration ? '删除 MCP' : '添加 MCP'"
+              :aria-label="server.requires_migration ? '删除 MCP' : '启用 MCP'"
               @click.stop="
                 server.requires_migration
-                  ? handleRemoveServer(server)
+                  ? confirmDeleteServer(server)
                   : handleSetServerEnabled(server, true)
               "
             >
@@ -84,74 +88,15 @@
               <Plus v-else :size="15" class="action-icon" />
             </button>
           </template>
+          <template v-else #action>
+            <span class="mcp-card-permission">{{ permissionLabel(server) }}</span>
+          </template>
         </InfoCard>
       </ExtensionCardGrid>
     </template>
 
-    <a-modal
-      v-model:open="basicInfoVisible"
-      class="mcp-basic-info-modal"
-      :footer="null"
-      width="560px"
-      :destroy-on-close="true"
-      @cancel="closeBasicInfo"
-    >
-      <div v-if="previewServer" class="mcp-basic-info-panel">
-        <div class="mcp-basic-info-header">
-          <div class="mcp-basic-info-icon">
-            <span>{{ previewServer.icon || '🔌' }}</span>
-          </div>
-          <div class="mcp-basic-info-title-area">
-            <div class="mcp-basic-info-title">
-              {{ formatExtensionCardTitle(previewServer.name) }}
-            </div>
-            <div class="mcp-basic-info-meta">
-              <span>{{ previewServer.transport || '未知传输类型' }}</span>
-              <span v-if="previewServer.is_builtin" class="mcp-basic-info-tag"> 内置 </span>
-            </div>
-          </div>
-        </div>
-
-        <div class="mcp-basic-info-body">
-          <div class="mcp-basic-info-row">
-            <label>描述</label>
-            <span>{{ previewServer.description || '暂无描述' }}</span>
-          </div>
-          <div class="mcp-basic-info-row">
-            <label>传输类型</label>
-            <span>{{ previewServer.transport || '-' }}</span>
-          </div>
-          <div
-            v-if="Array.isArray(previewServer.tags) && previewServer.tags.length > 0"
-            class="mcp-basic-info-row"
-          >
-            <label>标签</label>
-            <span class="mcp-basic-info-tags">
-              <a-tag v-for="tag in previewServer.tags" :key="tag">{{ tag }}</a-tag>
-            </span>
-          </div>
-          <div class="mcp-basic-info-row">
-            <label>创建人</label>
-            <span>{{ previewServer.created_by || '-' }}</span>
-          </div>
-        </div>
-
-        <div class="mcp-basic-info-footer">
-          <a-button @click="closeBasicInfo">关闭</a-button>
-          <a-button
-            type="primary"
-            class="lucide-icon-btn"
-            :loading="isActionLoading(previewServer)"
-            @click="handleSetServerEnabled(previewServer, true)"
-          >
-            <template #icon><Plus :size="14" /></template>
-            添加
-          </a-button>
-        </div>
-      </div>
-    </a-modal>
-
     <McpFormModal
+      v-if="userStore.isAdmin"
       v-model:open="formModalVisible"
       :edit-mode="false"
       @submitted="handleFormSubmitted"
@@ -163,8 +108,9 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
-import { Check, Plus, RefreshCw, Trash2 } from '@lucide/vue'
+import { Plus, PowerOff, RefreshCw, Trash2 } from '@lucide/vue'
 import { mcpApi } from '@/apis/mcp_api'
+import { useUserStore } from '@/stores/user'
 import ExtensionCardGrid from './ExtensionCardGrid.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
 import PageShoulder from '@/components/shared/PageShoulder.vue'
@@ -172,13 +118,12 @@ import McpFormModal from './McpFormModal.vue'
 import { formatExtensionCardTitle } from '@/utils/extensionDisplayName'
 
 const router = useRouter()
+const userStore = useUserStore()
 
 const loading = ref(false)
 const servers = ref([])
 const searchQuery = ref('')
 const formModalVisible = ref(false)
-const basicInfoVisible = ref(false)
-const previewServer = ref(null)
 const actionLoadingSlug = ref('')
 
 const filteredServers = computed(() => {
@@ -206,27 +151,15 @@ const navigateToDetail = (server) => {
   router.push({ path: `/extensions/mcp/${encodeURIComponent(server.slug)}` })
 }
 
-const handleCardClick = (server) => {
-  if (server.enabled || server.requires_migration) {
-    navigateToDetail(server)
-    return
-  }
-  openBasicInfo(server)
-}
-
-const openBasicInfo = (server) => {
-  previewServer.value = server
-  basicInfoVisible.value = true
-}
-
-const closeBasicInfo = () => {
-  basicInfoVisible.value = false
-  previewServer.value = null
-}
-
 const isActionLoading = (server) => actionLoadingSlug.value === server?.slug
+const permissionLabel = (server) => {
+  if (server.permission === 'manage') return '可授权'
+  if (server.permission === 'edit') return '可使用'
+  return '仅查看'
+}
 
 const handleMcpAdd = () => {
+  if (!userStore.isAdmin) return
   formModalVisible.value = true
 }
 
@@ -236,12 +169,12 @@ const handleFormSubmitted = async () => {
 }
 
 const handleSetServerEnabled = async (server, enabled) => {
+  if (!userStore.isAdmin) return
   try {
     actionLoadingSlug.value = server.slug
     const result = await mcpApi.updateMcpServerStatus(server.slug, enabled)
     if (result.success) {
-      message.success(result.message || `MCP 已${enabled ? '添加' : '移除'}`)
-      if (enabled) closeBasicInfo()
+      message.success(result.message || `MCP 已${enabled ? '启用' : '停用'}`)
       await fetchServers()
     } else {
       message.error(result.message || '操作失败')
@@ -253,15 +186,8 @@ const handleSetServerEnabled = async (server, enabled) => {
   }
 }
 
-const handleRemoveServer = (server) => {
-  if (server.is_builtin) {
-    handleSetServerEnabled(server, false)
-    return
-  }
-  confirmDeleteServer(server)
-}
-
 const confirmDeleteServer = (server) => {
+  if (!userStore.isAdmin) return
   Modal.confirm({
     title: '确认删除 MCP',
     content: `确定要删除 MCP "${server.name}" 吗？此操作不可撤销。`,
@@ -314,6 +240,16 @@ defineExpose({ fetchServers, loading })
 .info-card-emoji-icon {
   font-size: 18px;
   line-height: 1;
+}
+
+.mcp-card-permission {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--main-50);
+  color: var(--main-color);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .mcp-card-action {
@@ -372,107 +308,4 @@ defineExpose({ fetchServers, loading })
   flex-shrink: 0;
 }
 
-.mcp-basic-info-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.mcp-basic-info-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.mcp-basic-info-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
-  border: 1px solid var(--gray-150);
-  background: var(--main-50);
-  color: var(--main-color);
-  font-size: 18px;
-}
-
-.mcp-basic-info-title-area {
-  min-width: 0;
-}
-
-.mcp-basic-info-title {
-  overflow: hidden;
-  color: var(--gray-900);
-  font-size: 16px;
-  font-weight: 700;
-  line-height: 22px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mcp-basic-info-meta {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 2px;
-  color: var(--gray-500);
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.mcp-basic-info-tag {
-  display: inline-flex;
-  align-items: center;
-  height: 18px;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--gray-100);
-  color: var(--gray-600);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.mcp-basic-info-body {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px 16px;
-  border: 1px solid var(--gray-150);
-  border-radius: 12px;
-  background: var(--gray-25);
-}
-
-.mcp-basic-info-row {
-  display: grid;
-  grid-template-columns: 72px minmax(0, 1fr);
-  gap: 12px;
-  color: var(--gray-700);
-  font-size: 13px;
-  line-height: 20px;
-
-  label {
-    color: var(--gray-500);
-    font-weight: 600;
-  }
-
-  span {
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-}
-
-.mcp-basic-info-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.mcp-basic-info-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
 </style>

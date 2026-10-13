@@ -48,9 +48,22 @@ async def test_share_request_keeps_snapshot_and_personal_source(monkeypatch, tmp
         async with sessions() as db:
             db.add(Department(id=1, name="Credit"))
             await db.commit()
-            request = await sharing.submit_skill_share_request(db, slug="credit-check", operator=user)
+            with pytest.raises(ValueError, match="请填写"):
+                await sharing.submit_skill_share_request(
+                    db, slug="credit-check", application_reason="   ", operator=user
+                )
+            with pytest.raises(ValueError, match="1000 字"):
+                await sharing.submit_skill_share_request(
+                    db, slug="credit-check", application_reason="a" * 1001, operator=user
+                )
+            request = await sharing.submit_skill_share_request(
+                db, slug="credit-check", application_reason="  供信贷团队复用  ", operator=user
+            )
+            assert request.to_dict()["application_reason"] == "供信贷团队复用"
             with pytest.raises(ValueError, match="待审核"):
-                await sharing.submit_skill_share_request(db, slug="credit-check", operator=user)
+                await sharing.submit_skill_share_request(
+                    db, slug="credit-check", application_reason="重复申请", operator=user
+                )
 
             (source / "SKILL.md").write_text(
                 "---\nname: credit-check\ndescription: revised\n---\n# Revised\n", encoding="utf-8"
@@ -132,7 +145,9 @@ async def test_share_request_keeps_snapshot_and_personal_source(monkeypatch, tmp
                     operator=admin,
                 )
 
-            next_request = await sharing.submit_skill_share_request(db, slug="credit-check", operator=user)
+            next_request = await sharing.submit_skill_share_request(
+                db, slug="credit-check", application_reason="更新版本", operator=user
+            )
             next_approved = await sharing.approve_skill_share_request(
                 db, request_id=next_request.id, department_ids=[1], note="", operator=admin
             )
@@ -148,7 +163,9 @@ async def test_share_request_keeps_snapshot_and_personal_source(monkeypatch, tmp
             with (source / "too-large.bin").open("wb") as oversized:
                 oversized.truncate(sharing.MAX_SHARE_SNAPSHOT_BYTES + 1)
             with pytest.raises(ValueError, match="20 MB"):
-                await sharing.submit_skill_share_request(db, slug="credit-check", operator=user)
+                await sharing.submit_skill_share_request(
+                    db, slug="credit-check", application_reason="再次更新", operator=user
+                )
     finally:
         await engine.dispose()
 
@@ -164,19 +181,28 @@ async def test_unassigned_owner_request_is_only_reviewable_by_superadmin(monkeyp
     monkeypatch.setattr(sharing, "get_skill_data_dir", lambda: tmp_path)
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
-        await connection.run_sync(lambda conn: Base.metadata.create_all(conn, tables=[SkillShareRequest.__table__]))
+        await connection.run_sync(
+            lambda conn: Base.metadata.create_all(
+                conn, tables=[Department.__table__, User.__table__, SkillShareRequest.__table__]
+            )
+        )
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     owner = User(uid="owner", username="owner", password_hash="x", role="user", department_id=None)
     admin = User(uid="admin", username="admin", password_hash="x", role="admin", department_id=None)
     superadmin = User(uid="root", username="root", password_hash="x", role="superadmin")
     try:
         async with sessions() as db:
-            request = await sharing.submit_skill_share_request(db, slug="credit-check", operator=owner)
+            db.add(User(uid="owner", username="Owner Name", password_hash="x", role="user"))
+            await db.commit()
+            request = await sharing.submit_skill_share_request(
+                db, slug="credit-check", application_reason="申请跨团队共享", operator=owner
+            )
             assert request.owner_department_id is None
             assert await sharing.list_skill_share_requests(db, operator=admin) == []
-            assert [item.id for item in await sharing.list_skill_share_requests(db, operator=superadmin)] == [
-                request.id
-            ]
+            queue = await sharing.list_skill_share_requests(db, operator=superadmin)
+            assert queue[0]["owner_name"] == "Owner Name"
+            assert queue[0]["application_reason"] == "申请跨团队共享"
+            assert [item["id"] for item in queue] == [request.id]
             with pytest.raises(ValueError, match="无权访问"):
                 await sharing.read_skill_share_snapshot(db, request_id=request.id, operator=admin)
             with pytest.raises(ValueError, match="共享申请不存在"):

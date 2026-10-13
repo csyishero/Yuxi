@@ -51,9 +51,14 @@ async def test_skill_artifact_rechecks_authorization_after_share_revoke(
 
     suffix = uuid.uuid4().hex
     slug = f"pytest-artifact-{suffix}"
+    private_mcp_slug = f"pytest-private-mcp-{suffix}"
     source_dir = skill_service.get_skills_root_dir() / slug
     source_dir.mkdir(parents=True)
-    (source_dir / "SKILL.md").write_text("# authorized artifact\n", encoding="utf-8")
+    source_content = (
+        f"---\nname: {slug}\ndescription: Artifact authorization fixture\n"
+        f"mcp_dependencies: [{private_mcp_slug}]\n---\n# authorized artifact\n"
+    )
+    (source_dir / "SKILL.md").write_text(source_content, encoding="utf-8")
 
     engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -99,7 +104,9 @@ async def test_skill_artifact_rechecks_authorization_after_share_revoke(
         user_before = await test_client.get(user_url, headers=user_headers)
         assert admin_before.status_code == 200, admin_before.text
         assert user_before.status_code == 200, user_before.text
-        assert admin_before.content == user_before.content == b"# authorized artifact\n"
+        assert admin_before.content == source_content.encode("utf-8")
+        assert private_mcp_slug not in user_before.text.split("---", 2)[1]
+        assert "# authorized artifact" in user_before.text
 
         revoke = await test_client.put(
             f"/api/system/skills/{slug}/share-config",
@@ -122,7 +129,7 @@ async def test_skill_artifact_rechecks_authorization_after_share_revoke(
         admin_after = await test_client.get(admin_url, headers=admin_headers)
         assert user_after.status_code == 403, user_after.text
         assert admin_after.status_code == 200, admin_after.text
-        assert admin_after.content == b"# authorized artifact\n"
+        assert admin_after.content == source_content.encode("utf-8")
         assert not projection_paths[1].exists()
         assert (projection_paths[0] / "SKILL.md").is_file()
     finally:

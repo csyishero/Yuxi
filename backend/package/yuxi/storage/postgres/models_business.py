@@ -428,6 +428,7 @@ class SkillShareRequest(Base):
     name = Column(String(128), nullable=False)
     description = Column(Text, nullable=False)
     content_hash = Column(String(128), nullable=False)
+    application_reason = Column(Text, nullable=True)
     status = Column(String(16), nullable=False, default="pending", index=True)
     review_note = Column(Text, nullable=True)
     reviewer_uid = Column(String(64), nullable=True)
@@ -459,6 +460,7 @@ class SkillShareRequest(Base):
             "name": self.name,
             "description": self.description,
             "content_hash": self.content_hash,
+            "application_reason": self.application_reason,
             "status": self.status,
             "review_note": self.review_note,
             "reviewer_uid": self.reviewer_uid,
@@ -798,6 +800,7 @@ class MCPServer(Base):
     # 状态字段
     enabled = Column(Integer, nullable=False, default=1, comment="是否启用：1=是，0=否")
     disabled_tools = Column(JSON, nullable=True, comment="禁用的工具名称列表")
+    share_config = Column(JSON_VALUE, nullable=True, comment="MCP 权限树配置；NULL 代表历史全员可用")
 
     # 用户追踪
     created_by = Column(String(100), nullable=False, comment="创建人用户名")
@@ -825,6 +828,7 @@ class MCPServer(Base):
             "icon": self.icon,
             "enabled": bool(self.enabled),
             "disabled_tools": self.disabled_tools or [],
+            "share_config": self.share_config,
             "created_by": self.created_by,
             "updated_by": self.updated_by,
             "created_at": format_utc_datetime(self.created_at),

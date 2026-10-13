@@ -23,7 +23,7 @@ import yaml
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yuxi.agents.mcp.service import get_enabled_mcp_server_slugs
+from yuxi.agents.mcp.service import get_usable_mcp_server_slugs
 from yuxi.agents.skills.repository import SkillRepository
 from yuxi.config import (
     get_runtime_dir,
@@ -33,6 +33,7 @@ from yuxi.config import (
 from yuxi.permissions import ResourcePermission, normalize_permission_config, resolve_skill_permission
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.user_repository import UserRepository
+from yuxi.services.mcp_reference_service import get_visible_mcp_reference_slugs, project_mcp_references
 from yuxi.storage.postgres.models_business import Department, Skill, User
 from yuxi.utils.logging_config import logger
 from yuxi.utils.paths import ensure_within_root, open_directory_fd, open_regular_file_fd
@@ -40,6 +41,8 @@ from yuxi.utils.paths import ensure_within_root, open_directory_fd, open_regular
 SKILL_SLUG_PATTERN = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 SKILL_NAME_PATTERN = SKILL_SLUG_PATTERN
 MAX_SHARED_SKILL_SLUG_LENGTH = 128
+MAX_SKILL_MARKDOWN_PROJECTION_BYTES = 20 * 1024 * 1024
+_NO_VISIBLE_MCP_SLUGS: frozenset[str] = frozenset()
 
 TEXT_FILE_EXTENSIONS = {
     ".md",
@@ -369,13 +372,10 @@ def get_user_skills_root_dir(uid: str) -> Path:
 async def sync_user_accessible_skills_async(
     uid: str,
     source_dirs: dict[str, str | Path],
+    visible_mcp_slugs: set[str] | frozenset[str] | None = _NO_VISIBLE_MCP_SLUGS,
 ) -> Path:
-    """在线程池同步用户获授权的共享 Skill 投影，避免阻塞 Agent 事件循环。"""
-    return await asyncio.to_thread(
-        sync_user_accessible_skills,
-        uid,
-        source_dirs,
-    )
+    """在线程池同步只读投影；未给可见列表时默认隐藏全部 MCP 引用。"""
+    return await asyncio.to_thread(sync_user_accessible_skills, uid, source_dirs, visible_mcp_slugs)
 
 
 async def refresh_user_skill_projection_async(uid: str) -> dict[str, str]:
@@ -401,7 +401,10 @@ async def refresh_user_skill_projection_async(uid: str) -> dict[str, str]:
                 for item in await _list_accessible_shared_skills(db, user)
                 if item.slug
             }
-        await sync_user_accessible_skills_async(normalized_uid, source_dirs)
+        visible_mcp_slugs = (
+            await get_visible_mcp_reference_slugs(db, user) if user is not None and not bool(user.is_deleted) else set()
+        )
+        await sync_user_accessible_skills_async(normalized_uid, source_dirs, visible_mcp_slugs)
         return source_dirs
 
 
@@ -445,8 +448,9 @@ async def apply_skill_projection_policy_changes(db: AsyncSession, slugs: list[st
 def sync_user_accessible_skills(
     uid: str,
     source_dirs: dict[str, str | Path],
+    visible_mcp_slugs: set[str] | frozenset[str] | None = _NO_VISIBLE_MCP_SLUGS,
 ) -> Path:
-    """将用户有权访问的共享 Skill 来源同步到统一只读目录。"""
+    """将共享 Skill 同步到用户只读目录，默认隐藏全部 MCP 引用。"""
     user_skills_root = get_user_skills_root_dir(uid)
     normalized_sources = {
         slug: Path(os.path.abspath(os.fspath(path)))
@@ -455,6 +459,12 @@ def sync_user_accessible_skills(
     }
     accessible_slugs = set(normalized_sources)
     with _get_user_skills_lock(uid), _user_skills_file_lock(uid):
+        # 沙盒只挂载 <projection>/<uid>。源文件须先在该挂载之外脱敏，再原子移入。
+        staging_root = get_skill_projection_dir() / ".staging"
+        staging_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if staging_root.is_symlink():
+            raise PermissionError("Skill 投影 staging 目录不允许符号链接")
+        staging_root.chmod(0o700)
         for entry in user_skills_root.iterdir():
             if entry.name in accessible_slugs:
                 continue
@@ -462,11 +472,16 @@ def sync_user_accessible_skills(
 
         for slug, source_dir in normalized_sources.items():
             target_dir = user_skills_root / slug
-            temp_target = user_skills_root / f".{slug}.tmp-{uuid.uuid4().hex[:8]}"
+            temp_target = staging_root / f"{uuid.uuid4().hex}-{slug}"
             try:
-                if skill_dirs_equal(source_dir, target_dir):
+                if skill_dirs_equal(source_dir, target_dir, visible_mcp_slugs=visible_mcp_slugs):
                     continue
-                copy_skill_tree_no_symlinks(source_dir, temp_target)
+                copy_skill_tree_no_symlinks(
+                    source_dir,
+                    temp_target,
+                    visible_mcp_slugs=visible_mcp_slugs,
+                    owner_writable_directories=True,
+                )
                 _remove_skill_projection_entry(target_dir)
                 temp_target.rename(target_dir)
             except FileNotFoundError:
@@ -487,9 +502,30 @@ def _remove_skill_projection_entry(path: Path) -> None:
     if not path.exists() and not path.is_symlink():
         return
     if path.is_dir() and not path.is_symlink():
+        # 旧投影可能原样继承来源的 0555 模式；先通过 no-follow fd 恢复目录 owner 权限。
+        absolute = Path(os.path.abspath(path))
+        root_fd = open_directory_fd(Path(absolute.anchor), absolute.parts[1:])
+        try:
+            _make_projection_directories_removable(root_fd)
+        finally:
+            os.close(root_fd)
         shutil.rmtree(path)
     else:
         path.unlink()
+
+
+def _make_projection_directories_removable(directory_fd: int) -> None:
+    """仅处理真实目录，不跟随投影中的符号链接。"""
+    os.fchmod(directory_fd, stat.S_IMODE(os.fstat(directory_fd).st_mode) | 0o700)
+    for name in os.listdir(directory_fd):
+        mode = os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode
+        if not stat.S_ISDIR(mode):
+            continue
+        child_fd = open_directory_fd(directory_fd, (name,))
+        try:
+            _make_projection_directories_removable(child_fd)
+        finally:
+            os.close(child_fd)
 
 
 def get_builtin_skill_specs() -> list[Any]:
@@ -513,6 +549,8 @@ def copy_skill_tree_no_symlinks(
     *,
     max_bytes: int | None = None,
     max_entries: int | None = None,
+    visible_mcp_slugs: set[str] | frozenset[str] | None = None,
+    owner_writable_directories: bool = False,
 ) -> None:
     """通过源目录 fd 逐项禁止跟随链接，再复制到 staging。"""
     absolute = Path(os.path.abspath(source_dir))
@@ -520,7 +558,7 @@ def copy_skill_tree_no_symlinks(
     entry_count = 0
     byte_count = 0
 
-    def copy_entries(directory_fd: int, destination: Path) -> None:
+    def copy_entries(directory_fd: int, destination: Path, *, at_root: bool) -> None:
         """按已打开的父目录读取来源，避免检查后被链接替换。"""
         nonlocal entry_count, byte_count
         for name in os.listdir(directory_fd):
@@ -533,26 +571,41 @@ def copy_skill_tree_no_symlinks(
                 child_fd = open_directory_fd(directory_fd, (name,))
                 try:
                     target.mkdir()
-                    copy_entries(child_fd, target)
-                    target.chmod(stat.S_IMODE(os.fstat(child_fd).st_mode) & 0o777)
+                    copy_entries(child_fd, target, at_root=False)
+                    source_mode = stat.S_IMODE(os.fstat(child_fd).st_mode) & 0o777
+                    target.chmod(source_mode | (0o300 if owner_writable_directories else 0))
                 finally:
                     os.close(child_fd)
             elif stat.S_ISREG(mode):
                 with open_regular_file_fd(directory_fd, (name,)) as (file_fd, file_stat):
-                    with target.open("xb") as output:
+                    if at_root and name == "SKILL.md" and visible_mcp_slugs is not None:
+                        content = bytearray()
                         while chunk := os.read(file_fd, 1024 * 1024):
+                            content.extend(chunk)
                             byte_count += len(chunk)
+                            if len(content) > MAX_SKILL_MARKDOWN_PROJECTION_BYTES:
+                                raise ValueError("SKILL.md 超过投影大小限制")
                             if max_bytes is not None and byte_count > max_bytes:
                                 raise ValueError("共享申请快照超过 1000 项或 20 MB 限制")
-                            output.write(chunk)
+                        projected = project_skill_markdown_mcp_dependencies(content.decode("utf-8"), visible_mcp_slugs)
+                        with target.open("xb") as output:
+                            output.write(projected.encode("utf-8"))
+                    else:
+                        with target.open("xb") as output:
+                            while chunk := os.read(file_fd, 1024 * 1024):
+                                byte_count += len(chunk)
+                                if max_bytes is not None and byte_count > max_bytes:
+                                    raise ValueError("共享申请快照超过 1000 项或 20 MB 限制")
+                                output.write(chunk)
                     target.chmod(stat.S_IMODE(file_stat.st_mode) & 0o777)
             else:
                 raise ValueError(f"Skill 来源只允许普通文件和目录: {source_dir}")
 
     try:
         target_dir.mkdir(parents=True)
-        copy_entries(source_fd, target_dir)
-        target_dir.chmod(stat.S_IMODE(os.fstat(source_fd).st_mode) & 0o777)
+        copy_entries(source_fd, target_dir, at_root=True)
+        source_mode = stat.S_IMODE(os.fstat(source_fd).st_mode) & 0o777
+        target_dir.chmod(source_mode | (0o300 if owner_writable_directories else 0))
     except BaseException:
         shutil.rmtree(target_dir, ignore_errors=True)
         raise
@@ -583,9 +636,9 @@ def copy_skill_snapshot(
     return parsed
 
 
-def skill_dirs_equal(dir1: Path, dir2: Path) -> bool:
+def skill_dirs_equal(dir1: Path, dir2: Path, *, visible_mcp_slugs: set[str] | frozenset[str] | None = None) -> bool:
     """按 no-follow 字节与执行位比较来源和投影，非法来源显式失败。"""
-    source_hash = _compute_projection_hash(dir1)
+    source_hash = _compute_projection_hash(dir1, visible_mcp_slugs=visible_mcp_slugs)
     try:
         return source_hash == _compute_projection_hash(dir2)
     except OSError:
@@ -593,11 +646,11 @@ def skill_dirs_equal(dir1: Path, dir2: Path) -> bool:
         return False
 
 
-def _compute_projection_hash(path: Path) -> bytes:
+def _compute_projection_hash(path: Path, *, visible_mcp_slugs: set[str] | frozenset[str] | None = None) -> bytes:
     """通过目录 fd 读取投影比较摘要，拒绝链接和特殊文件。"""
     hasher = hashlib.sha256()
 
-    def visit(directory_fd: int) -> None:
+    def visit(directory_fd: int, *, at_root: bool) -> None:
         """在已打开的目录内递归比较所需的类型、执行位和字节。"""
         for name in sorted(os.listdir(directory_fd)):
             hasher.update(os.fsencode(name) + b"\0")
@@ -606,7 +659,7 @@ def _compute_projection_hash(path: Path) -> bytes:
                 child_fd = open_directory_fd(directory_fd, (name,))
                 try:
                     hasher.update(b"directory\0")
-                    visit(child_fd)
+                    visit(child_fd, at_root=False)
                     hasher.update(b"end-directory\0")
                 finally:
                     os.close(child_fd)
@@ -614,14 +667,23 @@ def _compute_projection_hash(path: Path) -> bytes:
                 with open_regular_file_fd(directory_fd, (name,)) as (file_fd, file_stat):
                     hasher.update(b"file\0" + bytes([stat.S_IMODE(file_stat.st_mode) & 0o111]))
                     content_hash = hashlib.sha256()
-                    while chunk := os.read(file_fd, 1024 * 1024):
-                        content_hash.update(chunk)
+                    if at_root and name == "SKILL.md" and visible_mcp_slugs is not None:
+                        content = bytearray()
+                        while chunk := os.read(file_fd, 1024 * 1024):
+                            content.extend(chunk)
+                            if len(content) > MAX_SKILL_MARKDOWN_PROJECTION_BYTES:
+                                raise ValueError("SKILL.md 超过投影大小限制")
+                        projected = project_skill_markdown_mcp_dependencies(content.decode("utf-8"), visible_mcp_slugs)
+                        content_hash.update(projected.encode("utf-8"))
+                    else:
+                        while chunk := os.read(file_fd, 1024 * 1024):
+                            content_hash.update(chunk)
                     hasher.update(content_hash.digest())
 
     absolute = Path(os.path.abspath(path))
     directory_fd = open_directory_fd(Path(absolute.anchor), absolute.parts[1:])
     try:
-        visit(directory_fd)
+        visit(directory_fd, at_root=True)
     finally:
         os.close(directory_fd)
     return hasher.digest()
@@ -882,14 +944,14 @@ async def get_skill_dependency_options(
     skill_slugs, tool_list, mcp_names = await asyncio.gather(
         list_skill_slugs(db, user=user),
         asyncio.to_thread(get_tools),
-        get_enabled_mcp_server_slugs(db=db),
+        get_usable_mcp_server_slugs(db, user),
     )
     if slug:
         skill_slugs = [item for item in skill_slugs if item != slug]
 
     return {
         "tools": tool_list,
-        "mcps": mcp_names,
+        "mcps": sorted(mcp_names),
         "skills": skill_slugs,
     }
 
@@ -921,6 +983,8 @@ def _get_all_tool_names() -> list[str]:
 
 async def validate_skill_dependencies(
     *,
+    db: AsyncSession,
+    user: User,
     parent: Skill,
     tool_dependencies: list[str],
     mcp_dependencies: list[str],
@@ -938,7 +1002,7 @@ async def validate_skill_dependencies(
     if invalid_tools:
         raise ValueError(f"存在无效工具依赖: {', '.join(invalid_tools)}")
 
-    available_mcps = set(await get_enabled_mcp_server_slugs(db=None))
+    available_mcps = await get_usable_mcp_server_slugs(db, user)
     invalid_mcps = [name for name in mcps if name not in available_mcps]
     if invalid_mcps:
         raise ValueError(f"存在无效 MCP 依赖: {', '.join(invalid_mcps)}")
@@ -959,6 +1023,27 @@ async def validate_skill_dependencies(
     return tools, mcps, skills
 
 
+def merge_existing_mcp_dependencies(
+    existing: list[str] | None,
+    requested: list[str],
+    usable: set[str],
+    visible: set[str] | None,
+) -> list[str]:
+    """保留不可见旧引用；可见旧引用可删除，新增引用仍需使用权限。"""
+
+    previous = normalize_string_list(existing)
+    submitted = normalize_string_list(requested)
+    previous_set = set(previous)
+    unauthorized_new = [slug for slug in submitted if slug not in usable and slug not in previous_set]
+    if unauthorized_new:
+        raise ValueError(f"存在无效 MCP 依赖: {', '.join(unauthorized_new)}")
+
+    submitted_set = set(submitted)
+    kept = [slug for slug in previous if (visible is not None and slug not in visible) or slug in submitted_set]
+    added = [slug for slug in submitted if slug in usable and slug not in previous_set]
+    return [*kept, *added]
+
+
 async def update_skill_dependencies(
     db: AsyncSession,
     *,
@@ -975,10 +1060,15 @@ async def update_skill_dependencies(
     repo = SkillRepository(db)
     skill_items = await _list_accessible_shared_skills(db, operator)
     available_skills = {skill.slug: skill for skill in skill_items}
-    tools, mcps, skills = await validate_skill_dependencies(
+    usable_mcps = await get_usable_mcp_server_slugs(db, operator)
+    visible_mcps = await get_visible_mcp_reference_slugs(db, operator)
+    merged_mcps = merge_existing_mcp_dependencies(item.mcp_dependencies, mcp_dependencies, usable_mcps, visible_mcps)
+    tools, _mcps, skills = await validate_skill_dependencies(
+        db=db,
+        user=operator,
         parent=item,
         tool_dependencies=tool_dependencies,
-        mcp_dependencies=mcp_dependencies,
+        mcp_dependencies=[slug for slug in merged_mcps if slug in usable_mcps],
         skill_dependencies=skill_dependencies,
         available_skills=available_skills,
     )
@@ -986,7 +1076,7 @@ async def update_skill_dependencies(
     updated = await repo.update_dependencies(
         item,
         tool_dependencies=tools,
-        mcp_dependencies=mcps,
+        mcp_dependencies=merged_mcps,
         skill_dependencies=skills,
         updated_by=operator.uid,
     )
@@ -1014,10 +1104,14 @@ async def update_personal_skill_dependencies(
         created_by=uid,
         share_config=normalize_skill_share_config(None, operator_uid=uid),
     )
-    tools, mcps, skills = await validate_skill_dependencies(
+    usable_mcps = await get_usable_mcp_server_slugs(db, operator)
+    visible_mcps = await get_visible_mcp_reference_slugs(db, operator)
+    tools, _mcps, skills = await validate_skill_dependencies(
+        db=db,
+        user=operator,
         parent=parent,
         tool_dependencies=tool_dependencies,
-        mcp_dependencies=mcp_dependencies,
+        mcp_dependencies=[slug for slug in normalize_string_list(mcp_dependencies) if slug in usable_mcps],
         skill_dependencies=skill_dependencies,
         available_skills=available_skills,
         check_scope=False,
@@ -1034,8 +1128,11 @@ async def update_personal_skill_dependencies(
         parsed_slug, _, _, metadata = _parse_skill_markdown(content)
         if parsed_slug != slug:
             raise ValueError("SKILL.md 的 name 必须与个人 Skill 标识一致")
+        merged_mcps = merge_existing_mcp_dependencies(
+            metadata.get("mcp_dependencies"), mcp_dependencies, usable_mcps, visible_mcps
+        )
         metadata["tool_dependencies"] = tools
-        metadata["mcp_dependencies"] = mcps
+        metadata["mcp_dependencies"] = merged_mcps
         metadata["skill_dependencies"] = skills
         _, body = _split_frontmatter(content)
         dumped = yaml.safe_dump(metadata, sort_keys=False, allow_unicode=True).strip()
@@ -1051,7 +1148,7 @@ async def update_personal_skill_dependencies(
                 "name": str(metadata["name"]),
                 "description": str(metadata["description"]),
                 "tool_dependencies": tools,
-                "mcp_dependencies": mcps,
+                "mcp_dependencies": merged_mcps,
                 "skill_dependencies": skills,
             },
         )
@@ -1127,6 +1224,57 @@ def _parse_skill_markdown(content: str) -> tuple[str, str, str, dict[str, Any]]:
         raise ValueError("SKILL.md frontmatter 缺少 description")
 
     return slug, name, description, data
+
+
+def _skill_markdown_mcp_dependencies(metadata: dict[str, Any]) -> list[str]:
+    raw = metadata.get("mcp_dependencies")
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or any(not isinstance(slug, str) for slug in raw):
+        raise ValueError("SKILL.md frontmatter.mcp_dependencies 必须是字符串列表")
+    return normalize_string_list(raw)
+
+
+def _render_skill_markdown_frontmatter(metadata: dict[str, Any], content: str) -> str:
+    _, body = _split_frontmatter(content)
+    dumped = yaml.safe_dump(metadata, sort_keys=False, allow_unicode=True).strip()
+    return f"---\n{dumped}\n---\n{body}"
+
+
+def project_skill_markdown_mcp_dependencies(content: str, visible_mcp_slugs: set[str] | frozenset[str] | None) -> str:
+    """仅投影根级 frontmatter 声明，保留作者正文与无变化的原文。"""
+
+    if visible_mcp_slugs is None or not content.startswith("---"):
+        return content
+    try:
+        frontmatter_raw, _body = _split_frontmatter(content)
+        metadata = yaml.safe_load(frontmatter_raw)
+        if not isinstance(metadata, dict):
+            raise ValueError("SKILL.md frontmatter 必须是对象")
+        dependencies = _skill_markdown_mcp_dependencies(metadata)
+    except (ValueError, yaml.YAMLError) as exc:
+        raise ValueError("SKILL.md frontmatter 无效") from exc
+    if "mcp_dependencies" not in metadata:
+        return content
+    projected = project_mcp_references(dependencies, set(visible_mcp_slugs))
+    if projected == dependencies:
+        return content
+    metadata["mcp_dependencies"] = projected
+    return _render_skill_markdown_frontmatter(metadata, content)
+
+
+async def _project_skill_markdown_content(db: AsyncSession, operator: User, content: str) -> str:
+    """只在向普通用户返回时投影根级 SKILL.md 的 MCP 依赖。"""
+
+    if operator.role in ADMIN_ROLES:
+        return content
+    # 解析错误可能带有原始 YAML 片段，不应回显给无权查看依赖的用户。
+    try:
+        _parse_skill_markdown(content)
+    except ValueError as exc:
+        raise ValueError("SKILL.md frontmatter 无效") from exc
+    visible = await get_visible_mcp_reference_slugs(db, operator)
+    return project_skill_markdown_mcp_dependencies(content, visible)
 
 
 def _rewrite_frontmatter_slug(content: str, new_slug: str) -> str:
@@ -1983,6 +2131,9 @@ async def read_skill_file(
     except UnicodeDecodeError as e:
         raise ValueError(f"文件编码不支持（仅支持 UTF-8）: {e}") from e
 
+    if target == (skill_dir / "SKILL.md").resolve():
+        content = await _project_skill_markdown_content(db, operator, content)
+
     return {"path": rel, "content": content}
 
 
@@ -2043,6 +2194,21 @@ async def update_skill_file(
     if not is_skill_text_path(target):
         raise ValueError("仅支持编辑文本文件")
 
+    if target == (skill_dir / "SKILL.md").resolve() and operator.role not in ADMIN_ROLES:
+        try:
+            _, _, _, old_metadata = _parse_skill_markdown(target.read_text(encoding="utf-8"))
+            previous = _skill_markdown_mcp_dependencies(old_metadata)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValueError("SKILL.md frontmatter 无效") from exc
+        _, _, _, metadata = _parse_skill_markdown(content)
+        submitted = _skill_markdown_mcp_dependencies(metadata)
+        visible = await get_visible_mcp_reference_slugs(db, operator)
+        usable = await get_usable_mcp_server_slugs(db, operator)
+        merged = merge_existing_mcp_dependencies(previous, submitted, usable, visible)
+        if merged != submitted:
+            metadata["mcp_dependencies"] = merged
+            content = _render_skill_markdown_frontmatter(metadata, content)
+
     await _update_skill_metadata_if_skills_md(db, item, content, skill_dir, target, updated_by)
 
     target.write_text(content, encoding="utf-8")
@@ -2079,11 +2245,11 @@ async def delete_skill_node(
     if item.source_type == "personal_share":
         raise ValueError("已审核发布的 Skill 不允许直接修改文件")
     skill_dir = _resolve_skill_dir(item)
-    target, rel = resolve_skill_relative_path(skill_dir, relative_path, allow_root=False)
+    target, _ = resolve_skill_relative_path(skill_dir, relative_path, allow_root=False)
     if not target.exists():
         raise ValueError("目标不存在")
 
-    if rel == "SKILL.md":
+    if target == (skill_dir / "SKILL.md").resolve():
         raise ValueError("不允许删除根目录 SKILL.md")
 
     if target.is_dir():
@@ -2102,10 +2268,19 @@ async def export_skill_zip(db: AsyncSession, *, slug: str, operator: User) -> tu
     Path(export_path).unlink(missing_ok=True)
     export_file = Path(export_path)
     try:
+        skill_md_target = (skill_dir / "SKILL.md").resolve()
         with zipfile.ZipFile(export_file, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for p in skill_dir.rglob("*"):
                 arcname = Path(slug) / p.relative_to(skill_dir)
-                zf.write(p, arcname.as_posix())
+                if p.resolve() == skill_md_target and operator.role not in ADMIN_ROLES:
+                    try:
+                        content = p.read_text(encoding="utf-8")
+                    except UnicodeDecodeError as exc:
+                        raise ValueError("SKILL.md frontmatter 无效") from exc
+                    projected = await _project_skill_markdown_content(db, operator, content)
+                    zf.writestr(arcname.as_posix(), projected)
+                else:
+                    zf.write(p, arcname.as_posix())
     except Exception:
         export_file.unlink(missing_ok=True)
         raise

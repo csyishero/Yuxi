@@ -1,4 +1,4 @@
-import { apiGet, apiAdminGet, apiAdminPost, apiAdminPut, apiAdminDelete } from './base'
+import { apiGet, apiPut, apiAdminPost, apiAdminPut, apiAdminDelete } from './base'
 
 /**
  * MCP 服务器管理 API 模块
@@ -25,7 +25,19 @@ export const getMcpServers = async () => {
  * @returns {Promise} - 服务器配置
  */
 export const getMcpServer = async (name) => {
-  return apiAdminGet(`${BASE_URL}/${encodeURIComponent(name)}`)
+  return apiGet(`${BASE_URL}/${encodeURIComponent(name)}`)
+}
+
+/** 获取当前 MCP 可授权的部门与用户。 */
+export const getMcpServerSharingOptions = async (name) => {
+  return apiGet(`${BASE_URL}/${encodeURIComponent(name)}/sharing/options`)
+}
+
+/** 更新 MCP 的查看、使用与授权范围。 */
+export const updateMcpServerSharing = async (name, shareConfig) => {
+  return apiPut(`${BASE_URL}/${encodeURIComponent(name)}/sharing`, {
+    share_config: shareConfig
+  })
 }
 
 /**
@@ -89,7 +101,7 @@ export const updateMcpServerStatus = async (name, enabled) => {
  * @returns {Promise} - 工具列表
  */
 export const getMcpServerTools = async (name) => {
-  return apiAdminGet(`${BASE_URL}/${encodeURIComponent(name)}/tools`)
+  return apiGet(`${BASE_URL}/${encodeURIComponent(name)}/tools`)
 }
 
 /**
@@ -117,6 +129,8 @@ export const toggleMcpServerTool = async (serverName, toolName) => {
 export const mcpApi = {
   getMcpServers,
   getMcpServer,
+  getMcpServerSharingOptions,
+  updateMcpServerSharing,
   createMcpServer,
   updateMcpServer,
   deleteMcpServer,

@@ -137,8 +137,7 @@ const router = createRouter({
               component: () => import('../components/extensions/McpDetailView.vue'),
               meta: {
                 keepAlive: false,
-                requiresAuth: true,
-                requiresAdmin: true
+                requiresAuth: true
               }
             },
             {

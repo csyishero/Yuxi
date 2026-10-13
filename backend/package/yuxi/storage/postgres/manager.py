@@ -23,7 +23,7 @@ from yuxi.utils import logger
 from yuxi.utils.singleton import SingletonMeta
 
 AGENT_RUN_TERMINAL_STATUS_SQL = ", ".join(f"'{status}'" for status in AGENT_RUN_TERMINAL_STATUSES)
-BUSINESS_SCHEMA_VERSION = 8
+BUSINESS_SCHEMA_VERSION = 10
 KNOWLEDGE_SCHEMA_VERSION = 2
 SCHEMA_VERSION_TABLE = "yuxi_schema_migrations"
 AGENT_RUN_LEASE_SCHEMA_STATEMENTS = (
@@ -932,6 +932,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 name VARCHAR(128) NOT NULL,
                 description TEXT NOT NULL,
                 content_hash VARCHAR(128) NOT NULL,
+                application_reason TEXT,
                 status VARCHAR(16) NOT NULL DEFAULT 'pending',
                 review_note TEXT,
                 reviewer_uid VARCHAR(64),
@@ -961,6 +962,14 @@ class PostgresManager(metaclass=SingletonMeta):
             for stmt in stmts:
                 await conn.execute(text(stmt))
 
+    async def upgrade_skill_share_request_reason_schema(self) -> None:
+        """为已有共享申请补申请原因列，保留历史记录的未知原因。"""
+        self._check_initialized()
+        async with self.async_engine.begin() as conn:
+            await conn.execute(
+                text("ALTER TABLE skill_share_requests ADD COLUMN IF NOT EXISTS application_reason TEXT")
+            )
+
     async def ensure_business_schema(self):
         """确保业务 schema 包含后续新增字段（运行时 schema 演进）。"""
         self._check_initialized()
@@ -989,6 +998,7 @@ class PostgresManager(metaclass=SingletonMeta):
             "ALTER TABLE IF EXISTS conversations ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE IF EXISTS conversations ADD COLUMN IF NOT EXISTS last_viewed_run_id VARCHAR(64)",
             "ALTER TABLE IF EXISTS mcp_servers ADD COLUMN IF NOT EXISTS env JSONB",
+            "ALTER TABLE IF EXISTS mcp_servers ADD COLUMN IF NOT EXISTS share_config JSONB",
             *AGENT_RUN_CURSOR_SCHEMA_STATEMENTS,
             """
             CREATE TABLE IF NOT EXISTS agent_envs (

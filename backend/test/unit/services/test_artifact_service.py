@@ -88,13 +88,19 @@ def live_files(monkeypatch, tmp_path):
         lambda _db: type(
             "Repo",
             (),
-            {"get_by_uid": lambda self, uid: _async_value(type("User", (), {"uid": uid, "is_deleted": False})())},
+            {
+                "get_by_uid": lambda self, uid: _async_value(
+                    type("User", (), {"uid": uid, "is_deleted": False, "role": "admin"})()
+                )
+            },
         )(),
     )
     monkeypatch.setattr(
         svc,
         "list_accessible_skills",
-        lambda _db, _user: _async_value([type("Skill", (), {"slug": "reporter", "source_dir": backend.skill_root})()]),
+        lambda _db, _user: _async_value(
+            [type("Skill", (), {"slug": "reporter", "source_dir": backend.skill_root, "source_scope": "shared"})()]
+        ),
     )
     return backend
 
@@ -115,6 +121,47 @@ async def test_artifact_allows_project_user_data_and_authorized_skills(live_file
         )
         assert Path(response.path).read_bytes() == live_files.expected_bytes(path)
         await response.background()
+
+
+@pytest.mark.asyncio
+async def test_shared_skill_artifact_download_preview_and_save_project_mcp_frontmatter(live_files, monkeypatch):
+    content = (
+        "---\nname: reporter\ndescription: Reporter\n"
+        "mcp_dependencies: [read-only-mcp, private-mcp]\n---\n"
+        "The author's body can mention private-mcp.\n"
+    )
+    (live_files.skill_root / "SKILL.md").write_text(content, encoding="utf-8")
+
+    async def visible(_db, _user):
+        return {"read-only-mcp"}
+
+    async def preview(_path, raw_content, *, office_cache_key):
+        del office_cache_key
+        return {"raw_content": raw_content}
+
+    monkeypatch.setattr(svc, "get_visible_mcp_reference_slugs", visible)
+    monkeypatch.setattr(svc, "render_file_preview", preview)
+    path = "/home/gem/skills/reporter/SKILL.md"
+
+    response = await svc.resolve_thread_artifact_view(
+        thread_id="thread-1", current_uid="user-1", db=object(), path=path, download=True
+    )
+    downloaded = Path(response.path).read_text(encoding="utf-8")
+    await response.background()
+    preview_result = await svc.resolve_thread_artifact_view(
+        thread_id="thread-1", current_uid="user-1", db=object(), path=path, preview=True
+    )
+    saved = await svc.save_thread_artifact_to_workspace_view(
+        thread_id="thread-1", current_uid="user-1", db=object(), path=path
+    )
+    saved_content = live_files.expected_bytes(saved["saved_path"]).decode("utf-8")
+
+    assert downloaded == preview_result["raw_content"].decode("utf-8") == saved_content
+    frontmatter, body = downloaded.split("---", 2)[1:]
+    assert "read-only-mcp" in frontmatter
+    assert "private-mcp" not in frontmatter
+    assert "private-mcp" in body
+    assert (live_files.skill_root / "SKILL.md").read_text(encoding="utf-8") == content
 
 
 @pytest.mark.asyncio
