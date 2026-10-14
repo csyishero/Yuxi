@@ -70,8 +70,8 @@
           原目录：个人空间/{{ chat.workdir_path }}
         </p>
         <p class="move-helper">
-          逐个选择；可进入文件夹查看。默认不导入文件，也不会覆盖同名文件。最多 100 个，单个 50
-          MB，合计 100 MB。
+          可逐个选择，或全选当前文件夹中的文件；子文件夹需进入后选择。默认不导入文件，也不会覆盖同名文件。最多
+          100 个，单个 50 MB，合计 100 MB。
         </p>
         <nav class="move-breadcrumbs" aria-label="原文件目录">
           <button
@@ -84,6 +84,17 @@
             {{ part.name }}
           </button>
         </nav>
+        <label v-if="!filesLoading && !filesError && files.length" class="move-folder-selection">
+          <input
+            type="checkbox"
+            :checked="allCurrentFilesSelected"
+            :indeterminate="someCurrentFilesSelected && !allCurrentFilesSelected"
+            :disabled="submitting"
+            @change="onCurrentDirectorySelectionChange($event)"
+          />
+          {{ allCurrentFilesSelected ? '取消当前文件夹全选' : '全选当前文件夹' }}
+          <span>（{{ files.length }} 个文件）</span>
+        </label>
         <div class="move-file-list" :aria-busy="filesLoading">
           <div v-if="filesLoading" class="move-state" role="status">正在加载文件...</div>
           <div v-else-if="filesError" class="move-state move-error" role="alert">
@@ -224,6 +235,12 @@ const filteredProjects = computed(() => filterProjects(availableProjects.value, 
 const selectedPaths = computed(() => new Set(selectedFiles.value.map((file) => file.path)))
 const directories = computed(() => entries.value.filter((entry) => entry.is_dir))
 const files = computed(() => entries.value.filter((entry) => !entry.is_dir))
+const allCurrentFilesSelected = computed(
+  () => files.value.length > 0 && files.value.every((file) => selectedPaths.value.has(file.path))
+)
+const someCurrentFilesSelected = computed(() =>
+  files.value.some((file) => selectedPaths.value.has(file.path))
+)
 const breadcrumbs = computed(() => {
   const parts = [{ name: '原目录', path: '/' }]
   let path = ''
@@ -312,13 +329,53 @@ function toggleFile(file, checked) {
     }
     selectedFiles.value = [...selectedFiles.value, file]
   } else if (!checked) {
-    selectedFiles.value = selectedFiles.value.filter((item) => item.path !== file.path)
-    conflicts.value = conflicts.value.filter((item) => item.source_path !== file.path)
-    const remainingResolutions = { ...resolutions.value }
-    delete remainingResolutions[file.path]
-    resolutions.value = remainingResolutions
+    deselectFiles(new Set([file.path]))
   }
   formError.value = ''
+}
+
+/** 取消选择时同时清理对应的文件冲突决议。 */
+function deselectFiles(paths) {
+  selectedFiles.value = selectedFiles.value.filter((file) => !paths.has(file.path))
+  conflicts.value = conflicts.value.filter((conflict) => !paths.has(conflict.source_path))
+  resolutions.value = Object.fromEntries(
+    Object.entries(resolutions.value).filter(([sourcePath]) => !paths.has(sourcePath))
+  )
+  formError.value = ''
+}
+
+/** 批量操作只作用于当前已加载文件夹，且超限时不部分选择。 */
+function toggleCurrentDirectory(checked) {
+  if (submitting.value || filesLoading.value || filesError.value || !files.value.length) return
+  if (!checked) {
+    deselectFiles(new Set(files.value.map((file) => file.path)))
+    return
+  }
+
+  const newFiles = files.value.filter((file) => !selectedPaths.value.has(file.path))
+  const nextSelected = [...selectedFiles.value, ...newFiles]
+  if (nextSelected.length > MAX_FILES) {
+    formError.value = '一次最多导入 100 个文件；当前文件夹无法全部选中。'
+    return
+  }
+  if (newFiles.some((file) => Number(file.size) > MAX_FILE_BYTES)) {
+    formError.value = '当前文件夹有文件超过 50 MB，请逐个选择。'
+    return
+  }
+  const total = nextSelected.reduce((size, file) => size + (Number(file.size) || 0), 0)
+  if (total > MAX_TOTAL_BYTES) {
+    formError.value = '所选文件总计不能超过 100 MB；当前文件夹无法全部选中。'
+    return
+  }
+  selectedFiles.value = nextSelected
+  formError.value = ''
+}
+
+/** 批量选择失败时恢复原复选框状态。 */
+function onCurrentDirectorySelectionChange(event) {
+  toggleCurrentDirectory(event.target.checked)
+  event.target.checked = allCurrentFilesSelected.value
+  event.target.indeterminate = someCurrentFilesSelected.value && !allCurrentFilesSelected.value
 }
 
 /** 文件超限时恢复复选框状态。 */
@@ -568,6 +625,27 @@ async function submitMove() {
 }
 .move-file-row input {
   accent-color: var(--main-color);
+}
+.move-folder-selection {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  color: var(--gray-900);
+  font-size: 13px;
+  cursor: pointer;
+}
+.move-folder-selection input {
+  margin: 0;
+  accent-color: var(--main-color);
+}
+.move-folder-selection input:focus-visible {
+  outline: 2px solid var(--main-color);
+  outline-offset: 2px;
+}
+.move-folder-selection span {
+  color: var(--gray-500);
+  font-size: 12px;
 }
 .move-breadcrumbs {
   display: flex;

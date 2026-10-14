@@ -31,7 +31,7 @@ function moveModal({
     moveConversation
   }
   const state = runInNewContext(
-    `${modalScript}\n;({loadDirectory, toggleFile, filesForRequest, submitMove, selectedFiles, moveRequestId, targetProjectId, currentDirectory, entries, conflicts, resolutions, formError, submitting})`,
+    `${modalScript}\n;({loadDirectory, toggleFile, toggleCurrentDirectory, filesForRequest, submitMove, selectedFiles, moveRequestId, targetProjectId, currentDirectory, entries, filesLoading, filesError, conflicts, resolutions, formError, submitting, allCurrentFilesSelected, someCurrentFilesSelected})`,
     {
       computed,
       ref,
@@ -77,6 +77,61 @@ test('文件夹按需读取，逐个选择的文件跨目录保留；超限文�
   state.toggleFile(file('/too-large.bin', 50 * 1024 * 1024 + 1), true)
   assert.equal(state.selectedFiles.value.length, 1)
   assert.match(state.formError.value, /50 MB/)
+})
+
+test('全选只选择当前文件夹，取消后保留其他目录的选择并清理本层冲突', async () => {
+  const state = moveModal({
+    getTree: async (_, path) => ({
+      entries:
+        path === '/'
+          ? [file('/a.md'), file('/b.md'), { path: '/notes/', name: 'notes', is_dir: true }]
+          : [file('/notes/c.md')]
+    })
+  })
+  await state.loadDirectory('/notes/')
+  state.toggleFile(state.entries.value[0], true)
+  await state.loadDirectory('/')
+  state.toggleCurrentDirectory(true)
+  assert.deepEqual(
+    Array.from(state.selectedFiles.value, (item) => item.path),
+    ['/notes/c.md', '/a.md', '/b.md']
+  )
+  assert.equal(state.allCurrentFilesSelected.value, true)
+
+  state.conflicts.value = [
+    { source_path: '/a.md', destination_path: '/a.md', reason: 'already_exists' }
+  ]
+  state.resolutions.value = { '/a.md': { action: 'rename', name: 'a-copy.md' } }
+  state.toggleCurrentDirectory(false)
+  assert.deepEqual(
+    Array.from(state.selectedFiles.value, (item) => item.path),
+    ['/notes/c.md']
+  )
+  assert.equal(state.allCurrentFilesSelected.value, false)
+  assert.equal(state.someCurrentFilesSelected.value, false)
+  assert.equal(state.conflicts.value.length, 0)
+  assert.equal(Object.keys(state.resolutions.value).length, 0)
+})
+
+test('全选超出数量或大小限制时保持原选择，不会只选入部分文件', async () => {
+  const state = moveModal()
+  state.entries.value = [file('/a.md'), file('/b.md')]
+  state.selectedFiles.value = Array.from({ length: 99 }, (_, index) => file(`/other/${index}.md`))
+  state.toggleCurrentDirectory(true)
+  assert.equal(state.selectedFiles.value.length, 99)
+  assert.match(state.formError.value, /100 个/)
+
+  state.selectedFiles.value = []
+  state.entries.value = [file('/too-large.bin', 50 * 1024 * 1024 + 1)]
+  state.toggleCurrentDirectory(true)
+  assert.equal(state.selectedFiles.value.length, 0)
+  assert.match(state.formError.value, /50 MB/)
+
+  state.selectedFiles.value = [file('/other/existing.bin', 90 * 1024 * 1024)]
+  state.entries.value = [file('/new.bin', 11 * 1024 * 1024)]
+  state.toggleCurrentDirectory(true)
+  assert.equal(state.selectedFiles.value.length, 1)
+  assert.match(state.formError.value, /100 MB/)
 })
 
 test('冲突默认逐项跳过，改名仅改变所选文件的目标位置', async () => {
