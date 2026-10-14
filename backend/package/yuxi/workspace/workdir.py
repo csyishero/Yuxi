@@ -5,8 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+from .errors import FileImportConflictError, FileImportLimitError, FileImportRollbackError
 from .filesystem import Workspace
 from .paths import normalize_workdir_path
+
+MAX_SELECTED_IMPORT_FILES = 100
+MAX_SELECTED_IMPORT_FILE_BYTES = 50 * 1024 * 1024
+MAX_SELECTED_IMPORT_TOTAL_BYTES = 100 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +85,120 @@ class Workdir:
             source_path,
             overwrite=overwrite,
         )
+
+    def copy_selected_files_from(self, source: Workdir, files: list[dict[str, str]]) -> dict:
+        """将明确选中的源文件复制到本 Workdir，保留源文件并拒绝覆盖。"""
+        if not self.workspace.same_workspace(source.workspace):
+            raise PermissionError("cross-user Workdir import is not allowed")
+        if len(files) > MAX_SELECTED_IMPORT_FILES:
+            raise FileImportLimitError("too many selected files")
+
+        plans: list[dict] = []
+        conflicts: list[dict[str, str]] = []
+        seen_destinations: set[str] = set()
+        planned_bytes = 0
+        for item in files:
+            source_path = source._canonical_file_scope(item["source_path"])
+            destination_path = self._canonical_file_scope(item.get("destination_path", source_path))
+            conflict_reason = None
+            if destination_path in seen_destinations:
+                conflict_reason = "duplicate_destination"
+            seen_destinations.add(destination_path)
+            if conflict_reason is None and source.resolve_path(source_path) == self.resolve_path(destination_path):
+                conflict_reason = "same_file"
+
+            source_info = source.stat(source_path)
+            if source_info["is_dir"]:
+                raise IsADirectoryError(source_path)
+            size = int(source_info["size"])
+            if size > MAX_SELECTED_IMPORT_FILE_BYTES:
+                raise FileImportLimitError("selected file exceeds import limit")
+            planned_bytes += size
+            if planned_bytes > MAX_SELECTED_IMPORT_TOTAL_BYTES:
+                raise FileImportLimitError("selected files exceed total import limit")
+
+            if conflict_reason is None:
+                try:
+                    self.stat(destination_path)
+                except FileNotFoundError:
+                    pass
+                except (NotADirectoryError, PermissionError):
+                    conflict_reason = "destination_unavailable"
+                else:
+                    conflict_reason = "already_exists"
+            if conflict_reason is not None:
+                conflicts.append(
+                    {"source_path": source_path, "destination_path": destination_path, "reason": conflict_reason}
+                )
+            plans.append({"source_path": source_path, "destination_path": destination_path})
+
+        destination_paths = {plan["destination_path"] for plan in plans}
+        for plan in plans:
+            parent = PurePosixPath(plan["destination_path"]).parent
+            while parent != PurePosixPath("/"):
+                if parent.as_posix() in destination_paths:
+                    if not any(
+                        conflict["source_path"] == plan["source_path"]
+                        and conflict["destination_path"] == plan["destination_path"]
+                        for conflict in conflicts
+                    ):
+                        conflicts.append({**plan, "reason": "selected_parent_is_file"})
+                    break
+                parent = parent.parent
+        if conflicts:
+            raise FileImportConflictError(conflicts)
+
+        copied_files: list[dict] = []
+        created_paths: list[dict] = []
+        total_bytes = 0
+        try:
+            for plan in plans:
+                source_path = plan["source_path"]
+                destination_path = plan["destination_path"]
+                try:
+                    identity = self.workspace.copy_authorized_file_from_workspace(
+                        source.workspace,
+                        source.resolve_path(source_path),
+                        self.resolve_path(destination_path),
+                        max_bytes=min(MAX_SELECTED_IMPORT_FILE_BYTES, MAX_SELECTED_IMPORT_TOTAL_BYTES - total_bytes),
+                    )
+                except FileExistsError as exc:
+                    raise FileImportConflictError([{**plan, "reason": "already_exists"}]) from exc
+                created_paths.append({"path": destination_path, **identity})
+                copied_files.append({**plan, "size": identity["size"]})
+                total_bytes += identity["size"]
+        except BaseException:
+            self.remove_imported_files(created_paths)
+            raise
+        return {
+            "files": copied_files,
+            "count": len(copied_files),
+            "total_bytes": total_bytes,
+            "created_paths": created_paths,
+        }
+
+    def remove_imported_files(self, created_paths: list[dict]) -> None:
+        """回滚本次导入中仍保持原样的文件，不触碰并发改动。"""
+        failed: list[str] = []
+        for record in reversed(created_paths):
+            path = record["path"]
+            try:
+                self.workspace.remove_authorized_imported_file(
+                    self.resolve_path(path),
+                    root=self.root_path,
+                    identity=record,
+                )
+            except Exception:
+                failed.append(path)
+        if failed:
+            raise FileImportRollbackError(failed)
+
+    def _canonical_file_scope(self, path: str) -> str:
+        """把用户选择规范为本 Workdir 内非根文件路径。"""
+        scope = self.scope_path(self.resolve_path(path))
+        if scope == "/":
+            raise IsADirectoryError(path)
+        return scope
 
     def create_directory(self, parent_path: str, name: str) -> dict:
         return self.workspace.create_authorized_directory(

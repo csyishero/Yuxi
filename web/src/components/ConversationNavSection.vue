@@ -121,6 +121,7 @@
                         @delete-chat="$emit('delete-chat', $event)"
                         @rename-chat="$emit('rename-chat', $event)"
                         @toggle-pin="$emit('toggle-pin', $event)"
+                        @move-chat="openMoveChat"
                       />
                       <button
                         v-if="group.hasMore"
@@ -164,6 +165,7 @@
                   @rename-chat="$emit('rename-chat', $event)"
                   @toggle-pin="$emit('toggle-pin', $event)"
                   @promote-chat="confirmPromoteChat"
+                  @move-chat="openMoveChat"
                 />
                 <div v-if="!otherConversations.length" class="list-state">暂无对话历史</div>
               </template>
@@ -182,6 +184,16 @@
         </button>
       </div>
     </div>
+    <MoveConversationModal
+      v-model:open="moveModalOpen"
+      :chat="moveChat"
+      :projects="projects"
+      :projects-loading="projectsLoading"
+      :projects-error="projectsError"
+      :move-conversation="moveConversation"
+      @moved="handleMovedChat"
+      @retry-projects="$emit('retry-projects')"
+    />
   </section>
 </template>
 
@@ -199,11 +211,13 @@ import {
   Trash2
 } from '@lucide/vue'
 import ConversationNavItem from '@/components/ConversationNavItem.vue'
+import MoveConversationModal from '@/components/MoveConversationModal.vue'
 import CollapseTransition from '@/components/common/CollapseTransition.vue'
 import { buildProjectConversationGroups } from '@/utils/projectConversationGroups'
 
 const props = defineProps({
   promoteConversation: { type: Function, required: true },
+  moveConversation: { type: Function, required: true },
   currentChatId: { type: String, default: null },
   chatsList: { type: Array, default: () => [] },
   projects: { type: Array, default: () => [] },
@@ -229,6 +243,8 @@ const emit = defineEmits([
 ])
 const projectsExpanded = ref(true)
 const recentExpanded = ref(true)
+const moveModalOpen = ref(false)
+const moveChat = ref(null)
 const expandedProjects = ref(new Set())
 const INITIAL_PROJECT_CONVERSATIONS = 5
 const PROJECT_CONVERSATIONS_STEP = 10
@@ -266,7 +282,35 @@ const toggleProject = (projectId) => {
 const openChatProject = (chat) => {
   projectsExpanded.value = true
   expandedProjects.value = new Set([...expandedProjects.value, chat.project_id])
+  const group = groupedNavigation.value.groups.find((item) => item.project.id === chat.project_id)
+  const position = group?.conversations.findIndex((item) => item.id === chat.id) ?? -1
+  if (position >= 0) {
+    projectVisibleCounts.value = {
+      ...projectVisibleCounts.value,
+      [chat.project_id]: Math.max(
+        projectVisibleCounts.value[chat.project_id] || INITIAL_PROJECT_CONVERSATIONS,
+        position + 1
+      )
+    }
+  }
   emit('select-chat', chat.id)
+}
+
+/** 打开目标项目和旧文件选择弹窗。 */
+const openMoveChat = (chat) => {
+  moveChat.value = chat
+  moveModalOpen.value = true
+}
+
+/** 根据服务端返回的会话归属展开并定位目标项目。 */
+const handleMovedChat = (result) => {
+  if (!result?.thread) return
+  openChatProject(result.thread)
+  message.success(
+    result.imported_files?.length
+      ? `对话已移入项目，导入 ${result.imported_files.length} 个文件`
+      : '对话已移入项目，原文件保留在原目录'
+  )
 }
 
 const confirmPromoteChat = (chat) => {

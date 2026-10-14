@@ -188,6 +188,9 @@ async def test_directory_deletion_rejects_unowned_or_busy_paths(
         async def has_active_project_work(self, _project):
             return active
 
+        async def has_historical_workdir_references(self, _project):
+            return False
+
     with pytest.raises(HTTPException) as exc:
         await svc._validate_managed_directory_deletion(project=project, repository=_Repository())
     assert exc.value.status_code == expected
@@ -223,6 +226,9 @@ async def test_project_workdir_delete_preserves_outside_files_and_is_retryable(m
             return False
 
         async def has_active_project_work(self, _project):
+            return False
+
+        async def has_historical_workdir_references(self, _project):
             return False
 
     @asynccontextmanager

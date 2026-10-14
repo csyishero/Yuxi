@@ -794,6 +794,7 @@
         }"
       >
         <AgentPanel
+          :key="`${currentChatId || ''}:${currentThread?.project_id || ''}`"
           :agent-state="currentAgentState"
           :thread-id="currentChatId"
           :active-run-id="currentThreadState?.activeRunId || null"
@@ -1216,6 +1217,19 @@ const releasePreviewCacheEntry = (path, threadId = currentChatId.value) => {
     agentPanelPreviewCache.delete(key)
   }
 }
+
+watch(
+  () => [currentChatId.value, currentThread.value?.project_id],
+  ([threadId, projectId], [previousThreadId, previousProjectId]) => {
+    if (!threadId || threadId !== previousThreadId || projectId === previousProjectId) return
+    agentPanelPreviewTabs.value.forEach((tab) => releasePreviewCacheEntry(tab.path, threadId))
+    agentPanelPreviewTabs.value = []
+    agentPanelActivePreviewPath.value = ''
+    agentPanelViewMode.value = 'tree'
+    agentPanelSections.value = [FILE_TREE_SECTION]
+    agentPanelActiveSectionKey.value = FILE_TREE_SECTION.key
+  }
+)
 
 const invalidatePreviewCachePath = (targetPath, threadId = currentChatId.value) => {
   for (const key of agentPanelPreviewCache.keys()) {

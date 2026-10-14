@@ -55,6 +55,13 @@
             >
               转为项目
             </a-menu-item>
+            <a-menu-item
+              key="move"
+              :icon="h(FolderInput, { size: 14 })"
+              @click.stop="$emit('move-chat', chat)"
+            >
+              移入项目
+            </a-menu-item>
             <a-menu-item key="rename" :icon="h(SquarePen, { size: 14 })" @click.stop="renameChat">
               重命名
             </a-menu-item>
@@ -81,7 +88,7 @@
 <script setup>
 import { h } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { FolderPlus, Loader2, MoreVertical, Pin, PinOff, SquarePen, Trash2 } from '@lucide/vue'
+import { FolderInput, FolderPlus, Loader2, MoreVertical, Pin, PinOff, SquarePen, Trash2 } from '@lucide/vue'
 
 const props = defineProps({
   chat: { type: Object, required: true },
@@ -94,7 +101,8 @@ const emit = defineEmits([
   'delete-chat',
   'rename-chat',
   'toggle-pin',
-  'promote-chat'
+  'promote-chat',
+  'move-chat'
 ])
 
 const confirmDeleteChat = () => {

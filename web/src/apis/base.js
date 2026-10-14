@@ -44,7 +44,32 @@ function safeResponseHeaders(headers) {
   return safeHeaders
 }
 
-function safeErrorData(errorData, status, publicMessage) {
+function safeErrorData(errorData, status, publicMessage, path) {
+  if (
+    status === 409 &&
+    /^\/api\/projects\/conversations\/[^/]+\/move\/?$/.test(path) &&
+    errorData?.detail?.code === 'file_conflicts' &&
+    Array.isArray(errorData.detail.conflicts)
+  ) {
+    return {
+      detail: {
+        code: 'file_conflicts',
+        conflicts: errorData.detail.conflicts
+          .slice(0, 100)
+          .filter(
+            (item) =>
+              typeof item?.source_path === 'string' &&
+              typeof item?.destination_path === 'string' &&
+              typeof item?.reason === 'string'
+          )
+          .map((item) => ({
+            source_path: item.source_path.slice(0, 1024),
+            destination_path: item.destination_path.slice(0, 1024),
+            reason: item.reason.slice(0, 80)
+          }))
+      }
+    }
+  }
   if (status !== 422) return { detail: publicMessage }
   const detail = errorData?.detail
   if (!Array.isArray(detail)) return { detail: publicMessage }
@@ -75,6 +100,20 @@ const PROJECT_PROMOTION_ERRORS = new Set([
   '原对话目录不存在或不可用，未转换项目'
 ])
 
+const PROJECT_MOVE_ERRORS = new Set([
+  '会话存在运行、排队、待清理或待回复任务',
+  '会话已属于目标项目',
+  '源项目或目标项目不存在',
+  '目标项目不可选择',
+  '只能移动根会话',
+  '会话归属已变化，请重试',
+  '子会话与根会话的项目归属不一致',
+  '项目目录不可用',
+  '所选文件不可用或导入失败',
+  '源文件在导入时发生变化，请重试',
+  'request_id 已用于其他会话迁移意图'
+])
+
 function publicErrorMessage(url, status, headers, requiresAuth, options, errorData) {
   const path = safeRequestMetadata(url, {}).path
   if (
@@ -90,6 +129,20 @@ function publicErrorMessage(url, status, headers, requiresAuth, options, errorDa
     /^\/api\/projects\/from-conversation\/[^/]+\/?$/.test(path) &&
     [409, 422].includes(status) &&
     PROJECT_PROMOTION_ERRORS.has(errorData?.detail)
+  )
+    return errorData.detail
+  if (
+    options?.method?.toUpperCase() === 'POST' &&
+    /^\/api\/projects\/conversations\/[^/]+\/move\/?$/.test(path) &&
+    status === 409 &&
+    errorData?.detail?.code === 'file_conflicts'
+  )
+    return '目标项目有同名文件，请逐项处理'
+  if (
+    options?.method?.toUpperCase() === 'POST' &&
+    /^\/api\/projects\/conversations\/[^/]+\/move\/?$/.test(path) &&
+    [404, 409].includes(status) &&
+    PROJECT_MOVE_ERRORS.has(errorData?.detail)
   )
     return errorData.detail
   if (status === 400) return '请求参数错误'
@@ -186,7 +239,12 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
       error.headers = safeResponseHeaders(response.headers)
       error.response = {
         status: response.status,
-        data: safeErrorData(errorData, response.status, errorMessage),
+        data: safeErrorData(
+          errorData,
+          response.status,
+          errorMessage,
+          safeRequestMetadata(url, requestOptions).path
+        ),
         headers: error.headers
       }
 

@@ -36,6 +36,11 @@ async def _lock_project_workdir_changes(*, db, uid: str) -> None:
     )
 
 
+async def lock_project_workdir_changes(*, db, uid: str) -> None:
+    """供跨项目用例复用同一用户的目录生命周期锁。"""
+    await _lock_project_workdir_changes(db=db, uid=uid)
+
+
 def _normalize_project_name(name: str | None, *, required: bool) -> str | None:
     """规范化并校验 Project 名称。"""
     normalized_name = (name or "").strip()
@@ -229,6 +234,8 @@ async def _validate_managed_directory_deletion(*, project: Project, repository: 
         raise HTTPException(status_code=409, detail="项目目录与项目 ID 不匹配，不能删除文件夹")
     if await repository.has_other_workdir_overlap(project):
         raise HTTPException(status_code=409, detail="项目目录与其他项目共用或重叠，不能删除文件夹")
+    if await repository.has_historical_workdir_references(project):
+        raise HTTPException(status_code=409, detail="仍有已迁出会话引用此目录，不能删除文件夹")
     if await repository.has_active_project_work(project):
         raise HTTPException(status_code=409, detail="项目中仍有运行或排队的任务，请结束后重试")
 

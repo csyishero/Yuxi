@@ -59,11 +59,14 @@ async def test_selected_projects_root_exposes_its_complete_subtree(monkeypatch):
         {"path": "/projects/anonymous/report.txt", "is_dir": False},
     ]
 
-    assert await svc._filter_project_tree_entries(
-        entries,
-        uid="user-1",
-        db=SimpleNamespace(),
-    ) == entries
+    assert (
+        await svc._filter_project_tree_entries(
+            entries,
+            uid="user-1",
+            db=SimpleNamespace(),
+        )
+        == entries
+    )
 
 
 async def test_tree_without_projects_descendants_does_not_query_projects(monkeypatch):
@@ -74,11 +77,14 @@ async def test_tree_without_projects_descendants_does_not_query_projects(monkeyp
     monkeypatch.setattr(svc, "ProjectRepository", _UnexpectedRepository)
     entries = [{"path": "/notes/readme.md", "is_dir": False}]
 
-    assert await svc._filter_project_tree_entries(
-        entries,
-        uid="user-1",
-        db=SimpleNamespace(),
-    ) == entries
+    assert (
+        await svc._filter_project_tree_entries(
+            entries,
+            uid="user-1",
+            db=SimpleNamespace(),
+        )
+        == entries
+    )
 
 
 async def test_project_picker_tree_keeps_unbound_project_directories(monkeypatch):
@@ -101,7 +107,7 @@ async def test_project_picker_tree_keeps_unbound_project_directories(monkeypatch
 async def test_workspace_tree_keeps_deleted_project_files_without_exposing_anonymous_dirs():
     """真实目录归属查询保留软删除项目，旧根绑定不能展开匿名目录。"""
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-    from yuxi.storage.postgres.models_business import Base, Project, User
+    from yuxi.storage.postgres.models_business import Base, Conversation, Project, User
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     try:
@@ -120,6 +126,8 @@ async def test_workspace_tree_keeps_deleted_project_files_without_exposing_anony
                 ("linked", "user-1", "selectable", "deleted", "linked", "projects/linked"),
                 ("root", "user-1", "selectable", "deleted", "linked", "projects"),
                 ("implicit", "user-1", "implicit", "active", "managed", "projects/implicit"),
+                ("moved-from", "user-1", "implicit", "active", "managed", "projects/moved-from"),
+                ("forged-from", "user-1", "implicit", "active", "managed", "projects/forged-from"),
                 ("other-user", "user-2", "selectable", "deleted", "managed", "projects/other-user"),
             ]
             for key, uid, selection, status, mode, path in cases:
@@ -134,16 +142,58 @@ async def test_workspace_tree_keeps_deleted_project_files_without_exposing_anony
                     )
                 )
             await db.flush()
+            db.add_all(
+                [
+                    Conversation(
+                        thread_id="moved-thread",
+                        uid="user-1",
+                        project_id="kept",
+                        agent_id="test-agent",
+                        status="active",
+                        extra_metadata={
+                            "project_moves": [
+                                {
+                                    "source_project_id": "moved-from",
+                                    "source_workdir_path": "projects/moved-from",
+                                },
+                                {
+                                    "source_project_id": "forged-from",
+                                    "source_workdir_path": "projects/wrong-path",
+                                },
+                            ]
+                        },
+                    ),
+                    Conversation(
+                        thread_id="deleted-thread",
+                        uid="user-1",
+                        project_id="kept",
+                        agent_id="test-agent",
+                        status="deleted",
+                        extra_metadata={
+                            "project_moves": [
+                                {
+                                    "source_project_id": "implicit",
+                                    "source_workdir_path": "projects/implicit",
+                                }
+                            ]
+                        },
+                    ),
+                ]
+            )
+            await db.flush()
             paths = [
                 "/projects/",
                 "/projects/kept/",
                 "/projects/kept/file.txt",
                 "/projects/linked/",
                 "/projects/implicit/",
+                "/projects/moved-from/",
+                "/projects/moved-from/old.txt",
+                "/projects/forged-from/",
                 "/projects/other-user/",
                 "/projects/anonymous/",
             ]
             result = await svc._filter_project_tree_entries([{"path": path} for path in paths], uid="user-1", db=db)
-            assert [entry["path"] for entry in result] == paths[:4]
+            assert [entry["path"] for entry in result] == paths[:4] + paths[5:7]
     finally:
         await engine.dispose()

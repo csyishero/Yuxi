@@ -23,6 +23,9 @@ function promotionDialog(promote) {
       props: { promoteConversation: promote },
       projectsExpanded,
       expandedProjects,
+      groupedNavigation: ref({ groups: [] }),
+      projectVisibleCounts: ref({}),
+      INITIAL_PROJECT_CONVERSATIONS: 5,
       Modal: {
         confirm: (value) => {
           dialog = value

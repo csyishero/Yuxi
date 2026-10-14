@@ -1,17 +1,22 @@
+import asyncio
 import uuid
 from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yuxi.models.utils import parse_assistant_message_body
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import INVOCATION_CONVERSATION_SOURCES, ConversationRepository
 from yuxi.repositories.project_repository import ProjectRepository
 from yuxi.services.attachment_service import serialize_attachment
-from yuxi.services.project_service import create_implicit_project, delete_implicit_project_view
+from yuxi.services.project_service import (
+    create_implicit_project,
+    delete_implicit_project_view,
+    lock_project_workdir_changes,
+)
 from yuxi.services.workdir_service import (
     ensure_conversation_workdir_available,
     workdir_binding_from_project,
@@ -19,14 +24,15 @@ from yuxi.services.workdir_service import (
 from yuxi.storage.postgres.models_business import (
     AGENT_RUN_TERMINAL_STATUSES,
     AgentRun,
+    Conversation,
     Project,
     User,
     build_agent_run_timing,
 )
-from yuxi.utils.datetime_utils import format_utc_datetime
+from yuxi.utils.datetime_utils import format_utc_datetime, utc_now_naive
 from yuxi.utils.logging_config import logger
 from yuxi.workspace.paths import ensure_bound_user_workdir
-from yuxi.workspace.workdir import Workdir
+from yuxi.workspace.workdir import FileImportConflictError, FileImportLimitError, FileImportRollbackError, Workdir
 
 MESSAGE_AUDIT_LIMIT = 500
 AGENT_RUN_TRACE_LIMIT = 500
@@ -83,6 +89,8 @@ async def create_thread_view(
 ) -> dict:
     if metadata and "attachments" in metadata:
         raise HTTPException(status_code=400, detail="metadata.attachments 是服务端保留字段")
+    if metadata and "project_moves" in metadata:
+        raise HTTPException(status_code=400, detail="metadata.project_moves 是服务端保留字段")
 
     user_result = await db.execute(select(User).where(User.uid == str(current_uid)))
     current_user = user_result.scalar_one_or_none()
@@ -212,6 +220,211 @@ async def create_thread_view(
         db=db,
         project=project,
     )
+
+
+async def move_conversation_project_view(
+    *,
+    thread_id: str,
+    target_project_id: str,
+    files: list[dict[str, str]],
+    current_uid: str,
+    db: AsyncSession,
+    request_id: str,
+) -> dict:
+    """导入所选旧文件后，将根会话及持久子会话整体绑定到目标项目。"""
+    uid = str(current_uid)
+    await lock_project_workdir_changes(db=db, uid=uid)
+    conversations = ConversationRepository(db)
+    projects = ProjectRepository(db)
+    original = await conversations.get_conversation_by_thread_id(thread_id)
+    if original is None or original.uid != uid or original.status != "active":
+        raise HTTPException(status_code=404, detail="对话不存在")
+    source_project_id = original.project_id
+    if source_project_id == target_project_id:
+        project = await projects.lock_active_for_user(source_project_id, uid)
+        root = await conversations.lock_conversation_by_thread_id(thread_id)
+        if project is None or root is None or root.uid != uid or root.status != "active":
+            raise HTTPException(status_code=404, detail="对话或项目不存在")
+        replay = _find_move_request(root, request_id)
+        if replay is not None:
+            if replay.get("target_project_id") != target_project_id or replay.get("file_request") != files:
+                raise HTTPException(status_code=409, detail="request_id 已用于其他会话迁移意图")
+            run_map = await AgentRunRepository(db).get_latest_top_level_runs_for_threads(uid, [thread_id])
+            run_id, run_status = run_map.get(thread_id, (None, None))
+            thread = await _serialize_thread(
+                root,
+                thread_status=_thread_status(run_id, run_status, root.last_viewed_run_id),
+                db=db,
+                project=project,
+            )
+            return {
+                "thread": thread,
+                "imported_files": replay.get("imported_files", []),
+                "moved_thread_ids": replay.get("moved_thread_ids", [thread_id]),
+            }
+        raise HTTPException(status_code=409, detail="会话已属于目标项目")
+
+    locked_projects = {}
+    for project_id in sorted((source_project_id, target_project_id)):
+        project = await projects.lock_active_for_user(project_id, uid)
+        if project is None:
+            raise HTTPException(status_code=404, detail="源项目或目标项目不存在")
+        locked_projects[project_id] = project
+    source = locked_projects[source_project_id]
+    target = locked_projects[target_project_id]
+    if target.selection_status != "selectable":
+        raise HTTPException(status_code=404, detail="目标项目不可选择")
+
+    tree = await conversations.lock_conversation_tree_for_move(root_id=original.id, uid=uid)
+    root = next(conversation for conversation in tree if conversation.id == original.id)
+    if root.project_id != source.id or root.status != "active":
+        raise HTTPException(status_code=409, detail="会话归属已变化，请重试")
+    if root.status == "subagent" or await conversations.is_child_conversation(conversation_id=root.id, uid=uid):
+        raise HTTPException(status_code=409, detail="只能移动根会话")
+    if any(conversation.project_id != source.id for conversation in tree):
+        raise HTTPException(status_code=409, detail="子会话与根会话的项目归属不一致")
+    if _find_move_request(root, request_id) is not None:
+        raise HTTPException(status_code=409, detail="request_id 已用于其他会话迁移意图")
+    if await projects.has_unsettled_conversation_work(uid=uid, root_thread_id=thread_id, conversations=tree):
+        raise HTTPException(status_code=409, detail="会话存在运行、排队、待清理或待回复任务")
+
+    try:
+        source_workdir = Workdir.open_existing(uid, source.workdir_path)
+        target_workdir = Workdir.open_existing(uid, target.workdir_path)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail="项目目录不可用") from exc
+
+    imported = {"files": [], "count": 0, "total_bytes": 0, "created_paths": []}
+    if files:
+        copy_task = asyncio.create_task(
+            asyncio.to_thread(target_workdir.copy_selected_files_from, source_workdir, files)
+        )
+        try:
+            copy_cancelled = False
+            while not copy_task.done():
+                try:
+                    await asyncio.shield(copy_task)
+                except asyncio.CancelledError:
+                    copy_cancelled = True
+            imported = await copy_task
+            if copy_cancelled:
+                await asyncio.to_thread(target_workdir.remove_imported_files, imported["created_paths"])
+                raise asyncio.CancelledError
+        except FileImportConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "file_conflicts", "conflicts": exc.conflicts},
+            ) from exc
+        except FileImportLimitError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except FileImportRollbackError:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=409, detail="所选文件不可用或导入失败") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail="源文件在导入时发生变化，请重试") from exc
+
+    commit_started = False
+    commit_succeeded = False
+    move_id = str(uuid.uuid4())
+    moved_thread_ids = [conversation.thread_id for conversation in tree]
+    try:
+        moved_at = format_utc_datetime(utc_now_naive())
+        for conversation in tree:
+            metadata = dict(conversation.extra_metadata or {})
+            prior_moves = metadata.get("project_moves", [])
+            if not isinstance(prior_moves, list) or not all(isinstance(move, dict) for move in prior_moves):
+                raise HTTPException(status_code=409, detail="会话迁移历史无效")
+            metadata["project_moves"] = [
+                *prior_moves,
+                {
+                    "source_project_id": source.id,
+                    "source_workdir_path": source.workdir_path,
+                    "source_selection_status": source.selection_status,
+                    "source_was_implicit_creation": bool(
+                        source.selection_status == "implicit"
+                        or (
+                            conversation.creation_request_id
+                            and source.idempotency_key == f"thread:{conversation.creation_request_id}"
+                        )
+                    ),
+                    "target_project_id": target.id,
+                    "request_id": request_id,
+                    "file_request": files,
+                    "imported_files": imported["files"],
+                    "moved_thread_ids": moved_thread_ids,
+                    "move_id": move_id,
+                    "moved_at": moved_at,
+                },
+            ]
+            conversation.extra_metadata = metadata
+            conversation.project_id = target.id
+            conversation.updated_at = utc_now_naive()
+
+        await db.flush()
+        run_map = await AgentRunRepository(db).get_latest_top_level_runs_for_threads(uid, [thread_id])
+        run_id, run_status = run_map.get(thread_id, (None, None))
+        thread = await _serialize_thread(
+            root,
+            thread_status=_thread_status(run_id, run_status, root.last_viewed_run_id),
+            db=db,
+            project=target,
+        )
+        commit_started = True
+        commit_task = asyncio.create_task(db.commit())
+        commit_cancelled = False
+        while not commit_task.done():
+            try:
+                await asyncio.shield(commit_task)
+            except asyncio.CancelledError:
+                commit_cancelled = True
+        await commit_task
+        commit_succeeded = True
+        if commit_cancelled:
+            raise asyncio.CancelledError
+    except BaseException:
+        if commit_succeeded:
+            raise
+        rollback_failed = False
+        try:
+            await db.rollback()
+        except Exception:
+            rollback_failed = True
+            logger.exception("会话迁移失败后数据库 rollback 失败: move_id=%s", move_id)
+        committed = None if rollback_failed else await _is_move_committed(db=db, thread_id=thread_id, move_id=move_id)
+        if (not commit_started or committed is False) and imported["created_paths"]:
+            await asyncio.to_thread(target_workdir.remove_imported_files, imported["created_paths"])
+        raise
+
+    return {"thread": thread, "imported_files": imported["files"], "moved_thread_ids": moved_thread_ids}
+
+
+def _find_move_request(conversation, request_id: str) -> dict | None:
+    moves = (conversation.extra_metadata or {}).get("project_moves", [])
+    if not isinstance(moves, list):
+        return None
+    return next(
+        (move for move in moves if isinstance(move, dict) and move.get("request_id") == request_id),
+        None,
+    )
+
+
+async def _is_move_committed(*, db: AsyncSession, thread_id: str, move_id: str) -> bool | None:
+    """独立读取迁移记录；数据库不可达时保留文件，避免误删已提交结果。"""
+    if db.bind is None:
+        return None
+    try:
+        async with async_sessionmaker(db.bind, expire_on_commit=False)() as check_db:
+            metadata = await check_db.scalar(
+                select(Conversation.extra_metadata).where(Conversation.thread_id == thread_id)
+            )
+        moves = (metadata or {}).get("project_moves", [])
+        return any(isinstance(move, dict) and move.get("move_id") == move_id for move in moves)
+    except Exception:
+        logger.exception("无法确认会话迁移事务是否提交: move_id=%s", move_id)
+        return None
 
 
 async def list_threads_view(
@@ -548,15 +761,26 @@ def _require_matching_thread_creation_intent(
     """要求已有 Conversation 仍有效且匹配当前幂等创建意图。"""
     if conversation.status == "deleted" or project is None or project.status == "deleted":
         raise HTTPException(status_code=409, detail="request_id 已用于已删除的 Conversation")
-    same_project_intent = (
-        conversation.project_id == project_id
-        if project_id
-        else project.selection_status == "implicit"
-        or (
-            bool(getattr(conversation, "creation_request_id", None))
-            and getattr(project, "idempotency_key", None) == f"thread:{conversation.creation_request_id}"
+    moves = (conversation.extra_metadata or {}).get("project_moves") or []
+    if not isinstance(moves, list) or (moves and not isinstance(moves[0], dict)):
+        raise HTTPException(status_code=409, detail="会话迁移历史无效")
+    if moves:
+        first_move = moves[0]
+        same_project_intent = (
+            first_move.get("source_project_id") == project_id
+            if project_id
+            else bool(first_move.get("source_was_implicit_creation"))
         )
-    )
+    else:
+        same_project_intent = (
+            conversation.project_id == project_id
+            if project_id
+            else project.selection_status == "implicit"
+            or (
+                bool(getattr(conversation, "creation_request_id", None))
+                and getattr(project, "idempotency_key", None) == f"thread:{conversation.creation_request_id}"
+            )
+        )
     if conversation.agent_id != agent_slug or not same_project_intent:
         raise HTTPException(status_code=409, detail="request_id 已用于其他 Conversation 创建意图")
 

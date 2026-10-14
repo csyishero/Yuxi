@@ -279,9 +279,15 @@ async def _persist_request(
         workdir_binding.uid != uid_str
         or workdir_binding.conversation_id != conversation.id
         or workdir_binding.thread_id != conversation.thread_id
-        or workdir_binding.project_id != conversation.project_id
     ):
         raise RuntimeError("传入的 Workdir 绑定与 Conversation 不一致")
+    elif workdir_binding.project_id != conversation.project_id:
+        # 迁移可能在请求预读取绑定之后提交；Conversation 行锁下重新读取当前目录。
+        workdir_binding = await resolve_conversation_workdir_binding(
+            conversation=conversation,
+            uid=uid_str,
+            db=db,
+        )
     if result := await existing_request(workdir_binding):
         return result, None
     existing_requests = await repo.list_queued(

@@ -18,7 +18,7 @@ Owner：backend/package/yuxi/services/project_service.py
 
 ## 替代方案
 
-新建记录并移动会话需要改变不可变 project_id，复制目录还会造成历史路径与新文件分叉。原地提升隐藏 Project 能保持同一所有权。可见名称与磁盘日期目录名称可以不同；这与项目重命名不移动目录一致。无持久化 schema 变更。
+原地提升隐藏 Project 能保持同一目录所有权，且无须选择或复制文件；另建项目并复制整个目录会带入该目录中其他会话的文件。可见名称与磁盘日期目录名称可以不同；这与项目重命名不移动目录一致。将会话移入已有项目及逐文件导入由[会话迁移决策](2026-10-14-move-conversation-to-existing-project.md)拥有。无持久化 schema 变更。
 
 ## 验证
 

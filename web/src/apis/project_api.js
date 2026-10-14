@@ -13,6 +13,13 @@ export const projectApi = {
   promoteConversation: (threadId, name) =>
     apiPost(`/api/projects/from-conversation/${encodeURIComponent(threadId)}`, { name }),
 
+  moveConversation: (threadId, targetProjectId, files, requestId) =>
+    apiPost(`/api/projects/conversations/${encodeURIComponent(threadId)}/move`, {
+      request_id: requestId,
+      target_project_id: targetProjectId,
+      files
+    }),
+
   renameProject: (projectId, name) => apiPut(`/api/projects/${projectId}`, { name }),
 
   deleteProject: (projectId, { deleteWorkdir = false } = {}) =>

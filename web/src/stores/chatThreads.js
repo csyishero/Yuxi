@@ -41,10 +41,36 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     if (!thread?.id) return
     const index = threads.value.findIndex((item) => item.id === thread.id)
     if (index >= 0) {
+      // 迁移前发出的已读请求可能晚于迁移返回，不能用旧快照恢复原项目归属。
+      const savedAt = Date.parse(threads.value[index].updated_at || '')
+      const incomingAt = Date.parse(thread.updated_at || '')
+      if (Number.isFinite(savedAt) && Number.isFinite(incomingAt) && incomingAt < savedAt) return
       threads.value[index] = { ...threads.value[index], ...thread }
       return
     }
     threads.value = [thread, ...threads.value]
+  }
+
+  const applyConversationMove = (thread, movedThreadIds = []) => {
+    if (!thread?.id || !thread.project_id) return
+    const movedIds = new Set([...movedThreadIds, thread.id])
+    const binding = {
+      project_id: thread.project_id,
+      workdir_path: thread.workdir_path,
+      can_delete_workdir: thread.can_delete_workdir,
+      updated_at: thread.updated_at
+    }
+    let rootFound = false
+    threads.value = threads.value.map((item) => {
+      if (!movedIds.has(item.id)) return item
+      if (item.id === thread.id) {
+        rootFound = true
+        return { ...item, ...thread }
+      }
+      // 子会话共享目标项目的工作目录；更新时间防止较早的请求恢复旧归属。
+      return { ...item, ...binding }
+    })
+    if (!rootFound) threads.value = [thread, ...threads.value]
   }
 
   const setThreadStatus = (threadId, status) => {
@@ -86,7 +112,9 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     try {
       const fetchedThreads = await threadApi.getThreads(agentId, PAGE_SIZE, 0)
       threads.value = fetchedThreads || []
-      hasMoreThreads.value = Boolean(fetchedThreads && countNonPinnedThreads(fetchedThreads) >= PAGE_SIZE)
+      hasMoreThreads.value = Boolean(
+        fetchedThreads && countNonPinnedThreads(fetchedThreads) >= PAGE_SIZE
+      )
       if (
         currentThreadId.value &&
         !threads.value.find((thread) => thread.id === currentThreadId.value)
@@ -210,6 +238,7 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     setCurrentThreadId,
     setThreadCreationInFlight,
     upsertThread,
+    applyConversationMove,
     setThreadStatus,
     markThreadViewed,
     syncThreadStatuses,

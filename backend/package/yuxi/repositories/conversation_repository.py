@@ -142,6 +142,7 @@ class ConversationRepository:
             thread_id = str(uuid_lib.uuid4())
 
         metadata = (metadata or {}).copy()
+        metadata.pop("project_moves", None)
         metadata["attachments"] = []
 
         normalized_title = self._normalize_title(title)
@@ -215,6 +216,46 @@ class ConversationRepository:
             .execution_options(populate_existing=True)
         )
         return result.scalar_one_or_none()
+
+    async def lock_conversation_tree_for_move(self, *, root_id: int, uid: str) -> list[Conversation]:
+        """锁定根会话及全部持久子会话，防止迁移期间请求改变归属。"""
+        ids = {root_id}
+        frontier = {root_id}
+        while frontier:
+            children = set(
+                (
+                    await self.db.scalars(
+                        select(SubagentThread.child_conversation_id).where(
+                            SubagentThread.uid == str(uid),
+                            SubagentThread.parent_conversation_id.in_(frontier),
+                        )
+                    )
+                ).all()
+            )
+            frontier = children - ids
+            ids.update(frontier)
+
+        result = await self.db.execute(
+            select(Conversation)
+            .where(Conversation.id.in_(ids), Conversation.uid == str(uid))
+            .order_by(Conversation.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        conversations = list(result.scalars().all())
+        if len(conversations) != len(ids):
+            raise RuntimeError("会话树存在无效的子会话关系")
+        return conversations
+
+    async def is_child_conversation(self, *, conversation_id: int, uid: str) -> bool:
+        """判断会话是否属于另一条会话的持久子线程。"""
+        return bool(
+            await self.db.scalar(
+                select(SubagentThread.id)
+                .where(SubagentThread.uid == str(uid), SubagentThread.child_conversation_id == conversation_id)
+                .limit(1)
+            )
+        )
 
     async def get_conversation_by_id(self, conversation_id: int) -> Conversation | None:
         result = await self.db.execute(select(Conversation).where(Conversation.id == conversation_id))
@@ -859,7 +900,8 @@ class ConversationRepository:
         metadata: dict | None = None,
         is_pinned: bool | None = None,
     ) -> Conversation | None:
-        conversation = await self.get_conversation_by_thread_id(thread_id)
+        # 与项目迁移串行化，并在等待行锁后刷新 JSON，避免覆盖新写入的 project_moves。
+        conversation = await self.lock_conversation_by_thread_id(thread_id)
         if not conversation:
             return None
 

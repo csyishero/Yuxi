@@ -831,6 +831,64 @@ async def test_intake_idempotent_returns_existing(session):
 
 
 @pytest.mark.asyncio
+async def test_intake_refreshes_binding_after_conversation_move(session, monkeypatch: pytest.MonkeyPatch):
+    """请求预读旧目录后等待会话锁，写入时必须使用已迁入项目目录。"""
+    from yuxi.storage.postgres.models_business import Conversation, Project
+
+    await _seed_thread(session)
+    session.add(
+        Project(
+            id="new-project",
+            uid="user-1",
+            selection_status="selectable",
+            workdir_path="projects/new-project",
+            directory_mode="managed",
+        )
+    )
+    conversation = await session.scalar(select(Conversation).where(Conversation.thread_id == "t1"))
+    conversation.project_id = "new-project"
+    await session.commit()
+
+    async def resolve_config(*_args):
+        return "model", "default"
+
+    dispatched_bindings = []
+
+    async def capture_dispatch(**kwargs):
+        dispatched_bindings.append(kwargs["workdir_binding"])
+        return None
+
+    monkeypatch.setattr(agent_request_service, "resolve_agent_run_config", resolve_config)
+    monkeypatch.setattr(agent_request_service, "dispatch_ready_head", capture_dispatch)
+    stale_binding = WorkdirBinding(
+        conversation_id=10,
+        thread_id="t1",
+        uid="user-1",
+        project_id="project-user-1-t1",
+        workdir_path="projects/workdir-user-1-t1",
+        directory_mode="managed",
+    )
+    request, _ = await _persist_request(
+        db=session,
+        agent_item=MagicMock(),
+        agent_backend=MagicMock(),
+        workdir_binding=stale_binding,
+        request_input=AgentRequestInput(
+            request_id="after-move",
+            agent_slug="main",
+            thread_id="t1",
+            input_message=build_chat_input_message("hello"),
+            origin=RunOrigin(source="chat", channel="web"),
+        ),
+        current_user=SimpleNamespace(uid="user-1"),
+    )
+    assert request.status == "queued"
+    assert len(dispatched_bindings) == 1
+    assert dispatched_bindings[0].project_id == "new-project"
+    assert dispatched_bindings[0].workdir_path == "projects/new-project"
+
+
+@pytest.mark.asyncio
 async def test_intake_idempotent_rejects_cross_user(session):
     from fastapi import HTTPException
 

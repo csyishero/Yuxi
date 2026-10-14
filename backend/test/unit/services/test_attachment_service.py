@@ -153,6 +153,9 @@ class FakeConversationRepository:
     async def get_conversation_by_thread_id(self, thread_id: str):
         return self.conversation
 
+    async def lock_conversation_by_thread_id(self, thread_id: str):
+        return self.conversation
+
     async def add_attachment(self, conversation_id: int, attachment_info: dict):
         self.attachments.append(attachment_info)
         return attachment_info
@@ -234,6 +237,12 @@ class FakeWorkdir:
 
     def __init__(self, storage: FakeWorkdirStorage):
         self.storage = storage
+        self.workspace = storage
+
+    def resolve_path(self, scope: str) -> str:
+        if ".." in Path(scope).parts:
+            raise ValueError("invalid Workdir scope path")
+        return f"/{self.relative_path}{scope}"
 
     def copy_file_from_path(self, scope: str, source_path: str, *, overwrite: bool = True):
         del overwrite
@@ -587,6 +596,86 @@ async def test_delete_thread_attachment_updates_live_workdir_even_during_runtime
     assert result == {"message": "附件已删除"}
     assert fake_repo.attachments == []
     assert backend.files == {}
+
+
+@pytest.mark.asyncio
+async def test_delete_thread_attachment_uses_authorized_historical_workdir_after_move(monkeypatch):
+    fake_repo = FakeConversationRepository(db=None)
+    old_path = "projects/22222222-2222-4222-8222-222222222222"
+    original = f"/home/gem/user-data/{old_path}/uploads/file-1_demo.pdf"
+    source_storage = FakeWorkdirStorage()
+    source_storage.files["/uploads/file-1_demo.pdf"] = b"original"
+    target_storage = FakeWorkdirStorage()
+    fake_repo.conversation.extra_metadata = {
+        "project_moves": [{"source_project_id": "source-project", "source_workdir_path": old_path}]
+    }
+    fake_repo.attachments = [{"file_id": "file-1", "path": original, "original_path": original}]
+
+    async def resolve_binding(**kwargs):
+        del kwargs
+        return SimpleNamespace(workdir=FakeWorkdir(target_storage))
+
+    class HistoricalProjectRepository:
+        def __init__(self, _db):
+            pass
+
+        async def get_for_user(self, project_id: str, uid: str):
+            assert (project_id, uid) == ("source-project", "user-1")
+            return SimpleNamespace(workdir_path=old_path)
+
+    class HistoricalWorkdir(FakeWorkdir):
+        relative_path = old_path
+
+    monkeypatch.setattr(service, "ConversationRepository", lambda _db: fake_repo)
+    monkeypatch.setattr(service, "ProjectRepository", HistoricalProjectRepository)
+    monkeypatch.setattr(service, "Workdir", lambda path, workspace: HistoricalWorkdir(source_storage))
+    monkeypatch.setattr(workdir_service, "resolve_authorized_conversation_workdir", resolve_binding)
+
+    result = await service.delete_thread_attachment_view(
+        thread_id="thread-1", file_id="file-1", db=FakeDB(), current_uid="user-1"
+    )
+
+    assert result == {"message": "附件已删除"}
+    assert fake_repo.attachments == []
+    assert source_storage.files == {}
+    assert target_storage.files == {}
+
+
+@pytest.mark.asyncio
+async def test_delete_thread_attachment_rejects_unowned_historical_path(monkeypatch):
+    fake_repo = FakeConversationRepository(db=None)
+    old_path = "projects/22222222-2222-4222-8222-222222222222"
+    original = f"/home/gem/user-data/{old_path}/uploads/file-1_demo.pdf"
+    source_storage = FakeWorkdirStorage()
+    source_storage.files["/uploads/file-1_demo.pdf"] = b"original"
+    fake_repo.conversation.extra_metadata = {
+        "project_moves": [{"source_project_id": "source-project", "source_workdir_path": old_path}]
+    }
+    fake_repo.attachments = [{"file_id": "file-1", "path": original, "original_path": original}]
+
+    async def resolve_binding(**kwargs):
+        del kwargs
+        return SimpleNamespace(workdir=FakeWorkdir(FakeWorkdirStorage()))
+
+    class UnownedProjectRepository:
+        def __init__(self, _db):
+            pass
+
+        async def get_for_user(self, project_id: str, uid: str):
+            return None
+
+    db = FakeDB()
+    monkeypatch.setattr(service, "ConversationRepository", lambda _db: fake_repo)
+    monkeypatch.setattr(service, "ProjectRepository", UnownedProjectRepository)
+    monkeypatch.setattr(workdir_service, "resolve_authorized_conversation_workdir", resolve_binding)
+
+    with pytest.raises(service.HTTPException) as caught:
+        await service.delete_thread_attachment_view(thread_id="thread-1", file_id="file-1", db=db, current_uid="user-1")
+
+    assert caught.value.status_code == 409
+    assert db.commit_count == 0
+    assert fake_repo.attachments == [{"file_id": "file-1", "path": original, "original_path": original}]
+    assert source_storage.files == {"/uploads/file-1_demo.pdf": b"original"}
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_db, get_required_user
+from yuxi.services.conversation_service import move_conversation_project_view
 from yuxi.services.project_service import (
     create_project_view,
     promote_conversation_project_view,
@@ -47,6 +48,25 @@ class ProjectUpdate(BaseModel):
     name: str
 
 
+class ConversationMoveFile(BaseModel):
+    """一次明确选择的旧文件及导入目标路径。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_path: str
+    destination_path: str
+
+
+class ConversationMove(BaseModel):
+    """将既有会话迁入可选择 Project。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_project_id: str = Field(..., min_length=1, max_length=64)
+    request_id: str = Field(..., min_length=1, max_length=128)
+    files: list[ConversationMoveFile] = Field(default_factory=list)
+
+
 @projects.get("")
 async def list_projects(
     current_user: User = Depends(get_required_user),
@@ -83,6 +103,24 @@ async def promote_conversation_project(
     """将独立对话原地转为可见项目，重复请求返回同一项目。"""
     return await promote_conversation_project_view(
         uid=str(current_user.uid), thread_id=thread_id, name=payload.name, db=db
+    )
+
+
+@projects.post("/conversations/{thread_id}/move")
+async def move_conversation_project(
+    thread_id: str,
+    payload: ConversationMove,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """迁移会话及子会话，按需导入所选旧文件。"""
+    return await move_conversation_project_view(
+        thread_id=thread_id,
+        target_project_id=payload.target_project_id,
+        request_id=payload.request_id,
+        files=[item.model_dump() for item in payload.files],
+        current_uid=str(current_user.uid),
+        db=db,
     )
 
 

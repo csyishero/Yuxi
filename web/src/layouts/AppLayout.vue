@@ -31,6 +31,7 @@ import ConversationNavSection from '@/components/ConversationNavSection.vue'
 import GlobalSearchModal from '@/components/GlobalSearchModal.vue'
 import { searchWorkspaceFiles } from '@/apis/workspace_api'
 import { projectApi } from '@/apis/project_api'
+import { agentApi } from '@/apis/agent_api'
 
 const configStore = useConfigStore()
 const agentStore = useAgentStore()
@@ -78,7 +79,10 @@ const savePendingWorkdirDeletions = (uid, ids) => {
 const stopTrackingWorkdirDeletion = (uid, projectId) => {
   clearTimeout(workdirDeletionTimers.get(projectId))
   workdirDeletionTimers.delete(projectId)
-  savePendingWorkdirDeletions(uid, pendingWorkdirDeletions(uid).filter((id) => id !== projectId))
+  savePendingWorkdirDeletions(
+    uid,
+    pendingWorkdirDeletions(uid).filter((id) => id !== projectId)
+  )
 }
 
 const trackWorkdirDeletion = (uid, projectId) => {
@@ -105,21 +109,26 @@ const trackWorkdirDeletion = (uid, projectId) => {
           message: '文件夹清理失败',
           description: '删除操作已提交，文件可能仍在原目录。',
           duration: 0,
-          btn: () => h('a', {
-            onClick: async () => {
-              if (epoch !== workdirDeletionEpoch || userStore.uid !== uid) return
-              try {
-                await projectApi.retryWorkdirDeletion(projectId)
-                if (epoch !== workdirDeletionEpoch || userStore.uid !== uid) return
-                notification.close(key)
-                trackWorkdirDeletion(uid, projectId)
-              } catch (error) {
-                if (epoch === workdirDeletionEpoch && userStore.uid === uid) {
-                  message.error(error?.message || '重试清理失败')
+          btn: () =>
+            h(
+              'a',
+              {
+                onClick: async () => {
+                  if (epoch !== workdirDeletionEpoch || userStore.uid !== uid) return
+                  try {
+                    await projectApi.retryWorkdirDeletion(projectId)
+                    if (epoch !== workdirDeletionEpoch || userStore.uid !== uid) return
+                    notification.close(key)
+                    trackWorkdirDeletion(uid, projectId)
+                  } catch (error) {
+                    if (epoch === workdirDeletionEpoch && userStore.uid === uid) {
+                      message.error(error?.message || '重试清理失败')
+                    }
+                  }
                 }
-              }
-            }
-          }, '重试清理')
+              },
+              '重试清理'
+            )
         })
         return
       }
@@ -146,7 +155,8 @@ const discoverWorkdirDeletions = async (uid, epoch) => {
   try {
     const tasks = await projectApi.listWorkdirDeletions()
     if (epoch !== workdirDeletionEpoch || userStore.uid !== uid) return
-    tasks.filter((task) => task.status !== 'success')
+    tasks
+      .filter((task) => task.status !== 'success')
       .forEach((task) => trackWorkdirDeletion(uid, task.project_id))
   } catch {
     // 连接恢复后再查，避免丢失跨设备或响应丢失的清理任务。
@@ -157,19 +167,23 @@ const discoverWorkdirDeletions = async (uid, epoch) => {
   }
 }
 
-watch(() => userStore.uid, (uid, previousUid) => {
-  if (previousUid && previousUid !== uid) {
-    workdirDeletionEpoch += 1
-    for (const timer of workdirDeletionTimers.values()) clearTimeout(timer)
-    workdirDeletionTimers.clear()
-  }
-  clearTimeout(workdirDeletionDiscoveryTimer)
-  workdirDeletionDiscoveryTimer = null
-  if (uid) {
-    pendingWorkdirDeletions(uid).forEach((projectId) => trackWorkdirDeletion(uid, projectId))
-    void discoverWorkdirDeletions(uid, workdirDeletionEpoch)
-  }
-}, { immediate: true })
+watch(
+  () => userStore.uid,
+  (uid, previousUid) => {
+    if (previousUid && previousUid !== uid) {
+      workdirDeletionEpoch += 1
+      for (const timer of workdirDeletionTimers.values()) clearTimeout(timer)
+      workdirDeletionTimers.clear()
+    }
+    clearTimeout(workdirDeletionDiscoveryTimer)
+    workdirDeletionDiscoveryTimer = null
+    if (uid) {
+      pendingWorkdirDeletions(uid).forEach((projectId) => trackWorkdirDeletion(uid, projectId))
+      void discoverWorkdirDeletions(uid, workdirDeletionEpoch)
+    }
+  },
+  { immediate: true }
+)
 
 // Provide settings modal methods to child components
 const openSettingsModal = (tab) => {
@@ -401,7 +415,10 @@ const handleDeleteChat = async ({ threadId, deleteWorkdir = false }) => {
         message.info('对话已删除，正在确认文件夹清理结果')
         return
       } catch (lookupError) {
-        if ((!error?.status || error.status >= 500) && (!lookupError?.status || lookupError.status >= 500)) {
+        if (
+          (!error?.status || error.status >= 500) &&
+          (!lookupError?.status || lookupError.status >= 500)
+        ) {
           trackWorkdirDeletion(userStore.uid, thread.project_id)
           message.info('暂时无法确认删除结果，连接恢复后会继续查询')
           return
@@ -447,6 +464,39 @@ const handlePromoteConversation = async (threadId, name) => {
   return project
 }
 
+/** 以服务端事实更新会话与子会话的侧栏归属。 */
+const handleMoveConversation = async (threadId, targetProjectId, files, requestId) => {
+  const uid = userStore.uid
+  let result
+  try {
+    result = await projectApi.moveConversation(threadId, targetProjectId, files, requestId)
+  } catch (error) {
+    if (
+      error?.status === 409 &&
+      ['会话已属于目标项目', 'request_id 已用于其他会话迁移意图'].includes(error.message)
+    ) {
+      try {
+        const snapshot = await agentApi.getAgentHistory(threadId)
+        if (uid === userStore.uid && snapshot?.thread?.id === threadId) {
+          chatThreadsStore.upsertThread(snapshot.thread)
+        }
+      } catch {
+        // 读取失败时保持原视图，用户可手动刷新确认。
+      }
+    }
+    throw error
+  }
+  if (uid !== userStore.uid) throw new Error('登录用户已变化，请重新打开对话列表')
+  if (!result?.thread?.id || result.thread.project_id !== targetProjectId) {
+    throw new Error('无法确认移动结果，请刷新对话列表')
+  }
+  chatThreadsStore.applyConversationMove(result.thread, result.moved_thread_ids)
+  if (route.params.thread_id === threadId) {
+    chatThreadsStore.setCurrentThreadId(threadId, { force: true })
+  }
+  return result
+}
+
 const handleRenameProject = async ({ projectId, name }) => {
   if (!projectId || projectPendingId.value) return
   projectPendingId.value = projectId
@@ -463,7 +513,8 @@ const handleRenameProject = async ({ projectId, name }) => {
 
 const removeDeletedProjectFromView = async (projectId) => {
   const removedThreadIds = chatThreadsStore.removeThreadsByProject(projectId)
-  if (projects.value.some((project) => project.id === projectId)) projectsStore.removeProject(projectId)
+  if (projects.value.some((project) => project.id === projectId))
+    projectsStore.removeProject(projectId)
   if (removedThreadIds.includes(route.params.thread_id)) {
     await router.replace({ name: 'AgentComp' })
   }
@@ -620,6 +671,7 @@ provide('settingsModal', {
       <div class="fill">
         <ConversationNavSection
           :promote-conversation="handlePromoteConversation"
+          :move-conversation="handleMoveConversation"
           v-if="!sidebarCollapsed"
           class="sidebar-conversations"
           :current-chat-id="activeConversationThreadId"

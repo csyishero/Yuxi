@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import exists, or_, select, update
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_business import AgentRun, AgentRunRequest, Conversation, Project, SubagentThread
@@ -70,7 +70,7 @@ class ProjectRepository:
         return list(result.scalars().all())
 
     async def list_workspace_project_paths_for_user(self, uid: str) -> list[str]:
-        """列出个人空间可见的项目目录，包括已删除项目的留存子目录。"""
+        """列出个人空间可见的项目目录及仍被迁移会话引用的旧目录。"""
         result = await self.db.execute(
             select(Project.workdir_path)
             .where(
@@ -82,7 +82,36 @@ class ProjectRepository:
             )
             .distinct()
         )
-        return list(result.scalars().all())
+        visible = set(result.scalars().all())
+        implicit_projects = (
+            await self.db.execute(
+                select(Project.id, Project.workdir_path).where(
+                    Project.uid == str(uid),
+                    Project.selection_status == "implicit",
+                    Project.status.in_(["active", "deleted"]),
+                    Project.workdir_path != "projects",
+                )
+            )
+        ).all()
+        if not implicit_projects:
+            return list(visible)
+        implicit_paths = dict(implicit_projects)
+        histories = await self.db.scalars(
+            select(Conversation.extra_metadata).where(Conversation.uid == str(uid), Conversation.status != "deleted")
+        )
+        for metadata in histories:
+            for move in (metadata or {}).get("project_moves", []):
+                if not isinstance(move, dict):
+                    continue
+                source_id = move.get("source_project_id")
+                source_path = move.get("source_workdir_path")
+                if (
+                    isinstance(source_id, str)
+                    and isinstance(source_path, str)
+                    and implicit_paths.get(source_id) == source_path
+                ):
+                    visible.add(source_path)
+        return list(visible)
 
     async def list_all_workdir_paths_for_user(self, uid: str) -> set[str]:
         """为新建目录避开已登记但尚未物化的 Project 路径。"""
@@ -150,6 +179,71 @@ class ProjectRepository:
             )
         )
         return bool(active_run or queued_request)
+
+    async def has_unsettled_conversation_work(
+        self, *, uid: str, root_thread_id: str, conversations: list[Conversation]
+    ) -> bool:
+        """迁移前检查整棵会话树的运行、排队、清理和待回复中断。"""
+        ids = [conversation.id for conversation in conversations]
+        thread_ids = [conversation.thread_id for conversation in conversations]
+        active_run = await self.db.scalar(
+            select(
+                exists().where(
+                    AgentRun.uid == str(uid),
+                    or_(
+                        AgentRun.conversation_id.in_(ids),
+                        AgentRun.conversation_thread_id.in_(thread_ids),
+                        AgentRun.runtime_scope_id == root_thread_id,
+                    ),
+                    or_(AgentRun.status.notin_(TERMINAL_RUN_STATUSES), AgentRun.runtime_cleanup_pending.is_(True)),
+                )
+            )
+        )
+        queued_request = await self.db.scalar(
+            select(
+                exists().where(
+                    AgentRunRequest.uid == str(uid),
+                    AgentRunRequest.conversation_thread_id.in_(thread_ids),
+                    AgentRunRequest.status == "queued",
+                )
+            )
+        )
+        latest_runs = (
+            select(
+                AgentRun.status,
+                func.row_number()
+                .over(
+                    partition_by=AgentRun.conversation_thread_id,
+                    order_by=(AgentRun.created_at.desc(), AgentRun.id.desc()),
+                )
+                .label("rn"),
+            )
+            .where(AgentRun.uid == str(uid), AgentRun.conversation_thread_id.in_(thread_ids))
+            .subquery()
+        )
+        interrupted = await self.db.scalar(
+            select(exists().where(latest_runs.c.rn == 1, latest_runs.c.status == "interrupted"))
+        )
+        return bool(active_run or queued_request or interrupted)
+
+    async def has_historical_workdir_references(self, project: Project) -> bool:
+        """防止清理仍被已迁出会话历史附件引用的旧目录。"""
+        records = await self.db.execute(
+            select(Conversation.project_id, Conversation.extra_metadata).where(
+                Conversation.uid == project.uid,
+                Conversation.status != "deleted",
+                Conversation.project_id != project.id,
+            )
+        )
+        for current_project_id, metadata in records:
+            for move in (metadata or {}).get("project_moves", []):
+                if (
+                    isinstance(move, dict)
+                    and move.get("source_project_id") == project.id
+                    and move.get("source_workdir_path") == project.workdir_path
+                ):
+                    return True
+        return False
 
     async def is_sole_root_conversation(self, project: Project, thread_id: str) -> bool:
         """只允许唯一普通会话提升项目，持久子会话关系不构成第二个入口。"""

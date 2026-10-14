@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 
 from yuxi.utils.paths import open_directory_fd, open_regular_file_fd
 
-from .errors import FileTransferLimitError
+from .errors import FileImportLimitError, FileTransferLimitError
 from .paths import user_workspace_dir
 
 
@@ -21,6 +21,10 @@ class Workspace:
     def __init__(self, uid: str):
         uid = str(uid)
         self._workspace_root = user_workspace_dir(uid)
+
+    def same_workspace(self, other: Workspace) -> bool:
+        """确认两个 Workdir 属于同一用户文件根。"""
+        return self._workspace_root == other._workspace_root
 
     def list_authorized_directory(self, path: str, *, root: str, max_entries: int | None = None) -> list[dict]:
         """列出 Workdir 内的普通文件与真实目录。"""
@@ -293,6 +297,135 @@ class Workspace:
                 pass
             os.close(parent_fd)
 
+    def copy_authorized_file_from_workspace(
+        self,
+        source_workspace: Workspace,
+        source_path: str,
+        target_path: str,
+        *,
+        max_bytes: int,
+    ) -> dict:
+        """从同用户的普通文件流式复制，原子创建目标且绝不覆盖。"""
+        if not self.same_workspace(source_workspace):
+            raise PermissionError("cross-user Workdir import is not allowed")
+        if max_bytes < 0:
+            raise ValueError("file import limit must be non-negative")
+        base, parts = self._resolve_path(target_path)
+        if not parts:
+            raise IsADirectoryError(target_path)
+
+        with source_workspace._open_regular_file(source_path, writable=False) as (source_fd, source_stat):
+            if source_stat.st_size > max_bytes:
+                raise FileImportLimitError("selected file exceeds import limit")
+            parent_fd = self._open_directory(base, parts[:-1], create=True)
+            target_fd = None
+            temp_name = f".yuxi-import-{uuid.uuid4().hex}"
+            linked = False
+            try:
+                target_fd = os.open(
+                    temp_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                total = 0
+                while chunk := os.read(source_fd, 1024 * 1024):
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise FileImportLimitError("selected file exceeds import limit")
+                    self._write_all(target_fd, chunk)
+                final_source_stat = os.fstat(source_fd)
+                if (
+                    final_source_stat.st_size != source_stat.st_size
+                    or final_source_stat.st_mtime_ns != source_stat.st_mtime_ns
+                    or final_source_stat.st_ctime_ns != source_stat.st_ctime_ns
+                ):
+                    raise RuntimeError("source file changed during import")
+                os.fsync(target_fd)
+                os.link(
+                    temp_name,
+                    parts[-1],
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                linked = True
+                os.unlink(temp_name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+                final_stat = os.fstat(target_fd)
+                return {
+                    "size": total,
+                    "device": final_stat.st_dev,
+                    "inode": final_stat.st_ino,
+                    "modified_at_ns": final_stat.st_mtime_ns,
+                    "changed_at_ns": final_stat.st_ctime_ns,
+                }
+            except BaseException:
+                if linked:
+                    try:
+                        current_stat = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+                        if target_fd is not None and self._same_imported_file(current_stat, os.fstat(target_fd)):
+                            os.unlink(parts[-1], dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        pass
+                raise
+            finally:
+                if target_fd is not None:
+                    os.close(target_fd)
+                try:
+                    os.unlink(temp_name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+                os.close(parent_fd)
+
+    def remove_authorized_imported_file(self, path: str, *, root: str, identity: dict) -> None:
+        """仅当目标仍是本次创建且未修改的普通文件时回滚。"""
+        self._require_within(path, root, allow_root=False)
+        base, parts = self._resolve_path(path)
+        try:
+            parent_fd = self._open_directory(base, parts[:-1])
+        except FileNotFoundError:
+            return
+        try:
+            try:
+                current_stat = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            if not self._same_imported_file(current_stat, identity):
+                raise PermissionError("imported file changed before rollback")
+            # stat 与 unlink 之间可能被并发写入者换成另一个文件。先原子移到随机隔离名，
+            # 再检查实际被移走的 inode；若不是本次文件，就把它恢复到原位置。
+            quarantine_name = f".yuxi-rollback-{uuid.uuid4().hex}"
+            try:
+                os.rename(parts[-1], quarantine_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            except FileNotFoundError:
+                return
+            moved_stat = os.stat(quarantine_name, dir_fd=parent_fd, follow_symlinks=False)
+            # rename 自身会更新 ctime，隔离后的复核只比较稳定身份与内容尺寸/mtime。
+            same_moved_file = (
+                stat.S_ISREG(moved_stat.st_mode)
+                and moved_stat.st_dev == identity["device"]
+                and moved_stat.st_ino == identity["inode"]
+                and moved_stat.st_size == identity["size"]
+                and moved_stat.st_mtime_ns == identity["modified_at_ns"]
+            )
+            if not same_moved_file:
+                try:
+                    os.link(
+                        quarantine_name,
+                        parts[-1],
+                        src_dir_fd=parent_fd,
+                        dst_dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError as exc:
+                    raise PermissionError("replacement file could not be restored after rollback race") from exc
+                os.unlink(quarantine_name, dir_fd=parent_fd)
+                raise PermissionError("imported file changed before rollback")
+            os.unlink(quarantine_name, dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+
     def create_authorized_directory(
         self, parent_path: str, name: str, *, root: str, create_parents: bool = True
     ) -> dict:
@@ -375,6 +508,37 @@ class Workspace:
             "size": 0 if is_dir else item_stat.st_size,
             "modified_at": item_stat.st_mtime,
         }
+
+    @staticmethod
+    def _same_imported_file(item_stat: os.stat_result, identity: dict | os.stat_result) -> bool:
+        """比较导入文件身份与写入后状态，避免删除后续修改。"""
+        if isinstance(identity, dict):
+            expected = (
+                identity["device"],
+                identity["inode"],
+                identity["size"],
+                identity["modified_at_ns"],
+                identity["changed_at_ns"],
+            )
+        else:
+            expected = (
+                identity.st_dev,
+                identity.st_ino,
+                identity.st_size,
+                identity.st_mtime_ns,
+                identity.st_ctime_ns,
+            )
+        return (
+            stat.S_ISREG(item_stat.st_mode)
+            and (
+                item_stat.st_dev,
+                item_stat.st_ino,
+                item_stat.st_size,
+                item_stat.st_mtime_ns,
+                item_stat.st_ctime_ns,
+            )
+            == expected
+        )
 
     @staticmethod
     def _open_directory(base: Path, parts: tuple[str, ...], *, create: bool = False) -> int:

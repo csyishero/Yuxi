@@ -18,10 +18,12 @@ from yuxi.knowledge.parser.capabilities import (
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.agent_run_request_repository import AgentRunRequestRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
+from yuxi.repositories.project_repository import ProjectRepository
 from yuxi.storage.minio import StorageError, get_minio_client
 from yuxi.utils.datetime_utils import utc_isoformat
 from yuxi.utils.logging_config import logger
 from yuxi.utils.upload_utils import read_upload_with_limit
+from yuxi.workspace.workdir import Workdir
 
 ATTACHMENT_ALLOWED_EXTENSIONS: tuple[str, ...] = ()
 MAX_ATTACHMENT_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
@@ -374,7 +376,10 @@ async def confirm_tmp_thread_attachments_view(
         raise HTTPException(status_code=400, detail="请选择要添加的附件")
 
     conv_repo = ConversationRepository(db)
-    conversation = await _require_user_conversation(conv_repo, thread_id, str(current_uid))
+    # 与会话迁移持有同一把行锁；锁后读取绑定，避免写入已经迁走的 Workdir。
+    conversation = await conv_repo.lock_conversation_by_thread_id(thread_id)
+    if conversation is None or conversation.uid != str(current_uid) or conversation.status == "deleted":
+        raise HTTPException(status_code=404, detail="对话线程不存在")
     from yuxi.services.workdir_service import resolve_authorized_conversation_workdir
 
     binding = await resolve_authorized_conversation_workdir(
@@ -483,7 +488,9 @@ async def delete_thread_attachment_view(
 ) -> dict:
     """删除指定对话线程的附件。"""
     conv_repo = ConversationRepository(db)
-    conversation = await _require_user_conversation(conv_repo, thread_id, str(current_uid))
+    conversation = await conv_repo.lock_conversation_by_thread_id(thread_id)
+    if conversation is None or conversation.uid != str(current_uid) or conversation.status == "deleted":
+        raise HTTPException(status_code=404, detail="对话线程不存在")
     from yuxi.services.workdir_service import resolve_authorized_conversation_workdir
 
     binding = await resolve_authorized_conversation_workdir(
@@ -512,22 +519,59 @@ async def delete_thread_attachment_view(
     if active_run:
         raise HTTPException(status_code=409, detail="对话正在运行，暂时不能删除附件")
 
+    authorized_paths: list[tuple[Workdir, str]] = []
+    historical_projects: dict[str, str] = {}
+    moves = (conversation.extra_metadata or {}).get("project_moves", [])
+    if isinstance(moves, list):
+        for move in moves:
+            if not isinstance(move, dict):
+                continue
+            project_id = move.get("source_project_id")
+            workdir_path = move.get("source_workdir_path")
+            if isinstance(project_id, str) and isinstance(workdir_path, str):
+                historical_projects[project_id] = workdir_path
+
+    project_repo = ProjectRepository(db)
+    for path in {target_attachment.get("path"), target_attachment.get("original_path")}:
+        if not isinstance(path, str):
+            continue
+        try:
+            scope = workdir_scope_from_runtime_path(workdir.relative_path, path)
+            workdir.resolve_path(scope)
+            authorized_paths.append((workdir, scope))
+            continue
+        except ValueError:
+            pass
+        for project_id, historical_path in historical_projects.items():
+            try:
+                scope = workdir_scope_from_runtime_path(historical_path, path)
+            except ValueError:
+                continue
+            source_project = await project_repo.get_for_user(project_id, str(current_uid))
+            if source_project is not None and source_project.workdir_path == historical_path:
+                historical_workdir = Workdir(historical_path, workdir.workspace)
+                try:
+                    historical_workdir.resolve_path(scope)
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail="附件路径无效") from exc
+                authorized_paths.append((historical_workdir, scope))
+                break
+        else:
+            raise HTTPException(status_code=409, detail="附件路径不属于当前或历史项目")
+
     removed = await conv_repo.remove_attachment(conversation.id, file_id)
     if not removed:
         raise HTTPException(status_code=404, detail="附件不存在或已被删除")
 
     await db.commit()
 
-    for path in {target_attachment.get("path"), target_attachment.get("original_path")}:
-        if not isinstance(path, str):
-            continue
+    for authorized_workdir, scope in authorized_paths:
         try:
-            scope = workdir_scope_from_runtime_path(workdir.relative_path, path)
-            await asyncio.to_thread(workdir.delete, scope)
+            await asyncio.to_thread(authorized_workdir.delete, scope)
         except FileNotFoundError:
             pass
         except Exception:
             # PostgreSQL 已经移除 shipping 引用；残留文件仍留在用户可见 Workdir，后续可显式清理。
-            logger.warning("附件元数据已删除，但 Workdir 文件清理失败: thread=%s path=%s", thread_id, path)
+            logger.warning("附件元数据已删除，但 Workdir 文件清理失败: thread=%s scope=%s", thread_id, scope)
 
     return {"message": "附件已删除"}
