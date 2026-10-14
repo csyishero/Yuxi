@@ -104,7 +104,8 @@ test('Skill 三态切换保持原配置契约，固定模式只保存明确勾�
     const store = useAgentStore()
     const agent = {
       id: 'test-agent',
-      can_manage: true,
+      can_edit: true,
+      can_manage: false,
       config_json: { context: { skills: null } },
       configurable_items: {
         skills: {

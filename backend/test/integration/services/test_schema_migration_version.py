@@ -437,7 +437,7 @@ async def test_mcp_sharing_migration_preserves_legacy_rows() -> None:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 
 
-async def test_mcp_sharing_authorization_over_http_and_postgres() -> None:
+async def test_mcp_sharing_authorization_over_http_and_postgres(monkeypatch) -> None:
     """真实 HTTP 与 PostgreSQL 同时验证历史可用、新资源私有、委派和脱敏。"""
 
     schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_mcp_http")
@@ -490,6 +490,11 @@ async def test_mcp_sharing_authorization_over_http_and_postgres() -> None:
         app.include_router(mcp, prefix="/api")
         app.dependency_overrides[get_required_user] = fake_user
         app.dependency_overrides[get_db] = fake_db
+
+        async def fake_tools(_slug):
+            return []
+
+        monkeypatch.setattr("server.routers.mcp_router.get_all_mcp_tools", fake_tools)
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             listed = await client.get("/api/system/mcp-servers")
@@ -570,7 +575,9 @@ async def test_mcp_sharing_authorization_over_http_and_postgres() -> None:
             assert read_only.status_code == 200
             assert read_only.json()["data"]["permission"] == "read"
             assert "share_config" not in read_only.json()["data"]
-            assert (await client.get("/api/system/mcp-servers/private-mcp/tools")).status_code == 403
+            tools = await client.get("/api/system/mcp-servers/private-mcp/tools")
+            assert tools.status_code == 200
+            assert tools.json()["data"] == []
 
             actor["user"] = User(uid="admin", username="admin", role="admin", password_hash="x")
             mixed_config = {

@@ -96,7 +96,7 @@ test('转换失败保持弹窗可重试、未打开项目；非独立历史目�
   assert.equal(state.events.length, 1)
 })
 
-test('空名称拒绝请求；已有项目打开动作不调用转换', async () => {
+test('空名称拒绝转换请求', async () => {
   let calls = 0
   const state = promotionDialog(async () => {
     calls++
@@ -104,9 +104,8 @@ test('空名称拒绝请求；已有项目打开动作不调用转换', async ()
   state.confirmPromoteChat(chat)
   state.dialog.content.children[0].props.onInput({ target: { value: ' ' } })
   await assert.rejects(state.dialog.onOk(), /不能为空/)
-  state.openChatProject(chat)
   assert.equal(calls, 0)
-  assert.deepEqual(state.events, [['select-chat', 'old-thread']])
+  assert.deepEqual(state.events, [])
 })
 
 test('服务成功才更新侧栏分组，同时撤销所有同项目会话的文件清理能力', async () => {

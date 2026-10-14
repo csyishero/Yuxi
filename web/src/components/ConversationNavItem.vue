@@ -48,11 +48,12 @@
               {{ chat.is_pinned ? '取消置顶' : '置顶' }}
             </a-menu-item>
             <a-menu-item
+              v-if="!nested"
               key="project"
               :icon="h(FolderPlus, { size: 14 })"
-              @click.stop="$emit(nested ? 'open-project' : 'promote-chat', chat)"
+              @click.stop="$emit('promote-chat', chat)"
             >
-              {{ nested ? '打开所属项目' : '转为项目' }}
+              转为项目
             </a-menu-item>
             <a-menu-item key="rename" :icon="h(SquarePen, { size: 14 })" @click.stop="renameChat">
               重命名
@@ -93,8 +94,7 @@ const emit = defineEmits([
   'delete-chat',
   'rename-chat',
   'toggle-pin',
-  'promote-chat',
-  'open-project'
+  'promote-chat'
 ])
 
 const confirmDeleteChat = () => {

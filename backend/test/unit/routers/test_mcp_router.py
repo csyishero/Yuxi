@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from yuxi.agents.mcp.service import MCPServerNotFoundError
 from yuxi.storage.postgres.models_business import User
 
-from server.routers.mcp_router import mcp
+from server.routers.mcp_router import mcp, mcp_url_preview
 from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
 
 
@@ -136,7 +138,7 @@ def test_get_mcp_servers_normal_user_is_stripped(monkeypatch):
     assert data_admin["command"] == "python"
     assert data_admin["env"] == {"API_KEY": "secret"}
 
-    # 2. 普通用户请求，敏感字段及一切非安全白名单字段应该被彻底脱敏
+    # 2. 普通用户请求仅返回可公开展示的字段，连接参数必须脱敏
     client_user = TestClient(_build_app(allow_admin=False))
     resp_user = client_user.get("/api/system/mcp-servers")
     assert resp_user.status_code == 200
@@ -145,13 +147,30 @@ def test_get_mcp_servers_normal_user_is_stripped(monkeypatch):
     assert "command" not in data_user
     assert "env" not in data_user
     assert "headers" not in data_user
-    assert "transport" not in data_user  # NOTE: 进一步验证连 transport 等配置层元数据也一并过滤
+    assert data_user["transport"] == "streamable_http"
     assert data_user["name"] == "test-mcp"
     assert data_user["slug"] == "test-mcp"
     assert data_user["permission"] == "edit"
     assert data_user["can_manage_sharing"] is False
     assert data_user["description"] == "test mcp description"
     assert data_user["enabled"] is True
+
+
+def test_mcp_url_preview_hides_credentials_paths_and_internal_hosts():
+    assert (
+        mcp_url_preview("https://user:password@mcp.example.com/private/token?api_key=secret#fragment")
+        == "https://mcp.example.com/…"
+    )
+    assert (
+        mcp_url_preview("https://user%3Aname:password@mcp.example.com/%2Fsecret?token=a&token=b")
+        == "https://mcp.example.com/…"
+    )
+    assert mcp_url_preview("http://10.0.0.5:6050/private") == "http://[内部地址]"
+    assert mcp_url_preview("https://localhost/mcp") == "https://[内部地址]"
+    assert mcp_url_preview("https://mcp.example.com:8443/") == "https://mcp.example.com:8443"
+    assert mcp_url_preview("https://mcp.example.com:invalid/path") is None
+    assert mcp_url_preview("https://%73ecret.example.com/path") is None
+    assert mcp_url_preview("https://mcp.example.com/secret\nheader") is None
 
 
 def test_mcp_list_and_detail_hide_private_servers_and_connection_secrets(monkeypatch):
@@ -162,6 +181,12 @@ def test_mcp_list_and_detail_hide_private_servers_and_connection_secrets(monkeyp
         icon = None
         tags = []
         transport = "streamable_http"
+        url = "https://admin:password@mcp.example.com/private/token?api_key=secret"
+        headers = {
+            "Authorization": "Bearer secret",
+            "X-Client": "client-secret",
+            "Invalid\nName": "secret",
+        }
         enabled = 1
         share_config = {
             "version": 2,
@@ -171,7 +196,7 @@ def test_mcp_list_and_detail_hide_private_servers_and_connection_secrets(monkeyp
         }
 
         def to_dict(self):
-            return {"slug": self.slug, "url": "https://secret.example/mcp", "headers": {"Authorization": "secret"}}
+            return {"slug": self.slug, "url": self.url, "headers": self.headers}
 
     server = DummyServer()
 
@@ -192,6 +217,7 @@ def test_mcp_list_and_detail_hide_private_servers_and_connection_secrets(monkeyp
             "slug": "scoped-mcp",
             "name": "Scoped MCP",
             "description": "description",
+            "transport": "streamable_http",
             "icon": None,
             "enabled": True,
             "tags": [],
@@ -202,8 +228,14 @@ def test_mcp_list_and_detail_hide_private_servers_and_connection_secrets(monkeyp
 
     detail = client.get("/api/system/mcp-servers/scoped-mcp")
     assert detail.status_code == 200
-    assert detail.json()["data"] == listed.json()["data"][0]
+    assert detail.json()["data"] == {
+        **listed.json()["data"][0],
+        "url_preview": "https://mcp.example.com/…",
+        "header_names": ["Authorization", "X-Client"],
+    }
+    assert "url_preview" not in listed.json()["data"][0]
     assert "secret" not in detail.text
+    assert "password" not in detail.text
 
     server.share_config = {"version": 2, "read_scope": None, "edit_scope": None, "manage_scope": None}
     assert client.get("/api/system/mcp-servers").json()["data"] == []
@@ -211,7 +243,7 @@ def test_mcp_list_and_detail_hide_private_servers_and_connection_secrets(monkeyp
     assert client.get("/api/system/mcp-servers/scoped-mcp/sharing/options").status_code == 404
 
 
-def test_mcp_tools_require_use_scope_and_sharing_requires_manage(monkeypatch):
+def test_mcp_read_scope_can_view_tools_but_sharing_requires_manage(monkeypatch):
     class DummyServer:
         slug = "scoped-mcp"
         name = "Scoped MCP"
@@ -239,21 +271,32 @@ def test_mcp_tools_require_use_scope_and_sharing_requires_manage(monkeypatch):
 
     async def fake_tools(_slug):
         tool_calls.append(_slug)
-        return []
+        return [
+            SimpleNamespace(
+                name="lookup",
+                metadata={"id": "lookup"},
+                description="查找文档",
+                args_schema=None,
+            )
+        ]
 
     monkeypatch.setattr("server.routers.mcp_router.get_mcp_server", fake_get)
     monkeypatch.setattr("server.routers.mcp_router.get_all_mcp_tools", fake_tools)
     client = TestClient(_build_app(allow_admin=False))
 
-    assert client.get("/api/system/mcp-servers/scoped-mcp/tools").status_code == 403
+    read_only_tools = client.get("/api/system/mcp-servers/scoped-mcp/tools")
+    assert read_only_tools.status_code == 200
+    assert read_only_tools.json()["data"] == [
+        {"name": "lookup", "id": "lookup", "description": "查找文档", "enabled": True, "parameters": {}, "required": []}
+    ]
     assert client.get("/api/system/mcp-servers/scoped-mcp/sharing/options").status_code == 403
-    assert tool_calls == []
+    assert tool_calls == ["scoped-mcp"]
 
     server.share_config["edit_scope"] = {"access_level": "global"}
     tools = client.get("/api/system/mcp-servers/scoped-mcp/tools")
     assert tools.status_code == 200
-    assert tools.json()["data"] == []
-    assert tool_calls == ["scoped-mcp"]
+    assert tools.json()["data"] == read_only_tools.json()["data"]
+    assert tool_calls == ["scoped-mcp", "scoped-mcp"]
 
     async def failing_tools(_slug):
         raise RuntimeError("Bearer secret https://secret.example/mcp")

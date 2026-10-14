@@ -567,8 +567,8 @@ const isEmptyConfig = computed(() => {
   return !selectedAgentId.value || Object.keys(configurableItems.value).length === 0
 })
 
-const canManageCurrentAgent = computed(() => !!selectedAgent.value?.can_manage)
-const isReadOnlyConfig = computed(() => !canManageCurrentAgent.value)
+const canEditCurrentAgent = computed(() => !!selectedAgent.value?.can_edit)
+const isReadOnlyConfig = computed(() => !canEditCurrentAgent.value)
 
 const segmentConfigKeys = computed(() => {
   const keys = Object.keys(configurableItems.value)

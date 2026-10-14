@@ -20,7 +20,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 async def test_admin_settings_are_readable_but_not_writable_by_delegated_user(
     test_client, admin_headers, standard_user
 ):
-    """普通管理用户读取管理员参数，越权保存后 PostgreSQL 仍保留原值。"""
+    """受委托用户只能编辑配置，不能覆盖管理员字段、共享范围或删除。"""
     slug = f"pytest-config-auth-{uuid.uuid4().hex[:10]}"
     uid = str(standard_user["user"]["uid"])
     headers = standard_user["headers"]
@@ -54,8 +54,21 @@ async def test_admin_settings_are_readable_but_not_writable_by_delegated_user(
         assert updated.status_code == 200, updated.text
         read = await test_client.get(f"/api/agent/{slug}", headers=headers)
         assert read.status_code == 200, read.text
-        context = read.json()["agent"]["config_json"]["context"]
+        agent_detail = read.json()["agent"]
+        assert agent_detail["effective_permission"] == "edit"
+        assert agent_detail["can_edit"] is True
+        assert agent_detail["can_manage"] is False
+        context = agent_detail["config_json"]["context"]
         assert {key: context[key] for key in settings} == settings
+
+        denied_share = await test_client.put(
+            f"/api/agent/{slug}",
+            headers=headers,
+            json={"name": "Should not change", "share_config": agent_detail["share_config"]},
+        )
+        assert denied_share.status_code == 403, denied_share.text
+        assert await conn.fetchval("SELECT name FROM agents WHERE slug = $1", slug) == "Pytest config auth"
+        assert (await test_client.delete(f"/api/agent/{slug}", headers=headers)).status_code == 403
 
         overwritten = {
             "tool_approval_mode": "default",
@@ -75,9 +88,63 @@ async def test_admin_settings_are_readable_but_not_writable_by_delegated_user(
         persisted = (await _read_agent_config(conn, slug))["context"]
         assert {key: persisted[key] for key in settings} == settings
         assert persisted["system_prompt"] == "user edit"
+        stored_share = await conn.fetchval("SELECT share_config FROM agents WHERE slug = $1", slug)
+        assert json.loads(stored_share) == agent_detail["share_config"]
     finally:
         deleted = await test_client.delete(f"/api/agent/{slug}", headers=admin_headers)
         assert deleted.status_code in {200, 404}, deleted.text
+        await conn.close()
+
+
+async def test_department_editor_updates_config_without_changing_global_read_scope(
+    test_client, admin_headers, standard_user
+):
+    """管理员授予部门编辑权后，普通用户保存配置不改变全局共享。"""
+    slug = f"pytest-agent-editor-{uuid.uuid4().hex[:10]}"
+    department_id = standard_user["user"]["department_id"]
+    headers = standard_user["headers"]
+    share_config = {
+        "version": 2,
+        "read_scope": {"access_level": "global"},
+        "edit_scope": {"access_level": "department", "department_ids": [department_id]},
+        "manage_scope": None,
+    }
+    conn = await asyncpg.connect(os.environ["POSTGRES_URL"].replace("+asyncpg", ""))
+    try:
+        created = await test_client.post(
+            "/api/agent",
+            headers=admin_headers,
+            json={"name": "Department editor", "slug": slug, "share_config": share_config},
+        )
+        assert created.status_code == 200, created.text
+
+        detail = await test_client.get(f"/api/agent/{slug}", headers=headers)
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["agent"]["effective_permission"] == "edit"
+        assert detail.json()["agent"]["can_manage"] is False
+
+        saved = await test_client.put(
+            f"/api/agent/{slug}", headers=headers, json={"name": "Edited by department member"}
+        )
+        assert saved.status_code == 200, saved.text
+        row = await conn.fetchrow("SELECT name, share_config FROM agents WHERE slug = $1", slug)
+        assert row["name"] == "Edited by department member"
+        assert json.loads(row["share_config"])["read_scope"]["access_level"] == "global"
+        assert json.loads(row["share_config"])["edit_scope"]["department_ids"] == [department_id]
+
+        revoked = await test_client.put(
+            f"/api/agent/{slug}",
+            headers=admin_headers,
+            json={"share_config": {**share_config, "edit_scope": None}},
+        )
+        assert revoked.status_code == 200, revoked.text
+        read_only = await test_client.get(f"/api/agent/{slug}", headers=headers)
+        assert read_only.json()["agent"]["can_edit"] is False
+        denied = await test_client.put(f"/api/agent/{slug}", headers=headers, json={"name": "Forbidden"})
+        assert denied.status_code == 403, denied.text
+        assert await conn.fetchval("SELECT name FROM agents WHERE slug = $1", slug) == "Edited by department member"
+    finally:
+        await test_client.delete(f"/api/agent/{slug}", headers=admin_headers)
         await conn.close()
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -15,6 +16,7 @@ from yuxi.repositories.agent_repository import (
     SUB_AGENT_BACKEND_ID,
     merge_agent_config_json,
     user_can_access_agent,
+    user_can_edit_agent,
     user_can_manage_agent,
 )
 from yuxi.storage.postgres.models_business import Agent, User
@@ -292,7 +294,7 @@ async def test_create_agent_allows_same_explicit_share_scope_for_normal_user(mon
     assert agent.share_config == DEFAULT_SHARE_CONFIG
 
 
-def test_user_shared_agent_is_manageable_for_normal_user():
+def test_existing_manage_scope_grants_delegated_user_edit_without_manage():
     user = User(username="user", uid="user", password_hash="x", role="user", department_id=1)
     agent = Agent(
         slug="shared-bot",
@@ -307,41 +309,101 @@ def test_user_shared_agent_is_manageable_for_normal_user():
     )
 
     assert user_can_access_agent(user, agent) is True
-    assert user_can_manage_agent(user, agent) is True
+    assert user_can_edit_agent(user, agent) is True
+    assert user_can_manage_agent(user, agent) is False
 
 
-@pytest.mark.asyncio
-async def test_delegated_manager_update_preserves_shared_agent_acl():
-    db = FakeDb()
-    repo = AgentRepository(db)
-    agent = _agent_for_update()
-    await repo.update(
-        agent,
-        share_config=_MANAGER_USER_SCOPE,
-        updated_by="manager",
-    )
-
-    assert agent.share_config["read_scope"]["user_uids"] == ["manager"]
-    assert agent.share_config["manage_scope"]["user_uids"] == ["manager"]
-
-
-@pytest.mark.asyncio
-async def test_delegated_manager_can_update_agent_acl_with_standard_validation():
-    db = FakeDb()
-    repo = AgentRepository(db)
-    agent = _agent_for_update()
-    await repo.update(
-        agent,
+def test_edit_scope_grants_configuration_edit_without_manage():
+    user = User(username="user", uid="user", password_hash="x", role="user", department_id=1)
+    agent = Agent(
+        slug="shared-bot",
+        name="Shared Bot",
+        backend_id="ChatbotAgent",
+        created_by="other",
         share_config={
             "version": 2,
             "read_scope": {"access_level": "global"},
+            "edit_scope": {"access_level": "user", "user_uids": ["user"]},
             "manage_scope": None,
         },
-        updated_by="manager",
     )
 
-    assert agent.share_config == DEFAULT_SHARE_CONFIG
-    db.commit.assert_awaited_once()
+    assert user_can_edit_agent(user, agent) is True
+    assert user_can_manage_agent(user, agent) is False
+    assert user_can_manage_agent(User(username="owner", uid="other", password_hash="x", role="user"), agent)
+
+
+@pytest.mark.parametrize(
+    "manage_scope",
+    [
+        {"access_level": "global"},
+        {"access_level": "department", "department_ids": [1]},
+    ],
+)
+def test_legacy_broad_manage_scope_only_grants_ordinary_user_edit(manage_scope):
+    user = User(username="user", uid="user", password_hash="x", role="user", department_id=1)
+    agent = Agent(
+        slug="shared-bot",
+        name="Shared Bot",
+        backend_id="ChatbotAgent",
+        created_by="other",
+        share_config={"version": 2, "read_scope": {"access_level": "global"}, "manage_scope": manage_scope},
+    )
+
+    assert user_can_edit_agent(user, agent) is True
+    assert user_can_manage_agent(user, agent) is False
+
+
+def test_read_scope_does_not_grant_configuration_edit():
+    user = User(username="user", uid="user", password_hash="x", role="user", department_id=1)
+    agent = Agent(
+        slug="shared-bot",
+        name="Shared Bot",
+        backend_id="ChatbotAgent",
+        created_by="other",
+        share_config={"version": 2, "read_scope": {"access_level": "global"}, "manage_scope": None},
+    )
+
+    assert user_can_access_agent(user, agent) is True
+    assert user_can_edit_agent(user, agent) is False
+
+
+@pytest.mark.asyncio
+async def test_delegated_editor_profile_update_preserves_shared_agent_acl():
+    db = FakeDb()
+    repo = AgentRepository(db)
+    agent = _agent_for_update()
+    expected_share = deepcopy(agent.share_config)
+    await repo.update(
+        agent,
+        name="Edited Bot",
+        updated_by="manager",
+        updater=User(username="manager", uid="manager", password_hash="x", role="user", department_id=1),
+    )
+
+    assert agent.name == "Edited Bot"
+    assert agent.share_config == expected_share
+
+
+@pytest.mark.asyncio
+async def test_delegated_editor_cannot_update_agent_acl():
+    db = FakeDb()
+    repo = AgentRepository(db)
+    agent = _agent_for_update()
+    expected_share = deepcopy(agent.share_config)
+    user = User(username="manager", uid="manager", password_hash="x", role="user", department_id=1)
+    with pytest.raises(ValueError, match="无权修改智能体共享权限"):
+        await repo.update(
+            agent,
+            name="Unexpected",
+            share_config={"version": 2, "read_scope": {"access_level": "global"}, "manage_scope": None},
+            updated_by="manager",
+            updater=user,
+        )
+
+    assert agent.name == "Shared Bot"
+    assert agent.share_config == expected_share
+    db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

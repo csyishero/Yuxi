@@ -32,7 +32,9 @@ const activePanel = computed(() => {
   return agentPanelRef.value
 })
 
-const activeLoading = computed(() => activePanel.value?.loading || activePanel.value?.saving || false)
+const activeLoading = computed(
+  () => activePanel.value?.loading || activePanel.value?.saving || false
+)
 const activeStats = computed(() => activePanel.value?.stats || {})
 
 const normalizeTab = (tab) => {
@@ -78,9 +80,7 @@ onBeforeRouteUpdate((to) => canChangeTab(normalizeTab(to.query.tab)))
       <template #info>
         <div v-if="activeTab === 'agents'" class="summary-strip">
           <span>{{ activeStats.total || 0 }} 个智能体</span>
-          <span>{{ activeStats.global || 0 }} 个全局</span>
-          <span v-if="activeStats.builtin">{{ activeStats.builtin }} 个内置</span>
-          <span>{{ activeStats.manageable || 0 }} 个可管理</span>
+          <span>{{ activeStats.subagents || 0 }} 个子智能体</span>
         </div>
         <div v-else-if="activeTab === 'providers'" class="summary-strip">
           <span>{{ activeStats.total || 0 }} 个供应商</span>
@@ -150,6 +150,12 @@ onBeforeRouteUpdate((to) => canChangeTab(normalizeTab(to.query.tab)))
     background: var(--color-warning-50);
     border-color: var(--color-warning-100);
     color: var(--color-warning-700);
+  }
+}
+
+@media (max-width: 900px) {
+  .summary-strip {
+    display: none;
   }
 }
 </style>

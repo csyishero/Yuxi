@@ -409,6 +409,7 @@ const props = defineProps({
   disabledReason: { type: String, default: '' },
   requireReadScope: { type: Boolean, default: false },
   showEditScope: { type: Boolean, default: false },
+  editScopeTitle: { type: String, default: '文档编辑权限（包含读取权限）' },
   showManageScope: { type: Boolean, default: true },
   resourceKind: { type: String, default: 'generic' },
   resourceDepartmentId: { type: [Number, String], default: null },
@@ -457,7 +458,7 @@ const scopeOptions = computed(() => isMcpPermissionMode.value ? [
     ? [
         {
           key: 'edit_scope',
-          title: '文档编辑权限（包含读取权限）',
+          title: props.editScopeTitle,
           profileTitle: '内容贡献者',
           badge: '推荐给普通用户',
           badgeColor: 'green',
@@ -740,7 +741,7 @@ const emitConfig = () => {
   }
   if (props.showEditScope) {
     config.edit_scope = normalizeScope(scopes.edit_scope)
-    if (!isMcpPermissionMode.value) {
+    if (isKnowledgeBasePermissionMode.value) {
       config.capability_policy = normalizeKnowledgeBaseCapabilityPolicy(capabilityPolicy)
     }
   }

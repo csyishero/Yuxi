@@ -220,9 +220,13 @@
         </div>
 
         <div v-else class="info-grid extension-detail-divider-list">
-          <div class="info-item" v-if="server.description">
+          <div class="info-item">
             <label>描述</label>
-            <span>{{ server.description }}</span>
+            <span>{{ server.description || '暂无描述' }}</span>
+          </div>
+          <div class="info-item">
+            <label>服务状态</label>
+            <span>{{ server.enabled ? '已启用' : '已停用' }}</span>
           </div>
           <div class="info-item" v-if="server.transport">
             <label>传输类型</label>
@@ -259,6 +263,26 @@
               <span>{{ server.sse_read_timeout }} 秒</span>
             </div>
           </template>
+          <template
+            v-if="
+              !userStore.isAdmin &&
+              (server.transport === 'streamable_http' || server.transport === 'sse')
+            "
+          >
+            <div class="info-item">
+              <label>MCP URL（已脱敏）</label>
+              <span class="code-inline text-break-all">
+                {{ server.url_preview || '未提供可展示的地址' }}
+              </span>
+            </div>
+            <div class="info-item">
+              <label>请求头名称</label>
+              <span v-if="server.header_names?.length">
+                <a-tag v-for="name in server.header_names" :key="name">{{ name }}</a-tag>
+              </span>
+              <span v-else>未配置</span>
+            </div>
+          </template>
           <template v-if="userStore.isAdmin && server.transport === 'stdio'">
             <div class="info-item" v-if="server.command">
               <label>命令</label>
@@ -293,6 +317,15 @@
             <label>我的权限</label>
             <span>{{ permissionLabel }}</span>
           </div>
+          <p
+            v-if="
+              !userStore.isAdmin &&
+              (server.transport === 'streamable_http' || server.transport === 'sse')
+            "
+            class="mcp-private-note"
+          >
+            地址路径、查询参数及请求头值已隐藏。
+          </p>
         </div>
       </div>
     </template>
@@ -483,10 +516,11 @@ const toolsLoading = ref(false)
 const toolsError = ref(null)
 const toolSearchText = ref('')
 const toggleToolLoading = ref(null)
-const canUse = computed(
+const canViewTools = computed(
   () =>
+    Boolean(server.value) &&
     server.value?.enabled !== false &&
-    (userStore.isAdmin || ['edit', 'manage'].includes(server.value?.permission))
+    (userStore.isAdmin || ['read', 'edit', 'manage'].includes(server.value?.permission))
 )
 const canManageSharing = computed(
   () => userStore.isAdmin || server.value?.can_manage_sharing === true
@@ -502,7 +536,7 @@ const permissionLabel = computed(
 
 const mcpDetailTabs = computed(() => {
   const tabs = [{ key: 'general', label: '信息', icon: Settings2 }]
-  if (canUse.value && !server.value?.requires_migration) {
+  if (canViewTools.value && !server.value?.requires_migration) {
     tabs.push({ key: 'tools', label: `工具 (${tools.value.length})`, icon: Wrench })
   }
   if (canManageSharing.value) {
@@ -736,7 +770,7 @@ const fetchServer = async () => {
         shareConfigForm.value = cloneSharing(result.data.share_config)
       }
       if (detailTab.value === 'sharing' && !canManageSharing.value) detailTab.value = 'general'
-      if (detailTab.value === 'tools' && !canUse.value) detailTab.value = 'general'
+      if (detailTab.value === 'tools' && !canViewTools.value) detailTab.value = 'general'
     } else {
       message.error(result.message || '获取 MCP 详情失败')
     }
@@ -748,7 +782,7 @@ const fetchServer = async () => {
 }
 
 const fetchTools = async () => {
-  if (!server.value || !canUse.value) return
+  if (!canViewTools.value) return
   try {
     toolsLoading.value = true
     toolsError.value = null
@@ -892,6 +926,12 @@ onMounted(() => {
     padding: 16px 0;
     border-bottom: 1px solid var(--gray-150);
   }
+}
+
+.mcp-private-note {
+  margin: 14px 0 0;
+  color: var(--gray-500);
+  font-size: 12px;
 }
 
 .mcp-sharing-view {

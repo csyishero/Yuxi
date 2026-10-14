@@ -16,7 +16,7 @@ from yuxi.permissions import (
     resolve_agent_permission,
     resolve_mcp_permission,
 )
-from yuxi.storage.postgres.models_business import Agent, MCPServer, User
+from yuxi.storage.postgres.models_business import Agent, Department, MCPServer, User
 from yuxi.utils.datetime_utils import utc_now_naive
 
 DEFAULT_AGENT_SLUG = "default-chatbot"
@@ -113,6 +113,14 @@ FACT_VERIFIER_SYSTEM_PROMPT = """你是「事实核查员」子智能体，专�
 
 ADMIN_ROLES = {"admin", "superadmin"}
 AGENT_RESOURCE_CONFIG_FIELDS = AGENT_RUNTIME_RESOURCE_FIELDS | {"preload_skills"}
+SYSTEM_AGENT_SLUGS = {
+    DEFAULT_AGENT_SLUG,
+    WEB_SEARCH_AGENT_SLUG,
+    GENERAL_PURPOSE_AGENT_SLUG,
+    DEEP_RESEARCH_AGENT_SLUG,
+    RESEARCH_EXPLORER_AGENT_SLUG,
+    FACT_VERIFIER_AGENT_SLUG,
+}
 
 
 def is_builtin_agent(agent: Agent) -> bool:
@@ -149,6 +157,13 @@ def user_can_access_agent(user: User, agent: Agent) -> bool:
     return resolve_agent_permission(user, agent) != ResourcePermission.NONE
 
 
+def user_can_edit_agent(user: User, agent: Agent) -> bool:
+    """判断用户能否修改智能体配置。"""
+    if is_builtin_agent(agent):
+        return user.role in ADMIN_ROLES
+    return resolve_agent_permission(user, agent) in {ResourcePermission.EDIT, ResourcePermission.MANAGE}
+
+
 def user_can_manage_agent(user: User, agent: Agent) -> bool:
     if is_builtin_agent(agent):
         return user.role in ADMIN_ROLES
@@ -163,6 +178,36 @@ def _slugify(value: str | None) -> str:
 class AgentRepository:
     def __init__(self, db_session: AsyncSession):
         self.db = db_session
+
+    async def get_owner_details(self, agents: Collection[Agent]) -> dict[str, tuple[str, int | None, str | None]]:
+        """批量查询可见智能体创建人的用户名和当前所属部门。"""
+        owner_uids = {agent.created_by for agent in agents if agent.slug not in SYSTEM_AGENT_SLUGS and agent.created_by}
+        if not owner_uids:
+            return {}
+
+        result = await self.db.execute(
+            select(User.uid, User.username, User.department_id, Department.name)
+            .outerjoin(Department, User.department_id == Department.id)
+            .where(User.uid.in_(owner_uids))
+        )
+        return {
+            uid: (username, department_id, department_name) for uid, username, department_id, department_name in result
+        }
+
+    async def get_share_department_names(self, agents: Collection[Agent]) -> dict[int, str]:
+        """批量查询智能体各共享范围中的部门名称。"""
+        department_ids: set[int] = set()
+        for agent in agents:
+            config = agent.share_config or {}
+            for key in ("read_scope", "edit_scope", "manage_scope"):
+                scope = config.get(key) or {}
+                if scope.get("access_level") == "department":
+                    department_ids.update(scope.get("department_ids") or [])
+
+        if not department_ids:
+            return {}
+        result = await self.db.execute(select(Department.id, Department.name).where(Department.id.in_(department_ids)))
+        return dict(result.all())
 
     async def ensure_default_agent(self, *, created_by: str | None = None) -> Agent:
         agent = await self.get_by_slug(DEFAULT_AGENT_SLUG)
@@ -477,6 +522,8 @@ class AgentRepository:
         updated_by: str | None = None,
         updater: User | None = None,
     ) -> Agent:
+        if share_config is not None and updater is not None and not user_can_manage_agent(updater, agent):
+            raise ValueError("当前用户无权修改智能体共享权限")
         if is_subagent is not None:
             agent.is_subagent = resolve_agent_is_subagent(agent.backend_id, is_subagent)
         if name is not None:
@@ -540,14 +587,40 @@ class AgentRepository:
         user: User,
         include_configurable_items: bool = False,
         backend_info_cache: dict[tuple[str, bool, str], dict] | None = None,
+        owner_details: dict[str, tuple[str, int | None, str | None]] | None = None,
+        share_department_names: dict[int, str] | None = None,
     ) -> dict[str, Any]:
         data = agent.to_dict()
+        owner_is_system = agent.slug in SYSTEM_AGENT_SLUGS
+        if owner_is_system:
+            owner_name, department_id, department_name = "系统", None, None
+        else:
+            if owner_details is None:
+                owner_details = await self.get_owner_details([agent])
+            owner_name, department_id, department_name = owner_details.get(agent.created_by, (None, None, None))
+        data["owner_name"] = owner_name
+        data["owner_is_system"] = owner_is_system
+        data["owner_department_id"] = department_id
+        data["owner_department_name"] = department_name
         data["share_config"] = normalize_permission_config(
             agent.share_config,
         )
+        if share_department_names is None:
+            share_department_names = await self.get_share_department_names([agent])
+        for level in ("read", "edit", "manage"):
+            scope = data["share_config"].get(f"{level}_scope") or {}
+            data[f"{level}_department_names"] = (
+                [
+                    share_department_names.get(department_id, f"已删除部门 #{department_id}")
+                    for department_id in scope.get("department_ids", [])
+                ]
+                if scope.get("access_level") == "department"
+                else []
+            )
         permission = resolve_agent_permission(user, agent)
         is_builtin = is_builtin_agent(agent)
         data["can_manage"] = user_can_manage_agent(user, agent)
+        data["can_edit"] = user_can_edit_agent(user, agent)
         data["effective_permission"] = permission.value
         data["is_builtin"] = is_builtin
         data["permission_locked"] = is_builtin

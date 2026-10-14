@@ -36,6 +36,7 @@ const runtimeAgentModalTabs = ['model', 'tools', 'other']
 
 const showAgentModal = ref(false)
 const editingAgentId = ref(null)
+const editingAgentCanManage = ref(false)
 const agentModalActiveTab = ref('basic')
 const agentIconUploading = ref(false)
 const saving = ref(false)
@@ -44,6 +45,7 @@ const agentNameInputRef = ref(null)
 const agentShareConfig = ref({
   version: 2,
   read_scope: { access_level: 'user', department_ids: [], user_uids: [] },
+  edit_scope: null,
   manage_scope: null
 })
 const agentForm = reactive({
@@ -78,6 +80,7 @@ const cloneShareConfig = (share) => {
   return {
     version: share.version,
     read_scope: cloneScope(share.read_scope),
+    edit_scope: cloneScope(share.edit_scope),
     manage_scope: cloneScope(share.manage_scope)
   }
 }
@@ -104,6 +107,13 @@ const stringifyShareConfig = (share) => {
       department_ids: sortIds(share.read_scope?.department_ids),
       user_uids: sortIds(share.read_scope?.user_uids)
     },
+    edit_scope: share.edit_scope
+      ? {
+          access_level: share.edit_scope.access_level,
+          department_ids: sortIds(share.edit_scope.department_ids),
+          user_uids: sortIds(share.edit_scope.user_uids)
+        }
+      : null,
     manage_scope: share.manage_scope
       ? {
           access_level: share.manage_scope.access_level,
@@ -125,11 +135,14 @@ const hasProfileChanges = computed(() => {
   ) {
     return true
   }
-  if (!canEditAgentShareConfig.value) return false
-  const currentShare = snapshotShareConfig()
-  const baselineShare = originalShareConfig.value
-  if (!currentShare || !baselineShare) return false
-  return stringifyShareConfig(currentShare) !== stringifyShareConfig(baselineShare)
+  return hasShareChanges.value
+})
+
+const hasShareChanges = computed(() => {
+  if (!editingAgentId.value || !canEditAgentShareConfig.value) return false
+  return (
+    stringifyShareConfig(snapshotShareConfig()) !== stringifyShareConfig(originalShareConfig.value)
+  )
 })
 
 const captureProfileBaseline = () => {
@@ -166,6 +179,7 @@ const getInitialShareConfig = () => ({
     department_ids: [],
     user_uids: userStore.uid ? [userStore.uid] : []
   },
+  edit_scope: null,
   manage_scope: null
 })
 
@@ -181,7 +195,15 @@ const normalizeShareConfigForPayload = () => {
 }
 
 const isEditingBuiltinAgent = computed(() => isBuiltinAgent({ id: editingAgentId.value }))
-const canEditAgentShareConfig = computed(() => !isEditingBuiltinAgent.value)
+const canEditAgentShareConfig = computed(() => {
+  if (!editingAgentId.value) return true
+  if (isEditingBuiltinAgent.value || !editingAgentCanManage.value) return false
+  const allowed = getAgentShareAllowedLevels()
+  return ['read_scope', 'edit_scope', 'manage_scope'].every((key) => {
+    const scope = agentShareConfig.value?.[key]
+    return !scope || allowed.includes(scope.access_level)
+  })
+})
 const getAgentShareAllowedLevels = () => {
   if (isEditingBuiltinAgent.value) return ['global']
   if (userStore.isAdmin) return ['global', 'department', 'user']
@@ -189,6 +211,12 @@ const getAgentShareAllowedLevels = () => {
 }
 
 const agentModalTitle = computed(() => (editingAgentId.value ? '编辑智能体' : '新增智能体'))
+const shareScopeLabel = (scope) => {
+  if (!scope) return '未设置'
+  if (scope.access_level === 'global') return '全局'
+  if (scope.access_level === 'department') return `${scope.department_ids?.length || 0} 个部门`
+  return `${scope.user_uids?.length || 0} 个用户`
+}
 const agentPreviewDefaultIcon = computed(() =>
   editingAgentId.value ? generatePixelAvatar(editingAgentId.value) : ''
 )
@@ -244,6 +272,7 @@ const handleAgentModalAfterOpenChange = (open) => {
 
 const openCreate = () => {
   editingAgentId.value = null
+  editingAgentCanManage.value = false
   agentModalActiveTab.value = 'basic'
   resetAgentForm()
   agentStore.resetAgentConfig()
@@ -256,12 +285,13 @@ const openEdit = async (agent) => {
   if (!agentId) return
 
   const detail = await agentStore.fetchAgentDetail(agentId, true)
-  if (!detail?.can_manage) {
+  if (!detail?.can_edit) {
     message.warning('当前智能体不可编辑')
     return
   }
 
   editingAgentId.value = detail.id
+  editingAgentCanManage.value = !!detail.can_manage
   agentModalActiveTab.value = 'basic'
   Object.assign(agentForm, {
     slug: detail.id || detail.slug || '',
@@ -276,7 +306,7 @@ const openEdit = async (agent) => {
         read_scope: { access_level: 'global', department_ids: [], user_uids: [] },
         manage_scope: null
       }
-    : detail.share_config || getInitialShareConfig()
+    : cloneShareConfig(detail.share_config) || getInitialShareConfig()
   await agentStore.selectAgent(detail.id, { allowSubagent: true })
   captureProfileBaseline()
   showAgentModal.value = true
@@ -327,13 +357,15 @@ const buildAgentPayload = () => {
     name: agentForm.name.trim(),
     description: agentForm.description.trim() || null,
     icon: agentForm.icon.trim() || null,
-    share_config: normalizeShareConfigForPayload(),
     is_subagent: isSubAgentBackend(agentForm.backend_id)
   }
 
   if (!editingAgentId.value) {
     payload.slug = agentForm.slug.trim() || undefined
     payload.backend_id = agentForm.backend_id
+    payload.share_config = normalizeShareConfigForPayload()
+  } else if (hasShareChanges.value) {
+    payload.share_config = normalizeShareConfigForPayload()
   }
 
   return payload
@@ -346,9 +378,10 @@ const saveAgent = async () => {
     return
   }
 
-  const validation = canEditAgentShareConfig.value
-    ? agentShareConfigFormRef.value?.validate?.()
-    : null
+  const validation =
+    (!editingAgentId.value || hasShareChanges.value) && canEditAgentShareConfig.value
+      ? agentShareConfigFormRef.value?.validate?.()
+      : null
   if (validation && !validation.valid) {
     agentModalActiveTab.value = 'basic'
     message.error(validation.message)
@@ -525,16 +558,57 @@ defineExpose({
             </label>
           </div>
 
-          <div v-if="canEditAgentShareConfig" class="share-config-block">
+          <div class="share-config-block">
             <div class="section-heading">
               <span>共享权限</span>
+              <span v-if="!canEditAgentShareConfig" class="share-config-readonly-badge">
+                {{ !isEditingBuiltinAgent && !editingAgentCanManage ? '当前可编辑配置' : '共享设置只读' }}
+              </span>
             </div>
             <ShareConfigForm
+              v-if="canEditAgentShareConfig"
               ref="agentShareConfigFormRef"
               v-model="agentShareConfig"
               :auto-select-user-dept="true"
               :allowed-access-levels="getAgentShareAllowedLevels()"
+              :show-edit-scope="true"
+              edit-scope-title="配置编辑权限（包含读取权限）"
             />
+            <div v-else class="share-config-readonly">
+              <div class="share-config-readonly-scopes">
+                <div class="share-config-readonly-scope">
+                  <span>读取范围</span>
+                  <strong :class="{ empty: !agentShareConfig?.read_scope }">
+                    {{ shareScopeLabel(agentShareConfig?.read_scope) }}
+                  </strong>
+                </div>
+                <div class="share-config-readonly-scope">
+                  <span>单独编辑范围</span>
+                  <strong :class="{ empty: !agentShareConfig?.edit_scope }">
+                    {{ shareScopeLabel(agentShareConfig?.edit_scope) }}
+                  </strong>
+                </div>
+                <div class="share-config-readonly-scope">
+                  <span>{{ !isEditingBuiltinAgent && !editingAgentCanManage ? '原管理范围' : '管理范围' }}</span>
+                  <strong :class="{ empty: !agentShareConfig?.manage_scope }">
+                    {{ shareScopeLabel(agentShareConfig?.manage_scope) }}
+                  </strong>
+                </div>
+              </div>
+              <div class="share-config-readonly-footer">
+                <p v-if="isEditingBuiltinAgent">内置智能体的共享范围由系统维护。</p>
+                <template v-else-if="editingAgentCanManage">
+                  <p>保留管理员设置的共享范围。重新设置后将仅自己可读取，并清除编辑和管理授权。</p>
+                  <a-button size="small" @click="agentShareConfig = getInitialShareConfig()">
+                    重新设置共享权限
+                  </a-button>
+                </template>
+                <p v-else-if="agentShareConfig?.manage_scope">
+                  你可以编辑配置。原管理授权对普通用户仅授予配置编辑权限；共享和删除由创建人或管理员维护。
+                </p>
+                <p v-else>你可以编辑配置；共享和删除由创建人或管理员维护。</p>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -987,6 +1061,85 @@ defineExpose({
   border-top: 1px solid var(--gray-150);
 }
 
+.share-config-readonly {
+  overflow: hidden;
+  border: 1px solid var(--gray-150);
+  border-radius: 10px;
+  background: var(--gray-10);
+}
+
+.share-config-readonly-badge {
+  margin-left: 6px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: var(--main-50);
+  color: var(--main-700);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.share-config-readonly-scopes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 18px;
+}
+
+.share-config-readonly-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  padding: 0 16px;
+  border-right: 1px solid var(--gray-150);
+
+  &:first-child {
+    padding-left: 0;
+  }
+
+  &:last-child {
+    padding-right: 0;
+    border-right: 0;
+  }
+
+  > span {
+    color: var(--gray-600);
+    font-size: 12px;
+  }
+
+  > strong {
+    color: var(--gray-900);
+    font-size: 16px;
+    font-weight: 600;
+
+    &.empty {
+      color: var(--gray-500);
+      font-size: 14px;
+      font-weight: 400;
+    }
+  }
+}
+
+.share-config-readonly-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 18px;
+  border-top: 1px solid var(--gray-150);
+  background: var(--gray-25);
+
+  p {
+    margin: 0;
+    color: var(--gray-600);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  :deep(.ant-btn) {
+    flex-shrink: 0;
+  }
+}
+
 .modal-form {
   display: flex;
   flex-direction: column;
@@ -1064,6 +1217,24 @@ defineExpose({
     overflow-x: auto;
     border-right: 0;
     border-bottom: 1px solid var(--gray-150);
+  }
+
+  .share-config-readonly-scopes {
+    grid-template-columns: 1fr;
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .share-config-readonly-scope {
+    gap: 3px;
+    padding: 0;
+    border-right: 0;
+  }
+
+  .share-config-readonly-footer {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 10px 14px;
   }
 }
 

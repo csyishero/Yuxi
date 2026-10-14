@@ -13,6 +13,7 @@ from yuxi.repositories.agent_repository import (
     AgentRepository,
     is_builtin_agent,
     user_can_access_agent,
+    user_can_edit_agent,
     user_can_manage_agent,
 )
 from yuxi.services.agent_request_queue_service import (
@@ -104,6 +105,8 @@ async def _serialize_agent(
     *,
     include_configurable_items: bool = False,
     backend_info_cache: dict[tuple[str, bool, str], dict] | None = None,
+    owner_details: dict[str, tuple[str, int | None, str | None]] | None = None,
+    share_department_names: dict[int, str] | None = None,
     visible_mcp_slugs: set[str] | None = None,
 ) -> dict:
     data = await repo.serialize(
@@ -111,6 +114,8 @@ async def _serialize_agent(
         user=user,
         include_configurable_items=include_configurable_items,
         backend_info_cache=backend_info_cache,
+        owner_details=owner_details,
+        share_department_names=share_department_names,
     )
     data["config_json"] = _filter_agent_config_json(item.backend_id, data.get("config_json"))
     context = data["config_json"].get("context")
@@ -149,6 +154,8 @@ async def list_agents(
     await repo.ensure_default_agent()
     items = await repo.list_visible(user=current_user, include_subagent_definitions=include_subagents)
     backend_info_cache: dict[tuple[str, bool, str], dict] = {}
+    owner_details = await repo.get_owner_details(items)
+    share_department_names = await repo.get_share_department_names(items)
     has_mcp_references = any(
         isinstance((getattr(item, "config_json", None) or {}).get("context"), dict)
         and (item.config_json["context"].get("mcps") or [])
@@ -161,6 +168,8 @@ async def list_agents(
             item,
             current_user,
             backend_info_cache=backend_info_cache,
+            owner_details=owner_details,
+            share_department_names=share_department_names,
             visible_mcp_slugs=visible_mcp_slugs,
         )
         for item in items
@@ -237,8 +246,10 @@ async def update_agent(
     item = await repo.get_visible_by_slug(slug=agent_slug, user=current_user, kind="any")
     if not item:
         raise HTTPException(status_code=404, detail="智能体不存在")
-    if not user_can_manage_agent(current_user, item):
-        raise HTTPException(status_code=403, detail="不能编辑非自己创建的智能体")
+    if not user_can_edit_agent(current_user, item):
+        raise HTTPException(status_code=403, detail="无权编辑该智能体")
+    if payload.share_config is not None and not user_can_manage_agent(current_user, item):
+        raise HTTPException(status_code=403, detail="无权修改该智能体共享权限")
 
     try:
         fields_set = payload.model_fields_set

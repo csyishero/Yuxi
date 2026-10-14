@@ -1,5 +1,9 @@
 """MCP 服务器管理路由"""
 
+import re
+from ipaddress import ip_address
+from urllib.parse import urlsplit
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -95,7 +99,39 @@ def serialize_mcp_server(server) -> dict:
     return data
 
 
-def serialize_mcp_server_for_user(server, user: User) -> dict:
+def mcp_url_preview(url: str | None) -> str | None:
+    """仅展示地址的来源；路径、参数和凭据可能包含密钥。"""
+
+    if not url or any(ord(char) < 32 or ord(char) == 127 for char in url):
+        return None
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not host or not re.fullmatch(r"[0-9A-Za-z.:-]+", host):
+        return None
+
+    host = host.rstrip(".").lower()
+    internal = (
+        "." not in host
+        or host == "localhost"
+        or host.endswith((".localhost", ".local", ".internal", ".lan", ".corp", ".intra"))
+    )
+    try:
+        internal = internal or not ip_address(host).is_global
+    except ValueError:
+        pass
+
+    if internal:
+        return f"{parsed.scheme}://[内部地址]"
+    display_host = f"[{host}]" if ":" in host else host
+    origin = f"{parsed.scheme}://{display_host}{f':{port}' if port else ''}"
+    return f"{origin}/…" if parsed.path not in {"", "/"} or parsed.query or parsed.fragment else origin
+
+
+def serialize_mcp_server_for_user(server, user: User, *, include_connection_preview: bool = False) -> dict:
     """按当前用户权限返回 MCP 元数据，非管理员不暴露连接凭据。"""
 
     permission = resolve_mcp_permission(user, server)
@@ -106,10 +142,25 @@ def serialize_mcp_server_for_user(server, user: User) -> dict:
             "slug": getattr(server, "slug", ""),
             "name": getattr(server, "name", ""),
             "description": getattr(server, "description", None),
+            "transport": getattr(server, "transport", None),
             "icon": getattr(server, "icon", None),
             "enabled": bool(getattr(server, "enabled", True)) and not requires_mcp_stdio_migration(server),
             "tags": getattr(server, "tags", None) or [],
         }
+        if include_connection_preview:
+            headers = getattr(server, "headers", None)
+            data["url_preview"] = mcp_url_preview(getattr(server, "url", None))
+            data["header_names"] = (
+                sorted(
+                    name
+                    for name in headers
+                    if isinstance(name, str)
+                    and len(name) <= 128
+                    and re.fullmatch(r"[!#$%&'*+.^_\x60|~0-9A-Za-z-]+", name)
+                )
+                if isinstance(headers, dict)
+                else []
+            )
     data["permission"] = permission.value
     data["can_manage_sharing"] = permission == ResourcePermission.MANAGE
     return data
@@ -199,7 +250,10 @@ async def get_mcp_server_route(
         server = await get_server_or_404(db, slug)
         if resolve_mcp_permission(current_user, server) == ResourcePermission.NONE:
             raise HTTPException(status_code=404, detail=f"服务器 '{slug}' 不存在")
-        return {"success": True, "data": serialize_mcp_server_for_user(server, current_user)}
+        return {
+            "success": True,
+            "data": serialize_mcp_server_for_user(server, current_user, include_connection_preview=True),
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -223,7 +277,10 @@ async def update_mcp_sharing_route(
             share_config=request.share_config,
             operator=current_user,
         )
-        return {"success": True, "data": serialize_mcp_server_for_user(server, current_user)}
+        return {
+            "success": True,
+            "data": serialize_mcp_server_for_user(server, current_user, include_connection_preview=True),
+        }
     except MCPServerNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except PermissionError as exc:
@@ -398,8 +455,6 @@ async def get_mcp_server_tools(
         permission = resolve_mcp_permission(current_user, server)
         if permission == ResourcePermission.NONE:
             raise HTTPException(status_code=404, detail=f"服务器 '{slug}' 不存在")
-        if permission == ResourcePermission.READ:
-            raise HTTPException(status_code=403, detail="当前用户无权使用此 MCP")
         if current_user.role not in {"admin", "superadmin"} and not server.enabled:
             raise HTTPException(status_code=403, detail="此 MCP 尚未启用")
         ensure_mcp_server_runnable(server)

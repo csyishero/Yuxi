@@ -470,11 +470,18 @@ def require_knowledge_base_permission(
 def resolve_agent_permission(user: Any, resource: ShareableResource) -> ResourcePermission:
     """解析 Agent 权限。"""
 
-    return resolve_resource_permission(
+    permission = resolve_resource_permission(
         user,
         resource,
         AGENT_PERMISSION_POLICY,
     )
+    if (
+        _value(user, "role") == "user"
+        and str(_value(resource, "created_by", "") or "") != str(_value(user, "uid", "") or "")
+        and permission == ResourcePermission.MANAGE
+    ):
+        return ResourcePermission.EDIT
+    return permission
 
 
 def resolve_skill_permission(user: Any, resource: ShareableResource) -> ResourcePermission:

@@ -121,8 +121,6 @@
                         @delete-chat="$emit('delete-chat', $event)"
                         @rename-chat="$emit('rename-chat', $event)"
                         @toggle-pin="$emit('toggle-pin', $event)"
-                        @promote-chat="confirmPromoteChat"
-                        @open-project="openChatProject"
                       />
                       <button
                         v-if="group.hasMore"
@@ -166,7 +164,6 @@
                   @rename-chat="$emit('rename-chat', $event)"
                   @toggle-pin="$emit('toggle-pin', $event)"
                   @promote-chat="confirmPromoteChat"
-                  @open-project="openChatProject"
                 />
                 <div v-if="!otherConversations.length" class="list-state">暂无对话历史</div>
               </template>
