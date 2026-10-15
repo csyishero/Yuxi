@@ -2,7 +2,7 @@ import asyncio
 import shutil
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Annotated
+from typing import Annotated, Literal
 
 from langchain.tools import InjectedToolCallId
 from langchain_core.messages import ToolMessage
@@ -17,6 +17,19 @@ from yuxi.storage.postgres.manager import pg_manager
 from yuxi.utils.logging_config import logger
 
 SANDBOX_PATH_HINT = "请使用当前 Project Workdir 下的目录，或 /home/gem/user-data/..."
+SkillCategory = Literal[
+    "office_tools",
+    "office_efficiency",
+    "office_automation",
+    "data_processing",
+    "data_analysis",
+    "finance_analysis",
+    "business_review",
+    "project_management",
+    "legal_compliance",
+    "development_tools",
+    "other",
+]
 
 
 class InstallSkillInput(BaseModel):
@@ -27,6 +40,16 @@ class InstallSkillInput(BaseModel):
     )
     skill_names: list[str] | None = Field(
         default=None, description="Git 安装时指定要安装的 skill slug 列表（至少一个）。Sandbox 路径安装时忽略此参数。"
+    )
+    category: SkillCategory | None = Field(
+        default=None,
+        description=(
+            "从 Sandbox 路径安装新 Skill 时按用途选择一个方向，已有有效 SKILL.md category 时可省略："
+            "office_tools 办公工具、office_efficiency 办公效率、office_automation 办公自动化、"
+            "data_processing 数据处理、data_analysis 数据分析、finance_analysis 财务分析、"
+            "business_review 经营复盘、project_management 项目管理、legal_compliance 法律合规、"
+            "development_tools 开发工具、other 其它。Git 批量安装按各 Skill 文件中的 category 分类，不传此参数。"
+        ),
     )
 
 
@@ -76,6 +99,7 @@ async def _run_install_task(
     runtime: ToolRuntime,
     tool_call_id: str,
     skill_names: list[str] | None = None,
+    category: str | None = None,
 ) -> Command:
     """执行异步安装任务的核心逻辑。"""
     runtime_context = getattr(runtime, "context", None)
@@ -108,9 +132,25 @@ async def _run_install_task(
 
     try:
         from yuxi.agents.skills.service import (
+            declared_skill_category,
             enable_personal_skills_for_agent_config,
             install_personal_skill_dir,
+            normalize_skill_category,
         )
+
+        if category is not None:
+            category = normalize_skill_category(category)
+        if category is not None and not source.startswith("/"):
+            return Command(
+                update={
+                    "messages": [
+                        ToolMessage(
+                            content="错误：Git 批量安装请在每个 SKILL.md 中分别声明 category，不传统一的 category 参数",
+                            tool_call_id=tool_call_id,
+                        )
+                    ]
+                }
+            )
 
         installed_slugs: list[str] = []
         failed_items: list[dict] = []
@@ -127,7 +167,36 @@ async def _run_install_task(
                     getattr(runtime_context, "workdir_relative_path", None),
                     getattr(runtime_context, "workdir_path", None),
                 )
-                item = await install_personal_skill_dir(uid, source_dir)
+                declared_category = await asyncio.to_thread(declared_skill_category, source_dir)
+                if category is None and declared_category is None:
+                    return Command(
+                        update={
+                            "messages": [
+                                ToolMessage(
+                                    content=(
+                                        "错误：本地 Skill 缺少有效技能方向。请根据用途为 install_skill 指定 category；"
+                                        "确实无法归类时显式选择 other。"
+                                    ),
+                                    tool_call_id=tool_call_id,
+                                )
+                            ]
+                        }
+                    )
+                if category is not None and declared_category is not None and category != declared_category:
+                    return Command(
+                        update={
+                            "messages": [
+                                ToolMessage(
+                                    content=(
+                                        f"错误：Skill 文件已声明方向 {declared_category}，"
+                                        f"与 install_skill 参数 {category} 不一致；请核对后保持一致。"
+                                    ),
+                                    tool_call_id=tool_call_id,
+                                )
+                            ]
+                        }
+                    )
+                item = await install_personal_skill_dir(uid, source_dir, category=category)
                 installed_slugs = [item.slug]
         else:
             if not skill_names:
@@ -207,8 +276,9 @@ async def _run_install_task(
 async def install_skill(
     source: str,
     skill_names: list[str] | None = None,
+    category: SkillCategory | None = None,
     runtime: ToolRuntime = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """安装新的 Skill 到当前用户私有空间，并返回可直接读取的 Skill 路径。"""
-    return await _run_install_task(source, runtime, tool_call_id, skill_names)
+    return await _run_install_task(source, runtime, tool_call_id, skill_names, category)

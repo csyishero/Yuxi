@@ -1381,13 +1381,21 @@ def skill_category_from_frontmatter(metadata: dict[str, Any]) -> str:
     return category if isinstance(category, str) and category in SKILL_CATEGORY_CODES else "other"
 
 
+def declared_skill_category(skill_dir: Path) -> str | None:
+    """读取 Skill 文件中显式声明且有效的方向。"""
+    content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    _, _, _, metadata = _parse_skill_markdown(content)
+    category = metadata.get("category")
+    return category if isinstance(category, str) and category in SKILL_CATEGORY_CODES else None
+
+
 def set_skill_dir_category(skill_dir: Path, category: str) -> dict[str, Any]:
     """在发布前的临时副本中写入分类并重新解析元数据。"""
     category = normalize_skill_category(category)
     path = skill_dir / "SKILL.md"
     content = path.read_text(encoding="utf-8")
     _, _, _, metadata = _parse_skill_markdown(content)
-    if metadata.get("category") != category and not (category == "other" and "category" not in metadata):
+    if metadata.get("category") != category:
         metadata["category"] = category
         path.write_text(_render_skill_markdown_frontmatter(metadata, content), encoding="utf-8")
     return parse_skill_dir_metadata(skill_dir)
