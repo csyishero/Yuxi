@@ -18,10 +18,7 @@
         <ToolsCardList ref="toolsRef" />
       </div>
       <div v-if="activeTab === 'skills'" class="tab-panel">
-        <SkillCardList ref="skillsRef" />
-      </div>
-      <div v-if="activeTab === 'market'" class="tab-panel">
-        <SkillMarket />
+        <SkillMarket ref="skillsRef" />
       </div>
       <div v-if="activeTab === 'mcp'" class="tab-panel">
         <McpCardList ref="mcpRef" />
@@ -37,7 +34,6 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ToolsCardList from '@/components/extensions/ToolsCardList.vue'
 import McpCardList from '@/components/extensions/McpCardList.vue'
-import SkillCardList from '@/components/extensions/SkillCardList.vue'
 import SkillMarket from '@/components/extensions/SkillMarket.vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import DataBaseView from '@/views/DataBaseView.vue'
@@ -55,14 +51,12 @@ const toolsRef = ref(null)
 const adminExtensionTabs = computed(() => [
   { key: 'knowledge', label: '知识库' },
   { key: 'skills', label: '技能' },
-  { key: 'market', label: 'Skill 市场' },
   { key: 'tools', label: '工具' },
   { key: 'mcp', label: 'MCP' }
 ])
 const userExtensionTabs = [
   { key: 'knowledge', label: '知识库' },
   { key: 'skills', label: '技能' },
-  { key: 'market', label: 'Skill 市场' },
   { key: 'mcp', label: 'MCP' }
 ]
 const extensionTabs = computed(() =>
@@ -72,6 +66,7 @@ const allowedTabKeys = computed(() => extensionTabs.value.map((tab) => tab.key))
 const defaultTabKey = computed(() => extensionTabs.value[0]?.key || 'skills')
 
 const normalizeTab = (tab) => {
+  if (tab === 'market') return 'skills'
   if (allowedTabKeys.value.includes(tab)) return tab
   return defaultTabKey.value
 }
