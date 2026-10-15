@@ -11,6 +11,12 @@ export const listMarketSkills = async ({ query = '', sort = 'recent', installedO
   return apiGet(`${MARKET_BASE_URL}?${params}`)
 }
 
+export const listMarketRankings = async ({ metric = 'installs', scope = 'company', departmentId, limit = 20 } = {}) => {
+  const params = new URLSearchParams({ metric, scope, limit: String(limit) })
+  if (scope === 'department' && departmentId) params.set('department_id', String(departmentId))
+  return apiGet(`${MARKET_BASE_URL}/-/rankings?${params}`)
+}
+
 export const getMarketSkill = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}`)
 export const getMarketSkillTree = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/tree`)
 export const getMarketSkillFile = async (slug, path = 'SKILL.md') =>

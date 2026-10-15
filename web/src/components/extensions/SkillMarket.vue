@@ -1,6 +1,6 @@
 <template>
   <section class="skill-market">
-    <div class="skill-hub-layout">
+    <div class="skill-hub-layout" :class="{ 'personal-collapsed': !personalOpen }">
       <main class="skill-hub-main">
         <div class="market-heading">
           <div class="market-heading-copy">
@@ -13,6 +13,11 @@
           <div class="market-heading-actions">
             <a-button @click="managementOpen = true">管理与上传</a-button>
             <a-button type="primary" @click="openSubmit">发布技能</a-button>
+            <a-button class="personal-toggle" :aria-expanded="personalOpen" aria-controls="skill-personal-space" @click="personalOpen = !personalOpen">
+              <PanelRightClose v-if="personalOpen" :size="16" />
+              <PanelRightOpen v-else :size="16" />
+              {{ personalOpen ? '收起个人空间' : '展开个人空间' }}
+            </a-button>
           </div>
         </div>
 
@@ -25,7 +30,6 @@
             @search="refresh"
             @pressEnter="refresh"
           />
-          <a-segmented v-model:value="sort" :options="sortOptions" @change="refresh" />
         </div>
 
         <nav class="market-filters" aria-label="技能来源筛选">
@@ -38,6 +42,11 @@
             @click="selectSourceFilter(filter.key)"
           >{{ filter.label }}</button>
         </nav>
+
+        <div v-if="sourceFilter === 'market'" class="market-subtools">
+          <span>市场技能按发布时间展示</span>
+          <a-button @click="openRankings"><ChartNoAxesColumn :size="16" /> 查看排行榜</a-button>
+        </div>
 
         <a-alert v-if="error" type="error" :message="error" show-icon class="market-error">
           <template #action><a-button size="small" @click="refresh">重试</a-button></template>
@@ -85,7 +94,7 @@
         </a-spin>
       </main>
 
-      <aside class="personal-space" aria-label="个人空间">
+      <aside v-show="personalOpen" id="skill-personal-space" class="personal-space" aria-label="个人空间">
         <div class="personal-space-heading"><h3>个人空间</h3><span>{{ personalItems.length }} 项技能</span></div>
         <div class="personal-tabs" role="tablist" aria-label="个人空间视图">
           <button type="button" role="tab" :aria-selected="personalTab === 'skills'" :class="{ active: personalTab === 'skills' }" @click="personalTab = 'skills'">我的技能</button>
@@ -125,12 +134,48 @@
       <SkillCardList v-if="managementOpen" />
     </a-drawer>
 
+    <a-drawer v-model:open="rankingsOpen" title="市场排行榜" width="min(520px, 96vw)" class="skill-rankings-drawer">
+      <div class="ranking-controls">
+        <a-segmented v-model:value="rankingMetric" :options="rankingMetricOptions" @change="fetchRankings" />
+        <a-segmented v-model:value="rankingScope" :options="rankingScopeOptions" @change="fetchRankings" />
+        <a-select
+          v-if="rankingScope === 'department' && userStore.isSuperAdmin"
+          v-model:value="rankingDepartmentId"
+          class="ranking-department-select"
+          placeholder="选择部门"
+          aria-label="排行统计部门"
+          :options="rankingDepartmentOptions"
+          :loading="departmentLoading"
+          :disabled="departmentLoading || !rankingDepartmentOptions.length"
+          @change="fetchRankings"
+        />
+      </div>
+      <a-alert v-if="userStore.isSuperAdmin && departmentError" type="error" :message="`部门列表加载失败：${departmentError}`" show-icon class="market-error">
+        <template #action><a-button size="small" @click="fetchDepartmentNames">重试</a-button></template>
+      </a-alert>
+      <p class="ranking-hint">{{ rankingScopeHint }}，仅展示你可查看的市场技能。</p>
+      <a-alert v-if="rankingError" type="error" :message="rankingError" show-icon class="market-error">
+        <template #action><a-button size="small" @click="fetchRankings">重试</a-button></template>
+      </a-alert>
+      <a-spin :spinning="rankingsLoading">
+        <div v-if="!rankings.length && !rankingsLoading && !rankingError" class="personal-empty">暂无上榜技能</div>
+        <ol v-else-if="rankings.length" class="ranking-list">
+          <li v-for="(item, index) in rankings" :key="item.slug">
+            <span class="ranking-position">{{ index + 1 }}</span>
+            <span class="ranking-copy"><strong>{{ item.name }}</strong><small>{{ marketScopeLabel(item) }}发布</small></span>
+            <span class="ranking-count">{{ rankingMetric === 'installs' ? item.install_count : item.likes_count }} {{ rankingMetric === 'installs' ? '安装' : '点赞' }}</span>
+            <a-button size="small" @click="openDetail(item.slug)">查看</a-button>
+          </li>
+        </ol>
+      </a-spin>
+    </a-drawer>
+
     <a-modal v-model:open="detailOpen" :footer="null" width="760px" title="Skill 详情">
       <a-spin :spinning="detailLoading">
         <div v-if="detail" class="market-detail">
           <div class="market-detail-heading">
             <div><h3>{{ detail.name }}</h3><span>{{ detail.slug }} · {{ detail.owner_name }}</span></div>
-            <a-tag>{{ detail.scope === 'global' ? '全公司' : '本部门' }}</a-tag>
+            <a-tag>{{ marketScopeLabel(detail) }}</a-tag>
           </div>
           <p>{{ detail.description }}</p>
           <div class="market-detail-meta">
@@ -171,7 +216,7 @@
         <div v-for="request in requests" :key="request.id" class="market-request">
           <div class="market-request-title"><strong>{{ request.name }}</strong><a-tag>{{ request.status === 'pending' ? '待审核' : request.status === 'approved' ? '已发布' : '已拒绝' }}</a-tag></div>
           <p>{{ request.application_reason }}</p>
-          <div class="market-request-meta">{{ request.owner_uid }} · {{ request.personal_slug }} <span v-if="request.review_note">· {{ request.review_note }}</span></div>
+          <div class="market-request-meta">{{ request.owner_uid }} · {{ request.personal_slug }} <span v-if="request.status === 'approved'">· {{ requestScopeLabel(request) }}</span><span v-if="request.review_note"> · {{ request.review_note }}</span></div>
           <div v-if="request.status === 'pending' && userStore.isAdmin" class="market-request-actions">
             <a-button size="small" @click="previewRequest(request)">查看提交快照</a-button>
             <a-button size="small" type="primary" @click="openReview(request, true)">批准</a-button>
@@ -181,16 +226,17 @@
       </a-spin>
     </a-modal>
 
-    <a-modal v-model:open="snapshotOpen" title="提交快照" :footer="null" width="740px">
+    <a-modal v-model:open="snapshotOpen" title="提交快照" :footer="null" width="740px" :body-style="{ maxHeight: 'calc(100vh - 160px)', overflowY: 'auto' }">
       <a-button class="market-snapshot-download" @click="downloadSnapshot">下载完整快照（含附件）</a-button>
-      <div class="market-files"><div class="market-files-list"><strong>文件</strong><button v-for="file in snapshotFiles" :key="file.path" type="button" :class="{ active: file.path === snapshotSelected }" @click="selectSnapshotFile(file.path)">{{ file.path }}</button></div><div class="market-file-content"><a-spin :spinning="snapshotLoading"><MarkdownPreview v-if="snapshotContent" :content="snapshotContent" :compact="true" /><a-empty v-else :description="snapshotError || '选择文件预览'" /></a-spin></div></div>
+      <div class="market-files snapshot-files"><div class="market-files-list"><strong>文件</strong><button v-for="file in snapshotFiles" :key="file.path" type="button" :class="{ active: file.path === snapshotSelected }" @click="selectSnapshotFile(file.path)">{{ file.path }}</button></div><div class="market-file-content"><a-spin :spinning="snapshotLoading"><MarkdownPreview v-if="snapshotContent" :content="snapshotContent" :compact="true" /><a-empty v-else :description="snapshotError || '选择文件预览'" /></a-spin></div></div>
     </a-modal>
 
     <a-modal v-model:open="reviewOpen" :title="reviewApproved ? '批准发布' : '拒绝申请'" :ok-text="reviewApproved ? '确认发布' : '确认拒绝'" :confirm-loading="reviewLoading" @ok="review">
       <p>{{ reviewRequest?.name }} · {{ reviewRequest?.personal_slug }}</p>
       <a-radio-group v-if="reviewApproved" v-model:value="reviewScope" class="market-review-scope">
-        <a-radio value="department">本部门</a-radio><a-radio v-if="userStore.isSuperAdmin" value="global">全公司</a-radio>
+        <a-radio value="department">申请提交时所属部门（{{ reviewDepartmentName }}）</a-radio><a-radio v-if="userStore.isSuperAdmin" value="global">全公司</a-radio>
       </a-radio-group>
+      <a-alert v-if="reviewApproved && reviewScope === 'department'" type="info" show-icon :message="reviewDepartmentNotice" />
       <a-textarea v-model:value="reviewNote" placeholder="审核意见（可选）" :rows="3" :maxlength="2000" />
     </a-modal>
   </section>
@@ -200,17 +246,19 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { Blocks, BookOpen, ChevronRight, ClipboardList, Download, Heart, Sparkles, Store } from '@lucide/vue'
+import { Blocks, BookOpen, ChartNoAxesColumn, ChevronRight, ClipboardList, Download, Heart, PanelRightClose, PanelRightOpen, Sparkles, Store } from '@lucide/vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import SkillCardList from '@/components/extensions/SkillCardList.vue'
 import { combineSkillCards, filterSkillCards, personalSkillItems } from '@/components/extensions/skillHubCatalog'
 import { useUserStore } from '@/stores/user'
+import { departmentApi } from '@/apis/department_api'
 import {
   getMarketSkill,
   getMarketSkillFile,
   getMarketSkillTree,
   installMarketSkill,
   listMarketRequests,
+  listMarketRankings,
   listMarketSkills,
   listSkillCards,
   getSkillShareSnapshotTree,
@@ -224,10 +272,9 @@ import {
 
 const router = useRouter()
 const userStore = useUserStore()
-const sortOptions = [
-  { label: '最新发布', value: 'recent' },
-  { label: '安装排行', value: 'installs' },
-  { label: '点赞排行', value: 'likes' }
+const rankingMetricOptions = [
+  { label: '安装榜', value: 'installs' },
+  { label: '点赞榜', value: 'likes' }
 ]
 const sourceFilters = [
   { key: 'all', label: '全部' },
@@ -237,8 +284,30 @@ const sourceFilters = [
   { key: 'installed', label: '已安装' }
 ]
 const query = ref('')
-const sort = ref('recent')
 const sourceFilter = ref('all')
+const personalOpen = ref(true)
+const rankingsOpen = ref(false)
+const rankingMetric = ref('installs')
+const rankingScope = ref('company')
+const rankingDepartmentId = ref(userStore.departmentId ? Number(userStore.departmentId) : undefined)
+const departmentNames = ref({})
+const departmentLoading = ref(false)
+const departmentError = ref('')
+const rankingDepartmentOptions = computed(() => Object.entries(departmentNames.value).map(([id, name]) => ({ value: Number(id), label: name })))
+const rankingScopeOptions = computed(() => [
+  { label: '全公司', value: 'company' },
+  { label: userStore.isSuperAdmin ? '单部门' : '本部门', value: 'department', disabled: !userStore.departmentId && !rankingDepartmentOptions.value.length }
+])
+const rankingScopeHint = computed(() => {
+  if (rankingScope.value === 'company') return '按全公司当前成员统计'
+  const departmentId = userStore.isSuperAdmin ? rankingDepartmentId.value : userStore.departmentId
+  const departmentName = departmentNames.value[departmentId] || (Number(departmentId) === Number(userStore.departmentId) ? userStore.departmentName : '') || `部门 ${departmentId}`
+  return `按${departmentName}当前成员统计`
+})
+const rankings = ref([])
+const rankingsLoading = ref(false)
+const rankingError = ref('')
+let rankingRequestSequence = 0
 const cards = ref([])
 const installedCards = ref([])
 const legacyCards = ref([])
@@ -291,6 +360,13 @@ const reviewApproved = ref(true)
 const reviewRequest = ref(null)
 const reviewScope = ref('department')
 const reviewNote = ref('')
+const reviewDepartmentName = computed(() => departmentNames.value[reviewRequest.value?.owner_department_id] || `部门 ${reviewRequest.value?.owner_department_id || '未分配'}`)
+const reviewDepartmentNotice = computed(() => {
+  const departmentId = reviewRequest.value?.owner_department_id
+  if (!departmentId) return '申请人未分配部门，无法按部门发布。'
+  if (!userStore.isSuperAdmin && Number(userStore.departmentId) !== Number(departmentId)) return '申请提交时所属部门成员和超级管理员可见。你当前不属于该部门，发布后不会在你的市场目录出现。'
+  return '申请提交时所属部门成员和超级管理员可在市场查看和安装。'
+})
 const snapshotOpen = ref(false)
 const snapshotLoading = ref(false)
 const snapshotFiles = ref([])
@@ -301,10 +377,18 @@ const snapshotRequestId = ref('')
 
 const errorText = (failure) => failure?.response?.data?.detail || failure?.message || '操作失败，请稍后重试'
 const flattenFiles = (nodes) => nodes.flatMap((node) => node.is_dir ? flattenFiles(node.children || []) : [node])
+const marketScopeLabel = (item) => {
+  if (item.scope === 'global') return '全公司'
+  if (Number(item.department_id) === Number(userStore.departmentId)) return '本部门'
+  return departmentNames.value[item.department_id] || `部门 ${item.department_id}`
+}
 const sourceLabel = (item) => item.kind === 'market'
-  ? `市场 · ${item.scope === 'global' ? '全公司' : '本部门'}`
+  ? `市场 · ${marketScopeLabel(item)}`
   : item.source_type === 'builtin' ? '系统内置' : '共享技能'
 const requestStatusLabel = (status) => ({ pending: '待审核', approved: '已发布', rejected: '已驳回' })[status] || status
+const requestScopeLabel = (request) => request.read_scope?.access_level === 'global'
+  ? '全公司可见'
+  : `${departmentNames.value[request.owner_department_id] || `部门 ${request.owner_department_id || '未分配'}`}及超级管理员可见`
 
 function openCard(item) {
   if (item.kind === 'market') return openDetail(item.slug)
@@ -320,6 +404,32 @@ function selectSourceFilter(key) {
   const previous = sourceFilter.value
   sourceFilter.value = key
   if (key === 'installed' || previous === 'installed') refresh()
+}
+
+function openRankings() {
+  rankingsOpen.value = true
+  if (userStore.isSuperAdmin && !rankingDepartmentOptions.value.length) fetchDepartmentNames()
+  fetchRankings()
+}
+
+async function fetchRankings() {
+  const requestId = ++rankingRequestSequence
+  rankingsLoading.value = true
+  rankingError.value = ''
+  rankings.value = []
+  try {
+    const result = await listMarketRankings({
+      metric: rankingMetric.value,
+      scope: rankingScope.value,
+      departmentId: rankingScope.value === 'department' && userStore.isSuperAdmin ? rankingDepartmentId.value : undefined,
+      limit: 20
+    })
+    if (requestId === rankingRequestSequence) rankings.value = result?.data || []
+  } catch (failure) {
+    if (requestId === rankingRequestSequence) rankingError.value = errorText(failure)
+  } finally {
+    if (requestId === rankingRequestSequence) rankingsLoading.value = false
+  }
 }
 
 async function fetchLegacy() {
@@ -363,6 +473,24 @@ async function fetchRequests() {
   }
 }
 
+async function fetchDepartmentNames() {
+  if (!userStore.isAdmin || departmentLoading.value) return
+  departmentLoading.value = true
+  departmentError.value = ''
+  try {
+    const result = await departmentApi.getDepartments()
+    departmentNames.value = Object.fromEntries((result?.departments || result || []).map((item) => [item.id, item.name]))
+    if (userStore.isSuperAdmin && !rankingDepartmentOptions.value.some((item) => item.value === rankingDepartmentId.value)) {
+      rankingDepartmentId.value = rankingDepartmentOptions.value[0]?.value
+    }
+    if (rankingsOpen.value && rankingScope.value === 'department') fetchRankings()
+  } catch (failure) {
+    departmentError.value = errorText(failure)
+  } finally {
+    departmentLoading.value = false
+  }
+}
+
 async function refresh() {
   const requestId = ++requestSequence
   loading.value = true
@@ -371,7 +499,7 @@ async function refresh() {
   const legacyRefresh = fetchLegacy()
   const installedRefresh = fetchInstalled().catch((failure) => { if (requestId === requestSequence) error.value = errorText(failure) })
   try {
-    const items = (await listMarketSkills({ query: query.value, sort: sort.value, installedOnly: sourceFilter.value === 'installed', limit: pageSize }))?.data || []
+    const items = (await listMarketSkills({ query: query.value, installedOnly: sourceFilter.value === 'installed', limit: pageSize }))?.data || []
     if (requestId !== requestSequence) return
     cards.value = items
     hasMore.value = items.length === pageSize
@@ -388,7 +516,7 @@ async function loadMore() {
   const requestId = requestSequence
   loadingMore.value = true
   try {
-    const items = (await listMarketSkills({ query: query.value, sort: sort.value, installedOnly: sourceFilter.value === 'installed', offset: cards.value.length, limit: pageSize }))?.data || []
+    const items = (await listMarketSkills({ query: query.value, installedOnly: sourceFilter.value === 'installed', offset: cards.value.length, limit: pageSize }))?.data || []
     if (requestId !== requestSequence) return
     cards.value = [...cards.value, ...items]
     hasMore.value = items.length === pageSize
@@ -438,6 +566,7 @@ async function act(item) {
     cards.value = cards.value.map((card) => card.slug === item.slug ? result.data : card)
     installedCards.value = installedCards.value.filter((card) => card.slug !== item.slug).concat(result.data)
     fetchInstalled().catch(() => message.warning('已安装，个人列表刷新失败，请稍后重试'))
+    if (rankingsOpen.value) fetchRankings()
     if (detail.value?.slug === item.slug) detail.value = result.data
     message.success(item.installed_version ? '已升级到最新审核版本' : '已安装，可在 Agent 中使用')
   } catch (failure) {
@@ -452,6 +581,7 @@ async function like(item) {
   try {
     const result = await toggleMarketSkillLike(item.slug)
     cards.value = cards.value.map((card) => card.slug === item.slug ? result.data : card)
+    if (rankingsOpen.value) fetchRankings()
     if (detail.value?.slug === item.slug) detail.value = result.data
   } catch (failure) {
     message.error(errorText(failure))
@@ -547,10 +677,16 @@ function openReview(request, approved) {
 async function review() {
   reviewLoading.value = true
   try {
-    await reviewMarketSkill(reviewRequest.value.id, reviewApproved.value, reviewScope.value, reviewNote.value)
+    const result = await reviewMarketSkill(reviewRequest.value.id, reviewApproved.value, reviewScope.value, reviewNote.value)
     reviewOpen.value = false
+    const outsideDepartment = reviewApproved.value && reviewScope.value === 'department' && !userStore.isSuperAdmin && Number(userStore.departmentId) !== Number(result.data.owner_department_id)
+    if (reviewApproved.value && !outsideDepartment) {
+      query.value = ''
+      sourceFilter.value = 'market'
+    }
     await Promise.all([openRequests(), refresh()])
-    message.success(reviewApproved.value ? '已发布到 Skill 市场' : '已拒绝申请')
+    if (outsideDepartment) message.info('已发布到申请提交时所属部门；当前账号不在该部门，市场目录不会展示此技能')
+    else message.success(reviewApproved.value ? '已发布到市场，可在市场分类查看' : '已拒绝申请')
   } catch (failure) {
     message.error(errorText(failure))
   } finally {
@@ -559,13 +695,14 @@ async function review() {
 }
 
 watch(managementOpen, (open) => { if (!open) refresh() })
-onMounted(() => { refresh(); fetchRequests() })
+onMounted(() => { refresh(); fetchRequests(); fetchDepartmentNames() })
 defineExpose({ loading: computed(() => loading.value || legacyLoading.value || installedLoading.value) })
 </script>
 
 <style scoped lang="less">
 .skill-market { min-height: 100%; color: var(--color-text); }
 .skill-hub-layout { display: grid; grid-template-columns: minmax(0, 1fr) 318px; min-height: 100%; }
+.skill-hub-layout.personal-collapsed { grid-template-columns: minmax(0, 1fr); }
 .skill-hub-main { min-width: 0; padding: 28px var(--page-padding) 48px; }
 .market-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 25px; }
 .market-heading-copy { display: flex; align-items: center; gap: 13px; min-width: 0; }
@@ -574,8 +711,21 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .market-heading p { margin: 0; color: var(--color-text-secondary); font-size: 13px; }
 .market-heading-actions, .market-toolbar { display: flex; align-items: center; gap: 10px; }
 .market-heading-actions { flex: none; }
+.personal-toggle { display: inline-flex; align-items: center; gap: 7px; }
 .market-toolbar { flex-wrap: wrap; justify-content: space-between; margin-bottom: 18px; }
 .market-search { width: min(370px, 100%); }
+.market-subtools { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: -7px 0 16px; color: var(--color-text-secondary); font-size: 13px; }
+.market-subtools :deep(.ant-btn) { display: inline-flex; align-items: center; gap: 7px; }
+.ranking-controls { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.ranking-department-select { min-width: 160px; flex: 1; }
+.ranking-hint { margin-bottom: 18px; color: var(--color-text-secondary); font-size: 12px; }
+.ranking-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.ranking-list li { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 11px; border: 1px solid var(--gray-150); border-radius: 9px; }
+.ranking-position { display: grid; flex: none; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: var(--main-50); color: var(--main-600); font-weight: 700; }
+.ranking-copy { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.ranking-copy strong, .ranking-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ranking-copy small { color: var(--color-text-tertiary); font-size: 11px; }
+.ranking-count { flex: none; color: var(--color-text-secondary); font-size: 12px; }
 .market-filters { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--gray-150); margin-bottom: 22px; }
 .market-filters button { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 10px 14px 11px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--color-text-secondary); cursor: pointer; font-size: 13px; }
 .market-filters button.active { color: var(--main-600); border-bottom-color: var(--main-500); font-weight: 600; }
@@ -625,12 +775,13 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .market-detail-heading span, .market-detail-meta { color: var(--color-text-secondary); font-size: 13px; }
 .market-detail > p { margin: 18px 0; line-height: 1.6; }
 .market-detail-meta, .market-dependencies { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 16px 0; }
-.market-files { display: grid; grid-template-columns: 180px minmax(0, 1fr); min-height: 260px; max-height: 400px; overflow: hidden; border: 1px solid var(--gray-150); border-radius: 10px; margin-top: 18px; }
-.market-files-list { overflow: auto; display: flex; flex-direction: column; padding: 10px; border-right: 1px solid var(--gray-150); }
+.market-files { display: grid; grid-template-columns: 180px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); height: min(54vh, 400px); min-height: 260px; overflow: hidden; border: 1px solid var(--gray-150); border-radius: 10px; margin-top: 18px; }
+.snapshot-files { height: min(58vh, 520px); }
+.market-files-list { min-height: 0; overflow: auto; display: flex; flex-direction: column; padding: 10px; border-right: 1px solid var(--gray-150); }
 .market-files-list strong { padding: 7px; }
 .market-files-list button { border: 0; background: none; text-align: left; padding: 7px; border-radius: 6px; color: var(--color-text-secondary); cursor: pointer; overflow-wrap: anywhere; }
 .market-files-list button.active { color: var(--color-primary-700); background: var(--color-primary-50); }
-.market-file-content { overflow: auto; padding: 16px; }
+.market-file-content { min-height: 0; overflow: auto; padding: 16px; }
 .market-detail-actions { justify-content: flex-end; margin-top: 20px; }
 .market-submit-select { display: block; width: 100%; margin: 18px 0; }
 .market-request { padding: 16px 0; border-bottom: 1px solid var(--gray-150); }
@@ -638,5 +789,6 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .market-request-actions { justify-content: flex-end; margin-top: 10px; }
 .market-review-scope { display: block; margin: 18px 0; }
 @media (max-width: 1100px) { .skill-hub-layout { grid-template-columns: minmax(0, 1fr); } .personal-space { border-left: 0; border-top: 1px solid var(--gray-150); } }
-@media (max-width: 680px) { .market-heading { align-items: start; flex-direction: column; } .market-heading-actions { width: 100%; } .market-heading-actions :deep(.ant-btn) { flex: 1; } .market-files { grid-template-columns: 1fr; } .market-files-list { max-height: 120px; border-right: 0; border-bottom: 1px solid var(--gray-150); } .market-card-bottom { flex-wrap: wrap; } }
+@media (max-width: 680px) { .market-heading { align-items: start; flex-direction: column; } .market-heading-actions { width: 100%; flex-wrap: wrap; } .market-heading-actions :deep(.ant-btn) { flex: 1; } .market-files { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); } .market-files-list { max-height: 120px; border-right: 0; border-bottom: 1px solid var(--gray-150); } .market-card-bottom { flex-wrap: wrap; } }
+@media (max-width: 480px) { .ranking-list li { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; } .ranking-position { grid-column: 1; grid-row: 1; } .ranking-copy { grid-column: 2 / 4; grid-row: 1; } .ranking-count { grid-column: 2; grid-row: 2; } .ranking-list li :deep(.ant-btn) { grid-column: 3; grid-row: 2; } }
 </style>

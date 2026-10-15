@@ -1,6 +1,6 @@
 """内部 Skill 市场的 PostgreSQL 查询。"""
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_business import (
@@ -18,6 +18,18 @@ class MarketSkillRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
 
+    @staticmethod
+    def _visible_filter(user: User):
+        """约束市场条目只能被当前用户所在组织看到。"""
+        if user.role == "superadmin":
+            return true()
+        if user.department_id is None:
+            return MarketSkill.scope == "global"
+        return or_(
+            MarketSkill.scope == "global",
+            (MarketSkill.scope == "department") & (MarketSkill.department_id == user.department_id),
+        )
+
     async def visible(
         self,
         user: User,
@@ -30,16 +42,7 @@ class MarketSkillRepository:
         limit: int = 100,
     ) -> list[MarketSkill]:
         """只返回当前用户可见的市场条目。"""
-        statement = select(MarketSkill).where(MarketSkill.latest_release_id.is_not(None))
-        if user.department_id is None:
-            statement = statement.where(MarketSkill.scope == "global")
-        else:
-            statement = statement.where(
-                or_(
-                    MarketSkill.scope == "global",
-                    (MarketSkill.scope == "department") & (MarketSkill.department_id == user.department_id),
-                )
-            )
+        statement = select(MarketSkill).where(MarketSkill.latest_release_id.is_not(None), self._visible_filter(user))
         if query.strip():
             pattern = f"%{query.strip()}%"
             statement = statement.join(
@@ -80,6 +83,44 @@ class MarketSkillRepository:
         else:
             statement = statement.order_by(MarketSkill.updated_at.desc(), MarketSkill.id.desc())
         return list((await self.db.scalars(statement.offset(offset).limit(limit))).all())
+
+    async def ranked_visible(
+        self,
+        user: User,
+        *,
+        metric: str,
+        department_id: int | None,
+        offset: int,
+        limit: int,
+    ) -> list[tuple[MarketSkill, int, int]]:
+        """按活跃用户当前部门统计并排序可见的市场条目。"""
+
+        def count_for(model):
+            """计算符合当前榜单范围的用户行为数。"""
+            statement = (
+                select(func.count())
+                .select_from(model)
+                .join(User, User.uid == model.uid)
+                .where(model.market_skill_id == MarketSkill.id, User.is_deleted == 0)
+            )
+            if department_id is not None:
+                statement = statement.where(User.department_id == department_id)
+            return statement.correlate(MarketSkill).scalar_subquery()
+
+        installs = count_for(MarketSkillInstall)
+        likes = count_for(MarketSkillLike)
+        sort_count = installs if metric == "installs" else likes
+        statement = (
+            select(MarketSkill, installs, likes)
+            .where(MarketSkill.latest_release_id.is_not(None), self._visible_filter(user), sort_count > 0)
+            .order_by(sort_count.desc(), MarketSkill.updated_at.desc(), MarketSkill.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return [
+            (item, int(install_count), int(like_count))
+            for item, install_count, like_count in (await self.db.execute(statement)).all()
+        ]
 
     async def visible_by_slug(self, user: User, slug: str) -> MarketSkill | None:
         """在可见目录中按稳定 slug 定位条目。"""

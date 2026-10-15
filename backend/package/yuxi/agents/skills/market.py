@@ -27,6 +27,7 @@ from yuxi.agents.skills.service import (
 )
 from yuxi.agents.skills.sharing import authorized_share_snapshot_path, submit_skill_share_request
 from yuxi.config import get_skill_data_dir
+from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.storage.postgres.models_business import (
     MarketSkill,
     MarketSkillInstall,
@@ -46,8 +47,10 @@ def market_projection_slug(release_id: str) -> str:
 
 def market_skill_visible(item: MarketSkill, user: User) -> bool:
     """判断条目是否在用户当前组织范围内。"""
-    return item.scope == "global" or (
-        item.scope == "department" and user.department_id is not None and item.department_id == user.department_id
+    return (
+        user.role == "superadmin"
+        or item.scope == "global"
+        or (item.scope == "department" and user.department_id is not None and item.department_id == user.department_id)
     )
 
 
@@ -233,6 +236,42 @@ async def list_market_skills(
     return cards
 
 
+async def list_market_rankings(
+    db: AsyncSession,
+    *,
+    user: User,
+    metric: str,
+    scope: str,
+    department_id: int | None = None,
+    offset: int = 0,
+    limit: int = 100,
+) -> list[dict]:
+    """按全公司或当前部门的活跃用户安装、点赞数列出排行榜。"""
+    if metric not in {"installs", "likes"}:
+        raise ValueError("无效的排行榜指标")
+    if scope not in {"company", "department"}:
+        raise ValueError("无效的排行榜范围")
+    if scope == "company" and department_id is not None:
+        raise ValueError("全公司排行榜不能指定部门")
+
+    if scope == "department":
+        department_id = department_id if department_id is not None else user.department_id
+        if department_id is None:
+            raise ValueError("当前用户未绑定部门，无法查看本部门排行榜")
+        if user.role != "superadmin" and department_id != user.department_id:
+            raise ValueError("无权查看其他部门排行榜")
+        if await DepartmentRepository(db).get_by_id(department_id) is None:
+            raise ValueError("部门不存在")
+
+    repo = MarketSkillRepository(db)
+    return [
+        await _market_card(db, repo, listing, user, metrics=(install_count, like_count))
+        for listing, install_count, like_count in await repo.ranked_visible(
+            user, metric=metric, department_id=department_id, offset=offset, limit=limit
+        )
+    ]
+
+
 async def get_market_skill(db: AsyncSession, *, slug: str, user: User) -> dict:
     """读取可见条目的详情与版本列表。"""
     repo = MarketSkillRepository(db)
@@ -247,12 +286,19 @@ async def get_market_skill(db: AsyncSession, *, slug: str, user: User) -> dict:
     return card
 
 
-async def _market_card(db: AsyncSession, repo: MarketSkillRepository, listing: MarketSkill, user: User) -> dict:
+async def _market_card(
+    db: AsyncSession,
+    repo: MarketSkillRepository,
+    listing: MarketSkill,
+    user: User,
+    *,
+    metrics: tuple[int, int] | None = None,
+) -> dict:
     """组合当前版本、作者、指标和用户安装状态。"""
     release = await repo.release(listing.latest_release_id)
     install = await repo.install(str(user.uid), listing.id)
     installed_release = await repo.release(install.release_id) if install is not None else None
-    install_count, like_count = await repo.metrics(listing.id)
+    install_count, like_count = metrics if metrics is not None else await repo.metrics(listing.id)
     owner = await db.scalar(select(User.username).where(User.uid == listing.owner_uid))
     return {
         "slug": listing.slug,

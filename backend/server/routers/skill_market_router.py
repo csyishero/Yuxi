@@ -8,6 +8,7 @@ from server.utils.auth_middleware import get_admin_user, get_db, get_required_us
 from yuxi.agents.skills.market import (
     get_market_skill,
     install_market_skill,
+    list_market_rankings,
     list_market_skills,
     market_skill_file,
     market_skill_tree,
@@ -67,6 +68,28 @@ async def list_market_route(
 async def list_market_requests_route(user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
     """查看本人或授权范围内的市场审核申请。"""
     return {"success": True, "data": await list_skill_share_requests(db, operator=user, channel="market")}
+
+
+@market_router.get("/-/rankings")
+async def list_market_rankings_route(
+    metric: str = Query("installs"),
+    scope: str = Query("company"),
+    department_id: int | None = Query(None, ge=1),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
+    user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """返回当前用户可见的市场技能排行。"""
+    try:
+        return {
+            "success": True,
+            "data": await list_market_rankings(
+                db, user=user, metric=metric, scope=scope, department_id=department_id, offset=offset, limit=limit
+            ),
+        }
+    except ValueError as exc:
+        _raise_market_error(exc)
 
 
 @market_router.post("/personal/{slug}/submit")
