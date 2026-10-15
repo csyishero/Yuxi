@@ -4,9 +4,10 @@ const BASE_URL = '/api/system/skills'
 const USER_BASE_URL = '/api/skills'
 const MARKET_BASE_URL = '/api/skill-market'
 
-export const listMarketSkills = async ({ query = '', sort = 'recent', installedOnly = false, offset = 0, limit = 100 } = {}) => {
+export const listMarketSkills = async ({ query = '', sort = 'recent', category, installedOnly = false, offset = 0, limit = 100 } = {}) => {
   const params = new URLSearchParams({ sort, offset: String(offset), limit: String(limit) })
   if (query.trim()) params.set('query', query.trim())
+  if (category && category !== 'all') params.set('category', category)
   if (installedOnly) params.set('installed_only', 'true')
   return apiGet(`${MARKET_BASE_URL}?${params}`)
 }
@@ -24,8 +25,8 @@ export const getMarketSkillFile = async (slug, path = 'SKILL.md') =>
 export const installMarketSkill = async (slug) => apiPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/install`)
 export const upgradeMarketSkill = async (slug) => apiPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/upgrade`)
 export const toggleMarketSkillLike = async (slug) => apiPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/like`)
-export const submitMarketSkill = async (slug, applicationReason) =>
-  apiPost(`${MARKET_BASE_URL}/personal/${encodeURIComponent(slug)}/submit`, { application_reason: applicationReason })
+export const submitMarketSkill = async (slug, applicationReason, category) =>
+  apiPost(`${MARKET_BASE_URL}/personal/${encodeURIComponent(slug)}/submit`, { application_reason: applicationReason, category })
 export const listMarketRequests = async () => apiGet(`${MARKET_BASE_URL}/requests`)
 export const reviewMarketSkill = async (requestId, approved, scope, note) =>
   apiAdminPost(`${MARKET_BASE_URL}/requests/${encodeURIComponent(requestId)}/${approved ? 'approve' : 'reject'}`, {
@@ -87,18 +88,20 @@ export const searchRemoteSkills = async (query) => {
   return apiPost(`${USER_BASE_URL}/remote/search`, { query })
 }
 
-export const confirmSkillInstallDraft = async (draftId, shareConfig, slugs) => {
+export const confirmSkillInstallDraft = async (draftId, shareConfig, slugs, categories = {}) => {
   return apiPost(`${USER_BASE_URL}/install-drafts/${encodeURIComponent(draftId)}/confirm`, {
     share_config: shareConfig,
-    slugs
+    slugs,
+    categories
   })
 }
 
-export const confirmPersonalSkillInstallDraft = async (draftId, slugs) => {
+export const confirmPersonalSkillInstallDraft = async (draftId, slugs, categories = {}) => {
   return apiPost(
     `${USER_BASE_URL}/personal/install-drafts/${encodeURIComponent(draftId)}/confirm`,
     {
-      slugs
+      slugs,
+      categories
     }
   )
 }

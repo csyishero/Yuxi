@@ -378,6 +378,7 @@ class Skill(Base):
     slug = Column(String(128), nullable=False, unique=True, index=True, comment="技能唯一标识（目录名）")
     name = Column(String(128), nullable=False, comment="技能名称（来自 SKILL.md frontmatter.name）")
     description = Column(Text, nullable=False, comment="技能描述（来自 SKILL.md frontmatter.description）")
+    category = Column(String(32), nullable=False, default="other", comment="技能分类")
     source_type = Column(
         String(32), nullable=False, default="upload", index=True, comment="来源: builtin/upload/remote"
     )
@@ -400,6 +401,7 @@ class Skill(Base):
             "slug": self.slug,
             "name": self.name,
             "description": self.description,
+            "category": self.category or "other",
             "source_type": self.source_type,
             "tool_dependencies": self.tool_dependencies or [],
             "mcp_dependencies": self.mcp_dependencies or [],
@@ -427,6 +429,7 @@ class SkillShareRequest(Base):
     personal_slug = Column(String(128), nullable=False)
     name = Column(String(128), nullable=False)
     description = Column(Text, nullable=False)
+    category = Column(String(32), nullable=False, default="other")
     content_hash = Column(String(128), nullable=False)
     application_reason = Column(Text, nullable=True)
     channel = Column(String(16), nullable=False, default="shared")
@@ -461,6 +464,7 @@ class SkillShareRequest(Base):
             "personal_slug": self.personal_slug,
             "name": self.name,
             "description": self.description,
+            "category": self.category or "other",
             "content_hash": self.content_hash,
             "application_reason": self.application_reason,
             "channel": self.channel,
@@ -511,6 +515,7 @@ class MarketSkillRelease(Base):
     version = Column(Integer, nullable=False)
     name = Column(String(128), nullable=False)
     description = Column(Text, nullable=False)
+    category = Column(String(32), nullable=False, default="other")
     dir_path = Column(String(512), nullable=False)
     content_hash = Column(String(128), nullable=False)
     tool_dependencies = Column(JSON_VALUE, nullable=False, default=list)

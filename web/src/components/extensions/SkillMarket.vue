@@ -43,6 +43,11 @@
           >{{ filter.label }}</button>
         </nav>
 
+        <nav class="market-categories" aria-label="技能方向筛选">
+          <button type="button" :class="{ active: selectedCategory === 'all' }" :aria-current="selectedCategory === 'all' ? 'page' : undefined" @click="selectCategory('all')">全部方向</button>
+          <button v-for="category in skillCategories" :key="category.value" type="button" :class="{ active: selectedCategory === category.value }" :aria-current="selectedCategory === category.value ? 'page' : undefined" @click="selectCategory(category.value)">{{ category.label }}</button>
+        </nav>
+
         <div v-if="sourceFilter === 'market'" class="market-subtools">
           <span>市场技能按发布时间展示</span>
           <a-button @click="openRankings"><ChartNoAxesColumn :size="16" /> 查看排行榜</a-button>
@@ -54,14 +59,14 @@
         <a-spin :spinning="loading || legacyLoading">
           <div v-if="!visibleCards.length && !loading && !legacyLoading" class="market-empty">
             <Store :size="28" />
-            <strong>{{ query ? '没有找到匹配的技能' : '这里还没有技能' }}</strong>
-            <span>{{ query ? '换个关键词试试。' : '可以上传个人技能，或请同事发布到市场。' }}</span>
+            <strong>{{ query ? '没有找到匹配的技能' : selectedCategory !== 'all' ? '这个方向还没有技能' : '这里还没有技能' }}</strong>
+            <span>{{ query ? '换个关键词试试。' : selectedCategory !== 'all' ? '切换方向或上传新技能。' : '可以上传个人技能，或请同事发布到市场。' }}</span>
           </div>
           <div v-else class="market-grid">
             <article v-for="item in visibleCards" :key="`${item.kind}:${item.source_type || ''}:${item.owner_uid || ''}:${item.slug}`" class="market-card">
               <div class="market-card-top">
                 <div class="market-icon"><Sparkles v-if="item.kind === 'market'" :size="20" /><BookOpen v-else :size="20" /></div>
-                <span class="market-scope">{{ sourceLabel(item) }}</span>
+                <div class="market-card-labels"><span class="market-category-label">{{ skillCategoryLabel(item.category) }}</span><span class="market-scope">{{ sourceLabel(item) }}</span></div>
               </div>
               <button type="button" class="market-card-title" @click="openCard(item)">{{ item.name }}</button>
               <p>{{ item.description || '暂无描述' }}</p>
@@ -107,7 +112,7 @@
             <div v-else class="personal-list">
               <button v-for="item in filteredPersonalItems" :key="`${item.kind}:${item.slug}`" type="button" class="personal-item" @click="openPersonalItem(item)">
                 <span class="personal-item-icon"><BookOpen :size="17" /></span>
-                <span class="personal-item-copy"><strong>{{ item.name }}</strong><small>{{ item.kind === 'market' ? `市场已安装 · v${item.installed_version}` : '个人技能' }}</small></span>
+                <span class="personal-item-copy"><strong>{{ item.name }}</strong><small>{{ item.kind === 'market' ? `市场已安装 · v${item.installed_version}` : '个人技能' }} · {{ skillCategoryLabel(item.category) }}</small></span>
                 <ChevronRight :size="15" class="personal-item-chevron" />
               </button>
             </div>
@@ -179,6 +184,7 @@
           </div>
           <p>{{ detail.description }}</p>
           <div class="market-detail-meta">
+            <span>方向 · {{ skillCategoryLabel(detail.category) }}</span>
             <span>当前版本 v{{ detail.latest_version }}</span>
             <span>已安装 {{ detail.installed_version ? `v${detail.installed_version}` : '—' }}</span>
             <span>{{ detail.install_count }} 人安装</span>
@@ -206,7 +212,8 @@
 
     <a-modal v-model:open="submitOpen" title="申请发布 Skill" ok-text="提交审核" :confirm-loading="submitLoading" @ok="submit">
       <p>从你的个人 Skill 中选择一项。提交时会保存不可变快照，管理员审核该快照。</p>
-      <a-select v-model:value="submitSlug" placeholder="选择个人 Skill" class="market-submit-select" :options="personalOptions" />
+      <label class="market-submit-field"><span>个人 Skill</span><a-select v-model:value="submitSlug" placeholder="选择个人 Skill" :options="personalOptions" @change="selectSubmitSkill" /></label>
+      <label class="market-submit-field"><span>技能方向</span><a-select v-model:value="submitCategory" :options="skillCategories" aria-label="发布技能方向" /></label>
       <a-textarea v-model:value="submitReason" placeholder="说明使用场景和适用人群" :rows="4" :maxlength="1000" show-count />
     </a-modal>
 
@@ -216,7 +223,7 @@
         <div v-for="request in requests" :key="request.id" class="market-request">
           <div class="market-request-title"><strong>{{ request.name }}</strong><a-tag>{{ request.status === 'pending' ? '待审核' : request.status === 'approved' ? '已发布' : '已拒绝' }}</a-tag></div>
           <p>{{ request.application_reason }}</p>
-          <div class="market-request-meta">{{ request.owner_uid }} · {{ request.personal_slug }} <span v-if="request.status === 'approved'">· {{ requestScopeLabel(request) }}</span><span v-if="request.review_note"> · {{ request.review_note }}</span></div>
+          <div class="market-request-meta">{{ request.owner_uid }} · {{ request.personal_slug }} · {{ skillCategoryLabel(request.category) }} <span v-if="request.status === 'approved'">· {{ requestScopeLabel(request) }}</span><span v-if="request.review_note"> · {{ request.review_note }}</span></div>
           <div v-if="request.status === 'pending' && userStore.isAdmin" class="market-request-actions">
             <a-button size="small" @click="previewRequest(request)">查看提交快照</a-button>
             <a-button size="small" type="primary" @click="openReview(request, true)">批准</a-button>
@@ -250,6 +257,7 @@ import { Blocks, BookOpen, ChartNoAxesColumn, ChevronRight, ClipboardList, Downl
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import SkillCardList from '@/components/extensions/SkillCardList.vue'
 import { combineSkillCards, filterSkillCards, personalSkillItems } from '@/components/extensions/skillHubCatalog'
+import { skillCategories, skillCategory, skillCategoryLabel } from '@/components/extensions/skillCategories'
 import { useUserStore } from '@/stores/user'
 import { departmentApi } from '@/apis/department_api'
 import {
@@ -285,6 +293,7 @@ const sourceFilters = [
 ]
 const query = ref('')
 const sourceFilter = ref('all')
+const selectedCategory = ref('all')
 const personalOpen = ref(true)
 const rankingsOpen = ref(false)
 const rankingMetric = ref('installs')
@@ -325,7 +334,7 @@ const managementOpen = ref(false)
 const personalTab = ref('skills')
 const personalQuery = ref('')
 const combinedCards = computed(() => combineSkillCards(cards.value, legacyCards.value))
-const visibleCards = computed(() => filterSkillCards(combinedCards.value, query.value, sourceFilter.value))
+const visibleCards = computed(() => filterSkillCards(combinedCards.value, query.value, sourceFilter.value, selectedCategory.value))
 const personalItems = computed(() => personalSkillItems(legacyCards.value, installedCards.value, userStore.uid))
 const filteredPersonalItems = computed(() => {
   const search = personalQuery.value.trim().toLowerCase()
@@ -348,6 +357,7 @@ const dependencyLabels = computed(() => detail.value ? [
 const submitOpen = ref(false)
 const submitLoading = ref(false)
 const submitSlug = ref()
+const submitCategory = ref('other')
 const submitReason = ref('')
 const personalOptions = ref([])
 
@@ -404,6 +414,18 @@ function selectSourceFilter(key) {
   const previous = sourceFilter.value
   sourceFilter.value = key
   if (key === 'installed' || previous === 'installed') refresh()
+}
+
+/** 切换方向并重新加载该方向的市场分页。 */
+function selectCategory(category) {
+  if (selectedCategory.value === category) return
+  selectedCategory.value = category
+  refresh()
+}
+
+/** 从个人技能带出原有方向，提交时仍可修改。 */
+function selectSubmitSkill(slug) {
+  submitCategory.value = skillCategory(personalOptions.value.find((item) => item.value === slug)?.category)
 }
 
 function openRankings() {
@@ -499,7 +521,7 @@ async function refresh() {
   const legacyRefresh = fetchLegacy()
   const installedRefresh = fetchInstalled().catch((failure) => { if (requestId === requestSequence) error.value = errorText(failure) })
   try {
-    const items = (await listMarketSkills({ query: query.value, installedOnly: sourceFilter.value === 'installed', limit: pageSize }))?.data || []
+    const items = (await listMarketSkills({ query: query.value, category: selectedCategory.value, installedOnly: sourceFilter.value === 'installed', limit: pageSize }))?.data || []
     if (requestId !== requestSequence) return
     cards.value = items
     hasMore.value = items.length === pageSize
@@ -516,7 +538,7 @@ async function loadMore() {
   const requestId = requestSequence
   loadingMore.value = true
   try {
-    const items = (await listMarketSkills({ query: query.value, installedOnly: sourceFilter.value === 'installed', offset: cards.value.length, limit: pageSize }))?.data || []
+    const items = (await listMarketSkills({ query: query.value, category: selectedCategory.value, installedOnly: sourceFilter.value === 'installed', offset: cards.value.length, limit: pageSize }))?.data || []
     if (requestId !== requestSequence) return
     cards.value = [...cards.value, ...items]
     hasMore.value = items.length === pageSize
@@ -591,10 +613,12 @@ async function like(item) {
 }
 
 async function openSubmit() {
+  submitSlug.value = undefined
+  submitCategory.value = 'other'
   submitOpen.value = true
   try {
     const result = await listSkillCards()
-    personalOptions.value = (result?.data || []).filter((item) => item.source_scope === 'personal').map((item) => ({ label: `${item.name} · ${item.slug}`, value: item.slug }))
+    personalOptions.value = (result?.data || []).filter((item) => item.source_scope === 'personal' && (!item.owner_uid || item.owner_uid === userStore.uid)).map((item) => ({ label: `${item.name} · ${item.slug}`, value: item.slug, category: item.category }))
   } catch (failure) {
     message.error(errorText(failure))
   }
@@ -604,8 +628,10 @@ async function submit() {
   if (!submitSlug.value || !submitReason.value.trim()) return message.warning('请选择个人 Skill 并填写使用场景')
   submitLoading.value = true
   try {
-    await submitMarketSkill(submitSlug.value, submitReason.value.trim())
+    await submitMarketSkill(submitSlug.value, submitReason.value.trim(), submitCategory.value)
     submitOpen.value = false
+    submitSlug.value = undefined
+    submitCategory.value = 'other'
     submitReason.value = ''
     await fetchRequests()
     message.success('已提交审核')
@@ -731,12 +757,18 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .market-filters button.active { color: var(--main-600); border-bottom-color: var(--main-500); font-weight: 600; }
 .market-filters button:hover { color: var(--main-600); }
 .market-filters button span { color: var(--color-text-tertiary); font-size: 12px; }
+.market-categories { display: flex; gap: 8px; overflow-x: auto; padding: 0 0 14px; margin: -8px 0 17px; scrollbar-width: thin; }
+.market-categories button { flex: none; padding: 5px 11px; border: 1px solid var(--gray-150); border-radius: 999px; background: var(--color-bg-container); color: var(--color-text-secondary); cursor: pointer; font-size: 12px; }
+.market-categories button:hover { border-color: var(--main-400); color: var(--main-600); }
+.market-categories button.active { border-color: var(--main-500); background: var(--main-50); color: var(--main-600); font-weight: 600; }
 .market-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(235px, 1fr)); gap: 14px; }
 .market-more { display: flex; justify-content: center; margin-top: 22px; }
 .market-card { min-height: 235px; display: flex; flex-direction: column; padding: 18px; background: var(--color-bg-container); border: 1px solid var(--gray-150); border-radius: 12px; transition: border-color .2s, background-color .2s; }
 .market-card:hover { border-color: var(--main-400); background: var(--gray-0); }
 .market-card-top, .market-card-bottom, .market-detail-heading, .market-detail-actions, .market-request-title, .market-request-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .market-icon { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 10px; color: var(--main-600); background: var(--main-50); }
+.market-card-labels { display: grid; justify-items: end; gap: 3px; min-width: 0; }
+.market-category-label { color: var(--main-600); font-size: 12px; font-weight: 600; }
 .market-scope { font-size: 12px; color: var(--color-text-secondary); }
 .market-card-title { display: block; margin: 14px 0 1px; padding: 0; border: 0; background: none; color: inherit; text-align: left; font-size: 16px; font-weight: 650; cursor: pointer; }
 .market-card-title:hover { color: var(--main-600); }
@@ -770,7 +802,7 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .personal-item-chevron { flex: none; color: var(--color-text-tertiary); }
 .personal-empty { padding: 32px 12px; text-align: center; color: var(--color-text-secondary); font-size: 13px; }
 .personal-manage { margin-top: 14px; }
-.market-filters button:focus-visible, .personal-tabs button:focus-visible, .personal-item:focus-visible, .market-card-title:focus-visible { outline: 2px solid var(--main-500); outline-offset: 2px; }
+.market-filters button:focus-visible, .market-categories button:focus-visible, .personal-tabs button:focus-visible, .personal-item:focus-visible, .market-card-title:focus-visible { outline: 2px solid var(--main-500); outline-offset: 2px; }
 .market-detail-heading h3 { margin: 0 0 3px; font-size: 22px; }
 .market-detail-heading span, .market-detail-meta { color: var(--color-text-secondary); font-size: 13px; }
 .market-detail > p { margin: 18px 0; line-height: 1.6; }
@@ -783,7 +815,8 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .market-files-list button.active { color: var(--color-primary-700); background: var(--color-primary-50); }
 .market-file-content { min-height: 0; overflow: auto; padding: 16px; }
 .market-detail-actions { justify-content: flex-end; margin-top: 20px; }
-.market-submit-select { display: block; width: 100%; margin: 18px 0; }
+.market-submit-field { display: grid; gap: 6px; margin: 16px 0; color: var(--color-text-secondary); font-size: 13px; }
+.market-submit-field :deep(.ant-select) { width: 100%; }
 .market-request { padding: 16px 0; border-bottom: 1px solid var(--gray-150); }
 .market-request p { margin: 8px 0; color: var(--color-text-secondary); }
 .market-request-actions { justify-content: flex-end; margin-top: 10px; }

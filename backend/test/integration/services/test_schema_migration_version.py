@@ -286,7 +286,7 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
             "ix_scheduled_agent_runs_job_created",
             "ix_scheduled_agent_runs_dispatching",
         }.issubset(scheduled_indexes)
-        assert BUSINESS_SCHEMA_VERSION == 11
+        assert BUSINESS_SCHEMA_VERSION == 12
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 
@@ -345,7 +345,7 @@ async def test_skill_share_request_table_migrates_from_previous_business_schema(
             )
         assert nullable == "YES"
         assert "uq_skill_share_requests_pending" in indexes
-        assert BUSINESS_SCHEMA_VERSION == 11
+        assert BUSINESS_SCHEMA_VERSION == 12
         assert (await manager.get_schema_versions())["business"] == 8
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
@@ -402,6 +402,77 @@ async def test_skill_market_schema_migrates_v10_idempotently() -> None:
                 {"schema": schema},
             )
         assert columns == ["owner_uid", "personal_slug", "channel"]
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
+async def test_skill_category_schema_migrates_v11_rows_to_other_idempotently() -> None:
+    """v11 的技能、申请和市场版本保留原行并获得「其它」分类。"""
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_skill_category_schema")
+    try:
+        await manager.create_business_tables()
+        async with scoped_engine.begin() as connection:
+            for table in ("skills", "skill_share_requests", "market_skill_releases"):
+                await connection.execute(text(f"ALTER TABLE {table} DROP COLUMN category"))
+            await connection.execute(
+                text(
+                    "INSERT INTO skills (slug, name, description, source_type, tool_dependencies, "
+                    "mcp_dependencies, skill_dependencies, dir_path, share_config, enabled) "
+                    "VALUES ('old-shared', 'Old Shared', 'Old description', 'upload', '[]'::jsonb, "
+                    "'[]'::jsonb, '[]'::jsonb, 'shared/old-shared', '{}'::jsonb, TRUE)"
+                )
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO skill_share_requests "
+                    "(id, owner_uid, personal_slug, name, description, content_hash, channel, status, "
+                    "department_ids, created_at) VALUES "
+                    "('old-request', 'old-owner', 'old-market', 'Old Market', 'Old description', "
+                    "'old-hash', 'market', 'approved', '[]'::jsonb, NOW())"
+                )
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO market_skills "
+                    "(id, slug, owner_uid, personal_slug, scope, latest_release_id, created_at, updated_at) "
+                    "VALUES ('old-listing', 'old-market', 'old-owner', 'old-market', 'global', "
+                    "'old-release', NOW(), NOW())"
+                )
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO market_skill_releases "
+                    "(id, market_skill_id, version, name, description, dir_path, content_hash, "
+                    "tool_dependencies, mcp_dependencies, skill_dependencies, request_id, created_at) "
+                    "VALUES ('old-release', 'old-listing', 1, 'Old Market', 'Old description', "
+                    "'market/releases/old-release', 'old-hash', '[]'::jsonb, '[]'::jsonb, "
+                    "'[]'::jsonb, 'old-request', NOW())"
+                )
+            )
+        await manager.create_schema_version_table()
+        await manager.record_schema_version("business", 11)
+
+        await manager.ensure_skill_market_schema()
+        await manager.ensure_skill_market_schema()
+        async with scoped_engine.connect() as connection:
+            values = [
+                await connection.scalar(text("SELECT category FROM skills WHERE slug = 'old-shared'")),
+                await connection.scalar(text("SELECT category FROM skill_share_requests WHERE id = 'old-request'")),
+                await connection.scalar(text("SELECT category FROM market_skill_releases WHERE id = 'old-release'")),
+            ]
+            not_null = [
+                await connection.scalar(
+                    text(
+                        "SELECT is_nullable FROM information_schema.columns "
+                        "WHERE table_schema = :schema AND table_name = :table AND column_name = 'category'"
+                    ),
+                    {"schema": schema, "table": table},
+                )
+                for table in ("skills", "skill_share_requests", "market_skill_releases")
+            ]
+        assert values == ["other", "other", "other"]
+        assert not_null == ["NO", "NO", "NO"]
+        assert (await manager.get_schema_versions())["business"] == 11
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 

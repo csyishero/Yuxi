@@ -26,6 +26,7 @@ class MarketSubmission(BaseModel):
     """作者提交审核时填写的使用场景。"""
 
     application_reason: str = Field(..., min_length=1, max_length=1000)
+    category: str | None = Field(None, description="市场技能分类")
 
 
 class MarketReview(BaseModel):
@@ -45,6 +46,7 @@ def _raise_market_error(exc: ValueError) -> None:
 @market_router.get("")
 async def list_market_route(
     query: str = Query("", max_length=100),
+    category: str | None = Query(None),
     sort: str = Query("recent"),
     installed_only: bool = Query(False),
     offset: int = Query(0, ge=0),
@@ -57,7 +59,14 @@ async def list_market_route(
         return {
             "success": True,
             "data": await list_market_skills(
-                db, user=user, query=query, sort=sort, installed_only=installed_only, offset=offset, limit=limit
+                db,
+                user=user,
+                query=query,
+                category=category,
+                sort=sort,
+                installed_only=installed_only,
+                offset=offset,
+                limit=limit,
             ),
         }
     except ValueError as exc:
@@ -101,7 +110,9 @@ async def submit_market_route(
 ):
     """提交个人 Skill 的市场审核快照。"""
     try:
-        item = await submit_market_skill(db, slug=slug, application_reason=payload.application_reason, operator=user)
+        item = await submit_market_skill(
+            db, slug=slug, application_reason=payload.application_reason, category=payload.category, operator=user
+        )
         return {"success": True, "data": item.to_dict()}
     except ValueError as exc:
         _raise_market_error(exc)

@@ -207,11 +207,12 @@ def test_remote_skill_prepare_and_admin_confirm_routes(monkeypatch):
         captured["prepare"] = {"source": source, "skills": skills, "operator_uid": operator.uid}
         return {"draft_id": "draft-remote", "items": [{"slug": "frontend-design", "success": True}]}
 
-    async def fake_confirm_skill_install_draft(_db, *, draft_id, share_config, slugs, operator):
+    async def fake_confirm_skill_install_draft(_db, *, draft_id, share_config, slugs, categories, operator):
         captured["confirm"] = {
             "draft_id": draft_id,
             "share_config": share_config,
             "slugs": slugs,
+            "categories": categories,
             "operator_uid": operator.uid,
         }
         return [
@@ -236,6 +237,7 @@ def test_remote_skill_prepare_and_admin_confirm_routes(monkeypatch):
                 "manage_scope": None,
             },
             "slugs": ["frontend-design"],
+            "categories": {"frontend-design": "development_tools"},
         },
     )
 
@@ -249,6 +251,7 @@ def test_remote_skill_prepare_and_admin_confirm_routes(monkeypatch):
     }
     assert captured["confirm"]["draft_id"] == "draft-remote"
     assert captured["confirm"]["slugs"] == ["frontend-design"]
+    assert captured["confirm"]["categories"] == {"frontend-design": "development_tools"}
     assert captured["confirm"]["operator_uid"] == "admin"
 
 

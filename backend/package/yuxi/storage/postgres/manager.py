@@ -27,7 +27,7 @@ from yuxi.utils import logger
 from yuxi.utils.singleton import SingletonMeta
 
 AGENT_RUN_TERMINAL_STATUS_SQL = ", ".join(f"'{status}'" for status in AGENT_RUN_TERMINAL_STATUSES)
-BUSINESS_SCHEMA_VERSION = 11
+BUSINESS_SCHEMA_VERSION = 12
 KNOWLEDGE_SCHEMA_VERSION = 2
 SCHEMA_VERSION_TABLE = "yuxi_schema_migrations"
 AGENT_RUN_LEASE_SCHEMA_STATEMENTS = (
@@ -975,7 +975,7 @@ class PostgresManager(metaclass=SingletonMeta):
             )
 
     async def ensure_skill_market_schema(self) -> None:
-        """幂等创建市场状态，并为已有共享申请补渠道标识。"""
+        """幂等创建市场状态，并补齐共享申请与技能分类。"""
         self._check_initialized()
         tables = (
             MarketSkill.__table__,
@@ -984,6 +984,18 @@ class PostgresManager(metaclass=SingletonMeta):
             MarketSkillLike.__table__,
         )
         async with self.async_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS category "
+                    "VARCHAR(32) NOT NULL DEFAULT 'other'"
+                )
+            )
+            await conn.execute(
+                text(
+                    "ALTER TABLE IF EXISTS skill_share_requests ADD COLUMN IF NOT EXISTS category "
+                    "VARCHAR(32) NOT NULL DEFAULT 'other'"
+                )
+            )
             await conn.execute(
                 text(
                     "ALTER TABLE skill_share_requests ADD COLUMN IF NOT EXISTS channel "
@@ -1006,6 +1018,12 @@ class PostgresManager(metaclass=SingletonMeta):
                 )
             for table in tables:
                 await conn.run_sync(lambda sync_conn, current=table: current.create(sync_conn, checkfirst=True))
+            await conn.execute(
+                text(
+                    "ALTER TABLE IF EXISTS market_skill_releases ADD COLUMN IF NOT EXISTS category "
+                    "VARCHAR(32) NOT NULL DEFAULT 'other'"
+                )
+            )
 
     async def ensure_business_schema(self):
         """确保业务 schema 包含后续新增字段（运行时 schema 演进）。"""

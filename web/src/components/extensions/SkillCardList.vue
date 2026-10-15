@@ -177,6 +177,7 @@
                 {{ formatExtensionCardTitle(previewSkill.name) }}
               </div>
               <div class="skill-preview-meta">
+                <span>{{ skillCategoryLabel(previewSkill.category) }}</span>
                 <span
                   >{{
                     sourceTypeLabel(previewSkill.sourceType || previewSkill.source_type)
@@ -708,6 +709,7 @@ import {
   Minus
 } from '@lucide/vue'
 import { skillApi } from '@/apis/skill_api'
+import { skillCategoryLabel } from './skillCategories.js'
 import ExtensionCardGrid from './ExtensionCardGrid.vue'
 import SkillInstallFlowModal from './SkillInstallFlowModal.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
@@ -1335,6 +1337,7 @@ const skillCardTags = (skill) => {
         )
     return [
       { name: '个人技能', color: 'gray' },
+      { name: skillCategoryLabel(skill.category), color: 'blue' },
       ...(skill.owner_uid
         ? [
             { name: skill.owner_name || skill.owner_uid, color: 'blue' },
@@ -1347,6 +1350,7 @@ const skillCardTags = (skill) => {
   }
   return [
     { name: getSkillShareLabel(skill), color: 'gray' },
+    { name: skillCategoryLabel(skill.category), color: 'blue' },
     ...(skill.sourceType === 'personal_share' && skill.version
       ? [{ name: `v${skill.version}`, color: 'blue' }]
       : []),

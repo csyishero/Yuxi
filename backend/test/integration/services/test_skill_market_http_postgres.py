@@ -129,13 +129,20 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
             await db.commit()
 
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            invalid_category = await client.post(
+                "/api/skill-market/personal/credit-review/submit",
+                json={"application_reason": "分类值不在列表", "category": "arbitrary"},
+            )
+            assert invalid_category.status_code == 400
+            assert (await client.get("/api/skill-market/requests")).json()["data"] == []
             submitted = await client.post(
                 "/api/skill-market/personal/credit-review/submit",
-                json={"application_reason": "复用信贷审核步骤"},
+                json={"application_reason": "复用信贷审核步骤", "category": "finance_analysis"},
             )
             assert submitted.status_code == 200, submitted.text
             request_id = submitted.json()["data"]["id"]
             assert submitted.json()["data"]["channel"] == "market"
+            assert submitted.json()["data"]["category"] == "finance_analysis"
             assert (await client.get("/api/skill-market")).json()["data"] == []
             async with sessions() as db:
                 shared_request = await sharing.submit_skill_share_request(
@@ -161,6 +168,7 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
             )
             assert approved.status_code == 200, approved.text
             assert approved.json()["data"]["published_slug"] == "credit-review"
+            assert approved.json()["data"]["category"] == "finance_analysis"
             async with sessions() as db:
                 shared_published = await sharing.approve_skill_share_request(
                     db,
@@ -176,6 +184,7 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
 
             current = User(uid="risk-user", username="Risk", password_hash="x", role="user", department_id=2)
             assert (await client.get("/api/skill-market")).json()["data"] == []
+            assert (await client.get("/api/skill-market?category=finance_analysis")).json()["data"] == []
             assert (await client.get("/api/skill-market/credit-review")).status_code == 404
             assert (await client.post("/api/skill-market/credit-review/install")).status_code == 404
 
@@ -185,6 +194,10 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
 
             current = User(uid="credit-user", username="Credit", password_hash="x", role="user", department_id=1)
             listing = (await client.get("/api/skill-market?sort=installs")).json()["data"][0]
+            assert listing["category"] == "finance_analysis"
+            assert len((await client.get("/api/skill-market?category=finance_analysis&limit=1")).json()["data"]) == 1
+            assert (await client.get("/api/skill-market?category=office_tools")).json()["data"] == []
+            assert (await client.get("/api/skill-market?category=invalid")).status_code == 400
             assert listing["installed_version"] is None
             assert (await client.get("/api/skill-market?installed_only=true")).json()["data"] == []
             installed = await client.post("/api/skill-market/credit-review/install")
@@ -205,7 +218,7 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
             current = User(uid="author", username="Author", password_hash="x", role="user", department_id=1)
             second = await client.post(
                 "/api/skill-market/personal/credit-review/submit",
-                json={"application_reason": "更新审核步骤"},
+                json={"application_reason": "更新审核步骤", "category": "office_efficiency"},
             )
             assert second.status_code == 200, second.text
             current = User(uid="credit-admin", username="Admin", password_hash="x", role="admin", department_id=1)
@@ -218,6 +231,9 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
             current = User(uid="credit-user", username="Credit", password_hash="x", role="user", department_id=1)
             detail = (await client.get("/api/skill-market/credit-review")).json()["data"]
             assert detail["latest_version"] == 2
+            assert detail["category"] == "office_efficiency"
+            assert (await client.get("/api/skill-market?category=finance_analysis")).json()["data"] == []
+            assert len((await client.get("/api/skill-market?category=office_efficiency")).json()["data"]) == 1
             assert detail["installed_version"] == 1
             assert detail["upgrade_available"] is True
             async with sessions() as db:
@@ -227,6 +243,7 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
                 assert market_items[0].version == "1"
                 projection_sources = await market.market_projection_sources(db, current)
                 releases = (await db.scalars(select(MarketSkillRelease).order_by(MarketSkillRelease.version))).all()
+                assert [release.category for release in releases] == ["finance_analysis", "office_efficiency"]
                 assert set(projection_sources) == {market.market_projection_slug(releases[0].id)}
                 skill_service.sync_user_accessible_skills("credit-user", projection_sources)
                 old_path = (
@@ -318,6 +335,59 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
             accessible = await list_accessible_skills(db, current)
             assert [item.slug for item in accessible if item.source_scope == "market"] == ["credit-review"]
             assert len(await market.market_projection_sources(db, current)) == 3
+
+        monkeypatch.setattr(skill_service, "get_skill_drafts_root_dir", lambda: tmp_path / "drafts")
+        async with sessions() as db:
+            shared_draft = await skill_service.prepare_skill_upload(
+                db,
+                filename="SKILL.md",
+                file_bytes=b"---\nname: recent-other\ndescription: shared draft\n---\n# Shared\n",
+                operator=User(uid="root", username="Root", password_hash="x", role="superadmin", department_id=2),
+            )
+            assert shared_draft["items"][0]["slug"] == "recent-other"
+
+        newer_dir = personal_root / "recent-other"
+        newer_dir.mkdir()
+        (newer_dir / "SKILL.md").write_text(
+            "---\nname: recent-other\ndescription: second catalog entry\n---\n# Recent\n", encoding="utf-8"
+        )
+        current = User(uid="author", username="Author", password_hash="x", role="user", department_id=1)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            second_item = await client.post(
+                "/api/skill-market/personal/recent-other/submit",
+                json={"application_reason": "验证分类分页", "category": "office_tools"},
+            )
+            assert second_item.status_code == 200, second_item.text
+            current = User(uid="credit-admin", username="Admin", password_hash="x", role="admin", department_id=1)
+            assert (
+                await client.post(
+                    f"/api/skill-market/requests/{second_item.json()['data']['id']}/approve",
+                    json={"scope": "department"},
+                )
+            ).status_code == 200
+            current = User(uid="credit-user", username="Credit", password_hash="x", role="user", department_id=1)
+            assert [item["slug"] for item in (await client.get("/api/skill-market?limit=1")).json()["data"]] == [
+                "recent-other"
+            ]
+            assert [
+                item["slug"]
+                for item in (await client.get("/api/skill-market?category=other&limit=1&offset=0")).json()["data"]
+            ] == ["credit-review"]
+            assert (await client.get("/api/skill-market?category=other&limit=1&offset=1")).json()["data"] == []
+            current = User(uid="risk-user", username="Risk", password_hash="x", role="user", department_id=2)
+            assert (await client.get("/api/skill-market?category=other&limit=1")).json()["data"] == []
+        async with sessions() as db:
+            shared_results = await skill_service.confirm_skill_install_draft(
+                db,
+                draft_id=shared_draft["draft_id"],
+                share_config=None,
+                slugs=["recent-other"],
+                operator=User(uid="root", username="Root", password_hash="x", role="superadmin", department_id=2),
+            )
+            assert shared_results == [
+                {"slug": "recent-other", "success": False, "error": "Skill slug 已被占用，请重新解析安装"}
+            ]
+            assert await db.scalar(select(Skill.id).where(Skill.slug == "recent-other")) is None
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:

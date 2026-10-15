@@ -1,3 +1,5 @@
+import { skillCategory } from './skillCategories.js'
+
 const retiredBuiltinSlugs = new Set(['image-gen', 'mysql-reporter'])
 
 /** 合并两种目录，市场发布版本优先占用同名公共卡片。 */
@@ -18,10 +20,11 @@ export function combineSkillCards(marketCards, existingCards) {
 }
 
 /** 只在当前用户已获授权的卡片中筛选，个人项不进入公共目录。 */
-export function filterSkillCards(cards, query, source) {
+export function filterSkillCards(cards, query, source, category = 'all') {
   const search = query.trim().toLowerCase()
   return cards.filter((item) => {
     if (search && !`${item.name} ${item.description || ''} ${item.slug}`.toLowerCase().includes(search)) return false
+    if (category !== 'all' && skillCategory(item.category) !== category) return false
     if (source === 'market') return item.kind === 'market'
     if (source === 'shared') return item.kind === 'existing' && item.source_type !== 'builtin'
     if (source === 'builtin') return item.source_type === 'builtin'

@@ -115,10 +115,11 @@ class _DraftConfirmRequestBase(BaseModel):
 
 class SkillDraftConfirmRequest(_DraftConfirmRequestBase):
     share_config: dict | None = Field(None, description="共享权限配置")
+    categories: dict[str, str] | None = Field(None, description="按草稿 Skill slug 选择分类")
 
 
 class PersonalSkillDraftConfirmRequest(_DraftConfirmRequestBase):
-    pass
+    categories: dict[str, str] | None = Field(None, description="按草稿 Skill slug 选择分类")
 
 
 class SkillShareReviewRequest(BaseModel):
@@ -371,6 +372,7 @@ async def confirm_skill_install_draft_route(
             draft_id=draft_id,
             share_config=payload.share_config,
             slugs=payload.slugs,
+            categories=payload.categories,
             operator=current_user,
         )
         return {"success": True, "data": results, "summary": _summarize_results(results)}
@@ -393,6 +395,7 @@ async def confirm_personal_skill_install_draft_route(
         results = await confirm_personal_skill_install_draft(
             draft_id=draft_id,
             slugs=payload.slugs,
+            categories=payload.categories,
             operator=current_user,
         )
         return {"success": True, "data": results, "summary": _summarize_results(results)}

@@ -24,6 +24,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.agents.mcp.service import get_usable_mcp_server_slugs
+from yuxi.agents.skills.market_repository import MarketSkillRepository
 from yuxi.agents.skills.repository import SkillRepository
 from yuxi.config import (
     get_runtime_dir,
@@ -80,6 +81,21 @@ DEFAULT_SKILL_SHARE_CONFIG = {"access_level": "user", "department_ids": [], "use
 BUILTIN_SKILL_SHARE_CONFIG = {"access_level": "global", "department_ids": [], "user_uids": []}
 SKILL_DRAFT_TTL_SECONDS = 60 * 60
 PERSONAL_SKILL_SOURCE_TYPE = "personal"
+SKILL_CATEGORY_CODES = frozenset(
+    {
+        "office_tools",
+        "office_efficiency",
+        "office_automation",
+        "finance_analysis",
+        "legal_compliance",
+        "business_review",
+        "development_tools",
+        "data_processing",
+        "data_analysis",
+        "project_management",
+        "other",
+    }
+)
 _USER_SKILLS_LOCK = threading.Lock()
 _USER_SKILLS_LOCKS: dict[str, threading.Lock] = {}
 _USER_SKILL_PROJECTION_LOCK_SCOPE = "yuxi:skills:user-projection:v1:"
@@ -103,6 +119,7 @@ class ResolvedSkill:
     tool_dependencies: list[str]
     mcp_dependencies: list[str]
     skill_dependencies: list[str]
+    category: str = "other"
     version: str | None = None
     content_hash: str | None = None
     projection_slug: str | None = None
@@ -118,6 +135,7 @@ class ResolvedSkill:
             "slug": self.slug,
             "name": self.name,
             "description": self.description,
+            "category": self.category,
             "source_type": self.source_type,
             "source_scope": self.source_scope,
             "enabled": self.enabled,
@@ -1154,6 +1172,7 @@ async def update_personal_skill_dependencies(
                 "slug": parsed_slug,
                 "name": str(metadata["name"]),
                 "description": str(metadata["description"]),
+                "category": skill_category_from_frontmatter(metadata),
                 "tool_dependencies": tools,
                 "mcp_dependencies": merged_mcps,
                 "skill_dependencies": skills,
@@ -1231,6 +1250,33 @@ def _parse_skill_markdown(content: str) -> tuple[str, str, str, dict[str, Any]]:
         raise ValueError("SKILL.md frontmatter 缺少 description")
 
     return slug, name, description, data
+
+
+def normalize_skill_category(category: str | None) -> str:
+    """校验用户明确选择的技能分类。"""
+    if category is None:
+        return "other"
+    if not isinstance(category, str) or category not in SKILL_CATEGORY_CODES:
+        raise ValueError("无效的技能分类")
+    return category
+
+
+def skill_category_from_frontmatter(metadata: dict[str, Any]) -> str:
+    """旧技能和外部分类按「其它」展示。"""
+    category = metadata.get("category")
+    return category if isinstance(category, str) and category in SKILL_CATEGORY_CODES else "other"
+
+
+def set_skill_dir_category(skill_dir: Path, category: str) -> dict[str, Any]:
+    """在发布前的临时副本中写入分类并重新解析元数据。"""
+    category = normalize_skill_category(category)
+    path = skill_dir / "SKILL.md"
+    content = path.read_text(encoding="utf-8")
+    _, _, _, metadata = _parse_skill_markdown(content)
+    if metadata.get("category") != category and not (category == "other" and "category" not in metadata):
+        metadata["category"] = category
+        path.write_text(_render_skill_markdown_frontmatter(metadata, content), encoding="utf-8")
+    return parse_skill_dir_metadata(skill_dir)
 
 
 def _skill_markdown_mcp_dependencies(metadata: dict[str, Any]) -> list[str]:
@@ -1350,6 +1396,7 @@ def parse_skill_dir_metadata(source_skill_dir: Path) -> dict[str, Any]:
         "slug": parsed_slug,
         "name": parsed_name,
         "description": parsed_desc,
+        "category": skill_category_from_frontmatter(meta),
         "tool_dependencies": normalize_string_list(meta.get("tool_dependencies")),
         "mcp_dependencies": normalize_string_list(meta.get("mcp_dependencies")),
         "skill_dependencies": normalize_string_list(meta.get("skill_dependencies")),
@@ -1394,6 +1441,7 @@ async def install_personal_skill_dir(
     source_dir: Path | str,
     *,
     expected_slug: str | None = None,
+    category: str | None = None,
 ) -> ResolvedSkill:
     """将一个 Skill 原子安装到当前用户个人持久源。"""
     return await asyncio.to_thread(
@@ -1401,6 +1449,7 @@ async def install_personal_skill_dir(
         uid,
         Path(source_dir),
         expected_slug=expected_slug,
+        category=category,
     )
 
 
@@ -1662,6 +1711,7 @@ def _resolved_shared_skill(item: Skill, *, shadowed_by_personal: bool = False) -
         tool_dependencies=normalize_string_list(item.tool_dependencies),
         mcp_dependencies=normalize_string_list(item.mcp_dependencies),
         skill_dependencies=normalize_string_list(item.skill_dependencies),
+        category=item.category or "other",
         version=item.version,
         content_hash=item.content_hash,
         shadowed_by_personal=shadowed_by_personal,
@@ -1688,6 +1738,7 @@ def _resolved_personal_skill(uid: str, root: Path, metadata: dict[str, Any]) -> 
         tool_dependencies=normalize_string_list(metadata["tool_dependencies"]),
         mcp_dependencies=normalize_string_list(metadata["mcp_dependencies"]),
         skill_dependencies=normalize_string_list(metadata["skill_dependencies"]),
+        category=metadata["category"],
     )
 
 
@@ -1717,6 +1768,7 @@ def _install_personal_skill_dir_sync(
     source_dir: Path,
     *,
     expected_slug: str | None = None,
+    category: str | None = None,
 ) -> ResolvedSkill:
     """将一个 Skill 原子复制到个人目录。"""
     source_dir = source_dir.resolve()
@@ -1725,6 +1777,7 @@ def _install_personal_skill_dir_sync(
     target_dir: Path | None = None
     try:
         metadata = copy_skill_snapshot(source_dir, temp_target, expected_slug=expected_slug)
+        metadata = set_skill_dir_category(temp_target, category if category is not None else metadata["category"])
         slug = metadata["slug"]
         target_dir = root / slug
         if target_dir.exists() or target_dir.is_symlink():
@@ -1757,6 +1810,7 @@ async def _stage_skill_draft_item(
         "name": parsed["name"],
         "original_name": parsed["slug"],
         "description": parsed["description"],
+        "category": parsed["category"],
         "tool_dependencies": parsed["tool_dependencies"],
         "mcp_dependencies": parsed["mcp_dependencies"],
         "skill_dependencies": parsed["skill_dependencies"],
@@ -1946,15 +2000,26 @@ async def prepare_remote_skill_install(
             await preparation.cleanup()
 
 
+def validate_draft_categories(draft_items: list[dict[str, Any]], categories: dict[str, str] | None) -> dict[str, str]:
+    """在执行任何安装前校验每项草稿的分类选择。"""
+    selected = {str(item.get("slug") or "") for item in draft_items}
+    chosen = categories or {}
+    if not isinstance(chosen, dict) or any(slug not in selected for slug in chosen):
+        raise ValueError("分类选择不属于本次安装的 Skill")
+    return {slug: normalize_skill_category(category) for slug, category in chosen.items()}
+
+
 async def confirm_skill_install_draft(
     db: AsyncSession,
     *,
     draft_id: str,
     share_config: dict | None,
     slugs: list[str] | None = None,
+    categories: dict[str, str] | None = None,
     operator: User,
 ) -> list[dict[str, Any]]:
     draft_dir, data, draft_items = _load_and_select_draft_items(draft_id, slugs, operator)
+    selected_categories = validate_draft_categories(draft_items, categories)
     source_type = data.get("source_type")
 
     normalized_share_config = normalize_skill_share_config(
@@ -1979,7 +2044,12 @@ async def confirm_skill_install_draft(
             result = {"slug": slug, "success": False, "error": "无效 skill slug"}
             results.append(result)
             continue
-        if await repo.exists_slug(slug) or (skills_root / slug).exists():
+        await lock_skill_slug_allocation(db)
+        if (
+            await repo.exists_slug(slug)
+            or await MarketSkillRepository(db).published_slug_exists(slug)
+            or (skills_root / slug).exists()
+        ):
             result = {"slug": slug, "success": False, "error": "Skill slug 已被占用，请重新解析安装"}
             results.append(result)
             continue
@@ -1997,6 +2067,7 @@ async def confirm_skill_install_draft(
         published = False
         try:
             parsed = copy_skill_snapshot(source_dir, temp_target, final_slug=slug)
+            parsed = set_skill_dir_category(temp_target, selected_categories.get(slug, parsed["category"]))
             if final_dir.exists():
                 raise ValueError("Skill slug 已被占用，请重新解析安装")
             temp_target.rename(final_dir)
@@ -2005,6 +2076,7 @@ async def confirm_skill_install_draft(
                 slug=slug,
                 name=parsed["name"],
                 description=parsed["description"],
+                category=parsed["category"],
                 source_type=source_type,
                 tool_dependencies=parsed["tool_dependencies"],
                 mcp_dependencies=parsed["mcp_dependencies"],
@@ -2034,10 +2106,12 @@ async def confirm_personal_skill_install_draft(
     *,
     draft_id: str,
     slugs: list[str] | None,
+    categories: dict[str, str] | None = None,
     operator: User,
 ) -> list[dict[str, Any]]:
     """确认草稿并将选中 Skill 安装到当前用户个人持久源。"""
     draft_dir, _data, draft_items = _load_and_select_draft_items(draft_id, slugs, operator)
+    selected_categories = validate_draft_categories(draft_items, categories)
 
     results: list[dict[str, Any]] = []
     for draft_item in draft_items:
@@ -2071,6 +2145,7 @@ async def confirm_personal_skill_install_draft(
                 str(operator.uid),
                 source_dir,
                 expected_slug=personal_slug,
+                category=selected_categories.get(requested_slug),
             )
             results.append(
                 {
@@ -2249,9 +2324,10 @@ async def _update_skill_metadata_if_skills_md(
 ) -> None:
     """如果目标文件是 SKILL.md，则解析并更新元数据"""
     if target.name == "SKILL.md" and target.parent == skill_dir:
-        parsed_slug, parsed_name, parsed_desc, _ = _parse_skill_markdown(content)
+        parsed_slug, parsed_name, parsed_desc, metadata = _parse_skill_markdown(content)
         if parsed_slug != item.slug:
             raise ValueError("SKILL.md frontmatter.slug 必须与 skill slug 一致")
+        item.category = skill_category_from_frontmatter(metadata)
         repo = SkillRepository(db)
         await repo.update_metadata(item, name=parsed_name, description=parsed_desc, updated_by=updated_by)
 

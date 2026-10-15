@@ -94,6 +94,12 @@ def _user(uid: str = "root", role: str = "admin") -> User:
 
 
 class _UnitOfWork:
+    def get_bind(self):
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    async def scalar(self, _statement):
+        return None
+
     async def commit(self) -> None:
         pass
 
@@ -521,6 +527,17 @@ def test_parse_skill_markdown_ok():
     assert name == "demo-skill"
     assert desc == "demo description"
     assert meta["name"] == "demo-skill"
+
+
+def test_legacy_skill_category_defaults_to_other(tmp_path: Path):
+    """旧技能及外部未知分类仍可解析并归入其它。"""
+    skill_dir = tmp_path / "legacy"
+    skill_dir.mkdir()
+    path = skill_dir / "SKILL.md"
+    path.write_text("---\nname: legacy\ndescription: legacy skill\n---\n", encoding="utf-8")
+    assert svc.parse_skill_dir_metadata(skill_dir)["category"] == "other"
+    path.write_text("---\nname: legacy\ndescription: legacy skill\ncategory: custom\n---\n", encoding="utf-8")
+    assert svc.parse_skill_dir_metadata(skill_dir)["category"] == "other"
 
 
 def test_parse_skill_markdown_supports_display_name_with_slug():
@@ -1233,7 +1250,66 @@ async def test_skill_upload_prepare_confirm_rewrites_conflicting_name(tmp_path: 
     assert results[0]["success"] is True
     assert FakeRepo.created_item.slug == "demo-v2"
     skill_md = (tmp_path / "skill-sources/shared" / "demo-v2" / "SKILL.md").read_text(encoding="utf-8")
-    assert "name: demo-v2" in skill_md
+    assert "slug: demo-v2" in skill_md
+
+
+@pytest.mark.asyncio
+async def test_shared_draft_categories_are_per_skill_and_validated_before_install(tmp_path: Path, monkeypatch):
+    """共享草稿的逐项分类进入数据库元数据及发布文件。"""
+
+    class FakeRepo:
+        created: list[Skill] = []
+
+        def __init__(self, _db):
+            pass
+
+        async def exists_slug(self, _slug: str) -> bool:
+            return False
+
+        async def create(self, **kwargs) -> Skill:
+            item = Skill(**kwargs, updated_by=kwargs["created_by"])
+            self.__class__.created.append(item)
+            return item
+
+    monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
+    operator = _user("root")
+    draft = await svc.prepare_skill_upload(
+        None,
+        filename="SKILL.md",
+        file_bytes=b"---\nname: alpha\ndescription: first\n---\n# Alpha\n",
+        operator=operator,
+    )
+    draft_dir = svc.get_skill_drafts_root_dir() / draft["draft_id"]
+    second_dir = draft_dir / "items" / "second"
+    second_dir.mkdir()
+    (second_dir / "SKILL.md").write_text("---\nname: beta\ndescription: second\n---\n# Beta\n", encoding="utf-8")
+    metadata_path = draft_dir / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["items"].append({"slug": "beta", "source_dir": "items/second", "success": True, "original_name": "beta"})
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="无效的技能分类"):
+        await svc.confirm_skill_install_draft(
+            _UnitOfWork(),
+            draft_id=draft["draft_id"],
+            share_config=draft["default_share_config"],
+            categories={"alpha": "office_tools", "beta": "invalid"},
+            operator=operator,
+        )
+    assert FakeRepo.created == []
+    assert not (tmp_path / "skill-sources/shared" / "alpha").exists()
+
+    results = await svc.confirm_skill_install_draft(
+        _UnitOfWork(),
+        draft_id=draft["draft_id"],
+        share_config=draft["default_share_config"],
+        categories={"alpha": "office_tools", "beta": "project_management"},
+        operator=operator,
+    )
+    assert [result["skill"]["category"] for result in results] == ["office_tools", "project_management"]
+    assert [item.category for item in FakeRepo.created] == ["office_tools", "project_management"]
+    for item in FakeRepo.created:
+        assert svc.parse_skill_dir_metadata(tmp_path / "skill-sources/shared" / item.slug)["category"] == item.category
 
 
 @pytest.mark.asyncio
@@ -1514,7 +1590,7 @@ async def test_update_skill_md_syncs_metadata(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(svc, "get_manageable_skill_or_raise", fake_get_manageable_skill_or_raise)
     monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
 
-    new_content = "---\nname: demo\ndescription: updated desc\n---\n# updated\n"
+    new_content = "---\nname: demo\ndescription: updated desc\ncategory: office_tools\n---\n# updated\n"
     await svc.update_skill_file(
         _UnitOfWork(),
         slug="demo",
@@ -1527,6 +1603,7 @@ async def test_update_skill_md_syncs_metadata(tmp_path: Path, monkeypatch: pytes
     assert updates["name"] == "demo"
     assert updates["description"] == "updated desc"
     assert updates["updated_by"] == "admin"
+    assert item.category == "office_tools"
     saved_content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     assert "description: updated desc" in saved_content
 
@@ -2315,6 +2392,43 @@ async def test_personal_skill_frontmatter_dependencies_reach_runtime(
 
 
 @pytest.mark.asyncio
+async def test_personal_dependency_save_preserves_category(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """保存依赖后返回和重新扫描的个人技能分类保持一致。"""
+    personal_root = _personal_skill_root(tmp_path, monkeypatch)
+    skill_dir = _write_personal_skill(personal_root, "demo", "personal")
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: personal\ncategory: office_tools\n---\n# Demo\n", encoding="utf-8"
+    )
+
+    async def no_shared(_db, _operator):
+        return []
+
+    async def no_mcps(_db, _operator):
+        return set()
+
+    async def valid_dependencies(**_kwargs):
+        return [], [], []
+
+    monkeypatch.setattr(svc, "_list_accessible_shared_skills", no_shared)
+    monkeypatch.setattr(svc, "get_usable_mcp_server_slugs", no_mcps)
+    monkeypatch.setattr(svc, "get_visible_mcp_reference_slugs", no_mcps)
+    monkeypatch.setattr(svc, "validate_skill_dependencies", valid_dependencies)
+
+    saved = await svc.update_personal_skill_dependencies(
+        _UnitOfWork(),
+        slug="demo",
+        tool_dependencies=[],
+        mcp_dependencies=[],
+        skill_dependencies=[],
+        operator=_user("user-1", role="user"),
+    )
+
+    assert saved.category == "office_tools"
+    assert (await svc.list_personal_skills("user-1"))[0].category == "office_tools"
+    assert svc.parse_skill_dir_metadata(skill_dir)["category"] == "office_tools"
+
+
+@pytest.mark.asyncio
 async def test_personal_skills_are_isolated_by_uid(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2383,6 +2497,12 @@ async def test_confirm_personal_skill_draft_uses_original_slug_without_database(
         "---\nname: demo\ndescription: personal demo\n---\n# Demo\n",
         encoding="utf-8",
     )
+    second_dir = draft_dir / "items" / "item-2"
+    second_dir.mkdir(parents=True)
+    (second_dir / "SKILL.md").write_text(
+        "---\nname: beta\ndescription: second skill\n---\n# Beta\n",
+        encoding="utf-8",
+    )
     (draft_dir / "metadata.json").write_text(
         svc.json.dumps(
             {
@@ -2395,7 +2515,8 @@ async def test_confirm_personal_skill_draft_uses_original_slug_without_database(
                         "original_name": "demo",
                         "source_dir": "items/item-1",
                         "success": True,
-                    }
+                    },
+                    {"slug": "beta", "original_name": "beta", "source_dir": "items/item-2", "success": True},
                 ],
             }
         ),
@@ -2404,16 +2525,30 @@ async def test_confirm_personal_skill_draft_uses_original_slug_without_database(
 
     monkeypatch.setenv("YUXI_RUNTIME_DIR", str(tmp_path / "runtime"))
 
+    with pytest.raises(ValueError, match="无效的技能分类"):
+        await svc.confirm_personal_skill_install_draft(
+            draft_id=draft_id,
+            slugs=["demo-v2", "beta"],
+            categories={"demo-v2": "invalid"},
+            operator=_user("user-1", role="user"),
+        )
+    assert not (personal_root / "demo").exists()
+    assert not (personal_root / "beta").exists()
+
     results = await svc.confirm_personal_skill_install_draft(
         draft_id=draft_id,
-        slugs=["demo-v2"],
+        slugs=["demo-v2", "beta"],
+        categories={"demo-v2": "office_tools", "beta": "data_analysis"},
         operator=_user("user-1", role="user"),
     )
 
     assert results[0]["success"] is True
     assert results[0]["slug"] == "demo"
     assert results[0]["requested_slug"] == "demo-v2"
+    assert [row["skill"]["category"] for row in results] == ["office_tools", "data_analysis"]
     assert (personal_root / "demo" / "SKILL.md").exists()
+    assert svc.parse_skill_dir_metadata(personal_root / "demo")["category"] == "office_tools"
+    assert svc.parse_skill_dir_metadata(personal_root / "beta")["category"] == "data_analysis"
     assert not draft_dir.exists()
 
 

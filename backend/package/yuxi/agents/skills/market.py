@@ -20,8 +20,10 @@ from yuxi.agents.skills.service import (
     is_skill_text_path,
     list_personal_skills,
     lock_skill_slug_allocation,
+    normalize_skill_category,
     parse_skill_dir_metadata,
     resolve_skill_relative_path,
+    set_skill_dir_category,
     user_can_access_skill,
     validate_skill_dependencies,
 )
@@ -55,11 +57,11 @@ def market_skill_visible(item: MarketSkill, user: User) -> bool:
 
 
 async def submit_market_skill(
-    db: AsyncSession, *, slug: str, application_reason: str, operator: User
+    db: AsyncSession, *, slug: str, application_reason: str, operator: User, category: str | None = None
 ) -> SkillShareRequest:
     """把个人 Skill 的当前内容作为市场审核快照提交。"""
     return await submit_skill_share_request(
-        db, slug=slug, application_reason=application_reason, operator=operator, channel="market"
+        db, slug=slug, application_reason=application_reason, operator=operator, channel="market", category=category
     )
 
 
@@ -158,6 +160,7 @@ async def review_market_skill(
         metadata = await asyncio.to_thread(
             copy_skill_snapshot, snapshot, staging, expected_slug=item.personal_slug, final_slug=slug
         )
+        metadata = await asyncio.to_thread(set_skill_dir_category, staging, item.category)
         staging.rename(published)
         moved = True
         if listing is None:
@@ -183,6 +186,7 @@ async def review_market_skill(
             version=version,
             name=metadata["name"],
             description=metadata["description"],
+            category=item.category,
             dir_path=relative.as_posix(),
             content_hash=await asyncio.to_thread(compute_skill_dir_hash, published),
             tool_dependencies=tools,
@@ -223,14 +227,17 @@ async def list_market_skills(
     installed_only: bool = False,
     offset: int = 0,
     limit: int = 100,
+    category: str | None = None,
 ) -> list[dict]:
     """搜索当前用户可见条目，并附上个人状态和可信指标。"""
     if sort not in {"recent", "installs", "likes"}:
         raise ValueError("无效的排序方式")
+    if category is not None:
+        category = normalize_skill_category(category)
     repo = MarketSkillRepository(db)
     cards = []
     for listing in await repo.visible(
-        user, query=query, sort=sort, installed_only=installed_only, offset=offset, limit=limit
+        user, query=query, sort=sort, installed_only=installed_only, offset=offset, limit=limit, category=category
     ):
         cards.append(await _market_card(db, repo, listing, user))
     return cards
@@ -304,6 +311,7 @@ async def _market_card(
         "slug": listing.slug,
         "name": release.name,
         "description": release.description,
+        "category": release.category or "other",
         "owner_uid": listing.owner_uid,
         "owner_name": owner or listing.owner_uid,
         "scope": listing.scope,
@@ -416,6 +424,7 @@ async def list_installed_market_skills(db: AsyncSession, user: User) -> list[Res
                 tool_dependencies=release.tool_dependencies or [],
                 mcp_dependencies=release.mcp_dependencies or [],
                 skill_dependencies=release.skill_dependencies or [],
+                category=release.category or "other",
                 version=str(release.version),
                 content_hash=release.content_hash,
                 projection_slug=market_projection_slug(release.id),

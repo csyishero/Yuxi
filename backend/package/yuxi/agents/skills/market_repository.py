@@ -35,6 +35,7 @@ class MarketSkillRepository:
         user: User,
         *,
         query: str = "",
+        category: str | None = None,
         slug: str | None = None,
         sort: str = "recent",
         installed_only: bool = False,
@@ -43,11 +44,13 @@ class MarketSkillRepository:
     ) -> list[MarketSkill]:
         """只返回当前用户可见的市场条目。"""
         statement = select(MarketSkill).where(MarketSkill.latest_release_id.is_not(None), self._visible_filter(user))
+        if query.strip() or category is not None:
+            statement = statement.join(MarketSkillRelease, MarketSkillRelease.id == MarketSkill.latest_release_id)
+        if category is not None:
+            statement = statement.where(MarketSkillRelease.category == category)
         if query.strip():
             pattern = f"%{query.strip()}%"
-            statement = statement.join(
-                MarketSkillRelease, MarketSkillRelease.id == MarketSkill.latest_release_id
-            ).where(
+            statement = statement.where(
                 or_(
                     MarketSkill.slug.ilike(pattern),
                     MarketSkillRelease.name.ilike(pattern),
@@ -132,6 +135,17 @@ class MarketSkillRepository:
     async def by_slug_for_update(self, slug: str) -> MarketSkill | None:
         """锁定稳定条目以串行发布新版本。"""
         return await self.db.scalar(select(MarketSkill).where(MarketSkill.slug == slug).with_for_update())
+
+    async def published_slug_exists(self, slug: str) -> bool:
+        """确认共享安装前检测已发布的同名市场条目。"""
+        return (
+            await self.db.scalar(
+                select(MarketSkill.id).where(
+                    MarketSkill.slug == slug,
+                    MarketSkill.latest_release_id.is_not(None),
+                )
+            )
+        ) is not None
 
     async def by_owner_source_for_update(self, uid: str, personal_slug: str) -> MarketSkill | None:
         """定位作者同一原件已经发布的条目。"""

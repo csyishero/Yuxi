@@ -25,10 +25,12 @@ from yuxi.agents.skills.service import (
     get_skills_root_dir,
     is_skill_text_path,
     normalize_skill_share_config,
+    normalize_skill_category,
     parse_skill_dir_metadata,
     personal_skills_root,
     resolve_personal_skill_dir,
     resolve_skill_relative_path,
+    set_skill_dir_category,
     skill_dir_contains_symlink,
     validate_skill_dependencies,
     validate_personal_share_read_scope,
@@ -66,7 +68,13 @@ def _snapshot_root() -> Path:
 
 
 async def submit_skill_share_request(
-    db: AsyncSession, *, slug: str, application_reason: str, operator: User, channel: str = "shared"
+    db: AsyncSession,
+    *,
+    slug: str,
+    application_reason: str,
+    operator: User,
+    channel: str = "shared",
+    category: str | None = None,
 ) -> SkillShareRequest:
     """复制本人个人 Skill 为不可变待审快照。"""
     reason = application_reason.strip()
@@ -76,6 +84,8 @@ async def submit_skill_share_request(
         raise ValueError("共享申请原因不能超过 1000 字")
     if channel not in {"shared", "market"}:
         raise ValueError("无效的发布渠道")
+    if category is not None:
+        category = normalize_skill_category(category)
 
     source = resolve_personal_skill_dir(personal_skills_root(str(operator.uid)), slug)
     if not source.is_dir():
@@ -112,6 +122,7 @@ async def submit_skill_share_request(
             personal_slug=slug,
             name=parsed["name"],
             description=parsed["description"],
+            category=category if category is not None else parsed["category"],
             content_hash=await asyncio.to_thread(compute_skill_dir_hash, snapshot),
             application_reason=reason,
             channel=channel,
@@ -349,6 +360,7 @@ async def approve_skill_share_request(
         published_metadata = await asyncio.to_thread(
             copy_skill_snapshot, snapshot, staging, expected_slug=item.personal_slug, final_slug=slug
         )
+        published_metadata = await asyncio.to_thread(set_skill_dir_category, staging, item.category)
         if published.exists():
             raise ValueError("共享 Skill slug 已被占用，请重试")
         staging.rename(published)
@@ -357,6 +369,7 @@ async def approve_skill_share_request(
             slug=slug,
             name=published_metadata["name"],
             description=published_metadata["description"],
+            category=item.category,
             source_type="personal_share",
             tool_dependencies=tools,
             mcp_dependencies=mcps,
