@@ -480,6 +480,34 @@ def test_read_file_activates_only_readable_skill() -> None:
     assert updated.update["activated_skills"] == ["alpha"]
 
 
+def test_market_release_read_file_activates_stable_skill_slug() -> None:
+    """动态读取固定市场版本后，激活 Agent 选择的稳定 slug。"""
+    middleware = SkillsMiddleware()
+    result = ToolMessage(content="ok", tool_call_id="tool-1", name="read_file")
+    item = _runtime_skill("credit-review", tools=["query_kb"])
+    item["path"] = "/home/gem/skills/market-release-123456/SKILL.md"
+    request = SimpleNamespace(
+        runtime=SimpleNamespace(
+            context=SimpleNamespace(
+                _skill_runtime_snapshot={
+                    "effective_skills": ["credit-review"],
+                    "runtime_skills": {"credit-review": item},
+                }
+            )
+        ),
+        tool_call={"name": "read_file", "args": {"file_path": item["path"]}},
+    )
+
+    updated = middleware._process_tool_call_result(result, request)
+
+    assert isinstance(updated, Command)
+    assert updated.update["activated_skills"] == ["credit-review"]
+    request.tool_call["args"]["file_path"] = "  home/gem/skills/market-release-123456/SKILL.md  "
+    relative_updated = middleware._process_tool_call_result(result, request)
+    assert isinstance(relative_updated, Command)
+    assert relative_updated.update["activated_skills"] == ["credit-review"]
+
+
 def test_personal_workspace_path_activates_skill() -> None:
     middleware = SkillsMiddleware()
 

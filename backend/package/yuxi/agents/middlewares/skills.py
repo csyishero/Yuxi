@@ -215,6 +215,13 @@ class SkillsMiddleware(AgentMiddleware):
         if not slug:
             return result
 
+        raw_path = file_path.strip()
+        normalized_path = PurePosixPath(raw_path if raw_path.startswith("/") else f"/{raw_path}")
+        for stable_slug, item in self._get_runtime_skills(request.runtime.context).items():
+            if item.get("path") == str(normalized_path):
+                slug = stable_slug
+                break
+
         if slug not in self._get_effective_skills(request.runtime.context):
             logger.warning(f"SkillsMiddleware: deny skill activation for invisible slug: {slug}")
             return result

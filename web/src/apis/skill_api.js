@@ -2,6 +2,30 @@ import { apiGet, apiPost, apiPut, apiDelete, apiAdminGet, apiAdminPost } from '.
 
 const BASE_URL = '/api/system/skills'
 const USER_BASE_URL = '/api/skills'
+const MARKET_BASE_URL = '/api/skill-market'
+
+export const listMarketSkills = async ({ query = '', sort = 'recent', installedOnly = false, offset = 0, limit = 100 } = {}) => {
+  const params = new URLSearchParams({ sort, offset: String(offset), limit: String(limit) })
+  if (query.trim()) params.set('query', query.trim())
+  if (installedOnly) params.set('installed_only', 'true')
+  return apiGet(`${MARKET_BASE_URL}?${params}`)
+}
+
+export const getMarketSkill = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}`)
+export const getMarketSkillTree = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/tree`)
+export const getMarketSkillFile = async (slug, path = 'SKILL.md') =>
+  apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/file?path=${encodeURIComponent(path)}`)
+export const installMarketSkill = async (slug) => apiPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/install`)
+export const upgradeMarketSkill = async (slug) => apiPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/upgrade`)
+export const toggleMarketSkillLike = async (slug) => apiPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/like`)
+export const submitMarketSkill = async (slug, applicationReason) =>
+  apiPost(`${MARKET_BASE_URL}/personal/${encodeURIComponent(slug)}/submit`, { application_reason: applicationReason })
+export const listMarketRequests = async () => apiGet(`${MARKET_BASE_URL}/requests`)
+export const reviewMarketSkill = async (requestId, approved, scope, note) =>
+  apiAdminPost(`${MARKET_BASE_URL}/requests/${encodeURIComponent(requestId)}/${approved ? 'approve' : 'reject'}`, {
+    scope,
+    note
+  })
 
 export const listSkills = async () => {
   return apiGet(BASE_URL)

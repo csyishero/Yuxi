@@ -429,6 +429,7 @@ class SkillShareRequest(Base):
     description = Column(Text, nullable=False)
     content_hash = Column(String(128), nullable=False)
     application_reason = Column(Text, nullable=True)
+    channel = Column(String(16), nullable=False, default="shared")
     status = Column(String(16), nullable=False, default="pending", index=True)
     review_note = Column(Text, nullable=True)
     reviewer_uid = Column(String(64), nullable=True)
@@ -444,6 +445,7 @@ class SkillShareRequest(Base):
             "uq_skill_share_requests_pending",
             "owner_uid",
             "personal_slug",
+            "channel",
             unique=True,
             postgresql_where=text("status = 'pending'"),
             sqlite_where=text("status = 'pending'"),
@@ -461,6 +463,7 @@ class SkillShareRequest(Base):
             "description": self.description,
             "content_hash": self.content_hash,
             "application_reason": self.application_reason,
+            "channel": self.channel,
             "status": self.status,
             "review_note": self.review_note,
             "reviewer_uid": self.reviewer_uid,
@@ -475,6 +478,70 @@ class SkillShareRequest(Base):
             "created_at": format_utc_datetime(self.created_at),
             "reviewed_at": format_utc_datetime(self.reviewed_at),
         }
+
+
+class MarketSkill(Base):
+    """稳定的内部市场条目和可见范围。"""
+
+    __tablename__ = "market_skills"
+
+    id = Column(String(36), primary_key=True)
+    slug = Column(String(128), nullable=False, unique=True)
+    owner_uid = Column(String(64), nullable=False)
+    personal_slug = Column(String(128), nullable=False)
+    scope = Column(String(16), nullable=False)
+    department_id = Column(Integer, nullable=True)
+    latest_release_id = Column(String(36), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+    updated_at = Column(DateTime, nullable=False, default=utc_now_naive)
+
+    __table_args__ = (
+        CheckConstraint("scope IN ('department', 'global')", name="ck_market_skills_scope"),
+        UniqueConstraint("owner_uid", "personal_slug", name="uq_market_skills_owner_personal"),
+    )
+
+
+class MarketSkillRelease(Base):
+    """审核后不可变的市场版本。"""
+
+    __tablename__ = "market_skill_releases"
+
+    id = Column(String(36), primary_key=True)
+    market_skill_id = Column(String(36), ForeignKey("market_skills.id", ondelete="CASCADE"), nullable=False, index=True)
+    version = Column(Integer, nullable=False)
+    name = Column(String(128), nullable=False)
+    description = Column(Text, nullable=False)
+    dir_path = Column(String(512), nullable=False)
+    content_hash = Column(String(128), nullable=False)
+    tool_dependencies = Column(JSON_VALUE, nullable=False, default=list)
+    mcp_dependencies = Column(JSON_VALUE, nullable=False, default=list)
+    skill_dependencies = Column(JSON_VALUE, nullable=False, default=list)
+    request_id = Column(String(36), nullable=False, unique=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+
+    __table_args__ = (UniqueConstraint("market_skill_id", "version", name="uq_market_skill_releases_version"),)
+
+
+class MarketSkillInstall(Base):
+    """用户主动安装的市场版本指针。"""
+
+    __tablename__ = "market_skill_installs"
+
+    uid = Column(String(64), ForeignKey("users.uid", ondelete="CASCADE"), primary_key=True)
+    market_skill_id = Column(String(36), ForeignKey("market_skills.id", ondelete="CASCADE"), primary_key=True)
+    release_id = Column(String(36), ForeignKey("market_skill_releases.id"), nullable=False)
+    installed_at = Column(DateTime, nullable=False, default=utc_now_naive)
+    updated_at = Column(DateTime, nullable=False, default=utc_now_naive)
+
+
+class MarketSkillLike(Base):
+    """每名用户对一个市场条目的唯一点赞。"""
+
+    __tablename__ = "market_skill_likes"
+
+    uid = Column(String(64), ForeignKey("users.uid", ondelete="CASCADE"), primary_key=True)
+    market_skill_id = Column(String(36), ForeignKey("market_skills.id", ondelete="CASCADE"), primary_key=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
 
 
 class Conversation(Base):

@@ -16,6 +16,10 @@ from yuxi.storage.postgres.models_business import (
     PROJECT_STATUS_CONSTRAINT_NAME,
     PROJECT_STATUS_CONSTRAINT_SQL,
     UNVIEWED_RUN_MARKER,
+    MarketSkill,
+    MarketSkillInstall,
+    MarketSkillLike,
+    MarketSkillRelease,
 )
 from yuxi.storage.postgres.models_business import Base as BusinessBase
 from yuxi.storage.postgres.models_knowledge import Base as KnowledgeBase
@@ -23,7 +27,7 @@ from yuxi.utils import logger
 from yuxi.utils.singleton import SingletonMeta
 
 AGENT_RUN_TERMINAL_STATUS_SQL = ", ".join(f"'{status}'" for status in AGENT_RUN_TERMINAL_STATUSES)
-BUSINESS_SCHEMA_VERSION = 10
+BUSINESS_SCHEMA_VERSION = 11
 KNOWLEDGE_SCHEMA_VERSION = 2
 SCHEMA_VERSION_TABLE = "yuxi_schema_migrations"
 AGENT_RUN_LEASE_SCHEMA_STATEMENTS = (
@@ -969,6 +973,39 @@ class PostgresManager(metaclass=SingletonMeta):
             await conn.execute(
                 text("ALTER TABLE skill_share_requests ADD COLUMN IF NOT EXISTS application_reason TEXT")
             )
+
+    async def ensure_skill_market_schema(self) -> None:
+        """幂等创建市场状态，并为已有共享申请补渠道标识。"""
+        self._check_initialized()
+        tables = (
+            MarketSkill.__table__,
+            MarketSkillRelease.__table__,
+            MarketSkillInstall.__table__,
+            MarketSkillLike.__table__,
+        )
+        async with self.async_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "ALTER TABLE skill_share_requests ADD COLUMN IF NOT EXISTS channel "
+                    "VARCHAR(16) NOT NULL DEFAULT 'shared'"
+                )
+            )
+            existing_index = await conn.scalar(
+                text(
+                    "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() "
+                    "AND indexname = 'uq_skill_share_requests_pending'"
+                )
+            )
+            if existing_index is None or "channel" not in existing_index:
+                await conn.execute(text("DROP INDEX IF EXISTS uq_skill_share_requests_pending"))
+                await conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX uq_skill_share_requests_pending "
+                        "ON skill_share_requests(owner_uid, personal_slug, channel) WHERE status = 'pending'"
+                    )
+                )
+            for table in tables:
+                await conn.run_sync(lambda sync_conn, current=table: current.create(sync_conn, checkfirst=True))
 
     async def ensure_business_schema(self):
         """确保业务 schema 包含后续新增字段（运行时 schema 演进）。"""

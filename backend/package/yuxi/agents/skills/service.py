@@ -34,7 +34,7 @@ from yuxi.permissions import ResourcePermission, normalize_permission_config, re
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.mcp_reference_service import get_visible_mcp_reference_slugs, project_mcp_references
-from yuxi.storage.postgres.models_business import Department, Skill, User
+from yuxi.storage.postgres.models_business import Department, MarketSkill, Skill, User
 from yuxi.utils.logging_config import logger
 from yuxi.utils.paths import ensure_within_root, open_directory_fd, open_regular_file_fd
 
@@ -105,6 +105,7 @@ class ResolvedSkill:
     skill_dependencies: list[str]
     version: str | None = None
     content_hash: str | None = None
+    projection_slug: str | None = None
     overrides_shared: bool = False
     shadowed_by_personal: bool = False
     read_department_names: list[str] | None = None
@@ -401,6 +402,9 @@ async def refresh_user_skill_projection_async(uid: str) -> dict[str, str]:
                 for item in await _list_accessible_shared_skills(db, user)
                 if item.slug
             }
+            from yuxi.agents.skills.market import market_projection_sources
+
+            source_dirs.update(await market_projection_sources(db, user))
         visible_mcp_slugs = (
             await get_visible_mcp_reference_slugs(db, user) if user is not None and not bool(user.is_deleted) else set()
         )
@@ -748,10 +752,11 @@ async def list_accessible_skills(
     require_enabled: bool = True,
 ) -> list[ResolvedSkill]:
     """返回当前用户最终生效的共享与个人 Skill。"""
-    shared_items, personal_items = await asyncio.gather(
-        _list_accessible_shared_skills(db, user, require_enabled=require_enabled),
-        list_personal_skills(str(user.uid)),
-    )
+    from yuxi.agents.skills.market import list_installed_market_skills
+
+    shared_items = await _list_accessible_shared_skills(db, user, require_enabled=require_enabled)
+    market_items = await list_installed_market_skills(db, user)
+    personal_items = await list_personal_skills(str(user.uid))
     personal_by_slug = {item.slug: item for item in personal_items}
 
     effective: dict[str, ResolvedSkill] = {}
@@ -760,6 +765,8 @@ async def list_accessible_skills(
             item,
             shadowed_by_personal=item.slug in personal_by_slug,
         )
+    for item in market_items:
+        effective[item.slug] = item
     for slug, item in personal_by_slug.items():
         effective[slug] = replace(item, overrides_shared=slug in effective)
     return list(effective.values())
@@ -1298,21 +1305,38 @@ def _validate_zip_paths(zip_file: zipfile.ZipFile) -> None:
 
 async def generate_available_skill_slug(repo: SkillRepository, base_slug: str) -> str:
     """生成数据库字段长度内的独立共享 slug。"""
+    if hasattr(repo, "db"):
+        await lock_skill_slug_allocation(repo.db)
+
+    async def occupied(candidate: str) -> bool:
+        """同时避开传统共享与市场已发布标识。"""
+        if await repo.exists_slug(candidate):
+            return True
+        if hasattr(repo, "db") and repo.db.get_bind().dialect.name == "postgresql":
+            return (await repo.db.scalar(select(MarketSkill.id).where(MarketSkill.slug == candidate))) is not None
+        return False
+
     root = get_skills_root_dir()
     base = base_slug
     if len(base) > MAX_SHARED_SKILL_SLUG_LENGTH:
         digest = hashlib.sha256(base.encode("utf-8")).hexdigest()[:8]
         base = f"{base[: MAX_SHARED_SKILL_SLUG_LENGTH - 9].rstrip('-')}-{digest}"
-    if not await repo.exists_slug(base) and not (root / base).exists():
+    if not await occupied(base) and not (root / base).exists():
         return base
 
     idx = 2
     while True:
         suffix = f"-v{idx}"
         candidate = f"{base[: MAX_SHARED_SKILL_SLUG_LENGTH - len(suffix)].rstrip('-')}{suffix}"
-        if not await repo.exists_slug(candidate) and not (root / candidate).exists():
+        if not await occupied(candidate) and not (root / candidate).exists():
             return candidate
         idx += 1
+
+
+async def lock_skill_slug_allocation(db: AsyncSession) -> None:
+    """串行化 PostgreSQL 中两个发布渠道的稳定标识分配。"""
+    if db.get_bind().dialect.name == "postgresql":
+        await db.execute(text("SELECT pg_advisory_xact_lock(71284319)"))
 
 
 def parse_skill_dir_metadata(source_skill_dir: Path) -> dict[str, Any]:

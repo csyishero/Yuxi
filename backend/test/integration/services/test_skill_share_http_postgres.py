@@ -18,7 +18,17 @@ from server.routers.skill_router import skills, user_skills
 from server.utils.auth_middleware import get_db, get_required_user
 from yuxi.agents.skills import sharing
 from yuxi.permissions import ResourcePermission, resolve_skill_permission
-from yuxi.storage.postgres.models_business import Base, Department, Skill, SkillShareRequest, User
+from yuxi.storage.postgres.models_business import (
+    Base,
+    Department,
+    MarketSkill,
+    MarketSkillInstall,
+    MarketSkillLike,
+    MarketSkillRelease,
+    Skill,
+    SkillShareRequest,
+    User,
+)
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -87,7 +97,17 @@ async def test_skill_share_http_uses_snapshot_and_department_review(monkeypatch,
         async with engine.begin() as connection:
             await connection.run_sync(
                 lambda conn: Base.metadata.create_all(
-                    conn, tables=[Department.__table__, User.__table__, Skill.__table__, SkillShareRequest.__table__]
+                    conn,
+                    tables=[
+                        Department.__table__,
+                        User.__table__,
+                        Skill.__table__,
+                        SkillShareRequest.__table__,
+                        MarketSkill.__table__,
+                        MarketSkillRelease.__table__,
+                        MarketSkillInstall.__table__,
+                        MarketSkillLike.__table__,
+                    ],
                 )
             )
             await connection.execute(text("INSERT INTO departments (id, name) VALUES (1, 'Credit'), (2, 'Risk')"))
@@ -333,7 +353,17 @@ async def test_department_admin_direct_publish_keeps_owner_file(monkeypatch, tmp
         async with engine.begin() as connection:
             await connection.run_sync(
                 lambda conn: Base.metadata.create_all(
-                    conn, tables=[Department.__table__, User.__table__, Skill.__table__, SkillShareRequest.__table__]
+                    conn,
+                    tables=[
+                        Department.__table__,
+                        User.__table__,
+                        Skill.__table__,
+                        SkillShareRequest.__table__,
+                        MarketSkill.__table__,
+                        MarketSkillRelease.__table__,
+                        MarketSkillInstall.__table__,
+                        MarketSkillLike.__table__,
+                    ],
                 )
             )
             await connection.execute(text("INSERT INTO departments (id, name) VALUES (1, 'Credit'), (2, 'Risk')"))

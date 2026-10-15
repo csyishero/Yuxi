@@ -286,7 +286,7 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
             "ix_scheduled_agent_runs_job_created",
             "ix_scheduled_agent_runs_dispatching",
         }.issubset(scheduled_indexes)
-        assert BUSINESS_SCHEMA_VERSION == 10
+        assert BUSINESS_SCHEMA_VERSION == 11
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 
@@ -345,8 +345,63 @@ async def test_skill_share_request_table_migrates_from_previous_business_schema(
             )
         assert nullable == "YES"
         assert "uq_skill_share_requests_pending" in indexes
-        assert BUSINESS_SCHEMA_VERSION == 10
+        assert BUSINESS_SCHEMA_VERSION == 11
         assert (await manager.get_schema_versions())["business"] == 8
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
+async def test_skill_market_schema_migrates_v10_idempotently() -> None:
+    """已有共享申请和业务行在市场表创建后保持原值。"""
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_skill_market_schema")
+    try:
+        await manager.create_business_tables()
+        async with scoped_engine.begin() as connection:
+            await connection.execute(text("DROP TABLE market_skill_likes"))
+            await connection.execute(text("DROP TABLE market_skill_installs"))
+            await connection.execute(text("DROP TABLE market_skill_releases"))
+            await connection.execute(text("DROP TABLE market_skills"))
+            await connection.execute(text("ALTER TABLE skill_share_requests DROP COLUMN channel"))
+            await connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX uq_skill_share_requests_pending "
+                    "ON skill_share_requests(owner_uid, personal_slug) WHERE status = 'pending'"
+                )
+            )
+
+        await manager.ensure_skill_market_schema()
+        await manager.ensure_skill_market_schema()
+        async with scoped_engine.connect() as connection:
+            tables = await connection.scalars(
+                text("SELECT table_name FROM information_schema.tables WHERE table_schema = :schema"),
+                {"schema": schema},
+            )
+            channel = await connection.scalar(
+                text(
+                    "SELECT column_default FROM information_schema.columns "
+                    "WHERE table_schema = :schema AND table_name = 'skill_share_requests' AND column_name = 'channel'"
+                ),
+                {"schema": schema},
+            )
+        assert {"market_skills", "market_skill_releases", "market_skill_installs", "market_skill_likes"}.issubset(
+            set(tables)
+        )
+        assert "shared" in channel
+        async with scoped_engine.connect() as connection:
+            columns = await connection.scalar(
+                text(
+                    "SELECT array_agg(att.attname ORDER BY ord.ordinality) FROM pg_class tbl "
+                    "JOIN pg_namespace ns ON ns.oid = tbl.relnamespace "
+                    "JOIN pg_index idx ON idx.indrelid = tbl.oid "
+                    "JOIN pg_class index_tbl ON index_tbl.oid = idx.indexrelid "
+                    "JOIN LATERAL unnest(idx.indkey) WITH ORDINALITY AS ord(attnum, ordinality) ON TRUE "
+                    "JOIN pg_attribute att ON att.attrelid = tbl.oid AND att.attnum = ord.attnum "
+                    "WHERE ns.nspname = :schema AND index_tbl.relname = 'uq_skill_share_requests_pending' "
+                    "GROUP BY index_tbl.relname"
+                ),
+                {"schema": schema},
+            )
+        assert columns == ["owner_uid", "personal_slug", "channel"]
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 

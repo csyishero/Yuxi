@@ -47,7 +47,7 @@ def build_runtime_skills(skills: list) -> dict[str, RuntimeSkill]:
         result[item.slug] = {
             "name": item.name,
             "description": item.description,
-            "path": f"{root}/{item.slug}/SKILL.md",
+            "path": f"{root}/{getattr(item, 'projection_slug', None) or item.slug}/SKILL.md",
             "tools": normalize_string_list(item.tool_dependencies or []),
             "mcps": normalize_string_list(item.mcp_dependencies or []),
             "skills": normalize_string_list(item.skill_dependencies or []),

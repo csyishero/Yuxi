@@ -66,7 +66,7 @@ def _snapshot_root() -> Path:
 
 
 async def submit_skill_share_request(
-    db: AsyncSession, *, slug: str, application_reason: str, operator: User
+    db: AsyncSession, *, slug: str, application_reason: str, operator: User, channel: str = "shared"
 ) -> SkillShareRequest:
     """复制本人个人 Skill 为不可变待审快照。"""
     reason = application_reason.strip()
@@ -74,6 +74,8 @@ async def submit_skill_share_request(
         raise ValueError("请填写共享申请原因")
     if len(reason) > 1000:
         raise ValueError("共享申请原因不能超过 1000 字")
+    if channel not in {"shared", "market"}:
+        raise ValueError("无效的发布渠道")
 
     source = resolve_personal_skill_dir(personal_skills_root(str(operator.uid)), slug)
     if not source.is_dir():
@@ -82,6 +84,7 @@ async def submit_skill_share_request(
         select(SkillShareRequest.id).where(
             SkillShareRequest.owner_uid == operator.uid,
             SkillShareRequest.personal_slug == slug,
+            SkillShareRequest.channel == channel,
             SkillShareRequest.status == "pending",
         )
     )
@@ -90,6 +93,7 @@ async def submit_skill_share_request(
 
     request_id = str(uuid.uuid4())
     snapshot = _snapshot_root() / request_id
+    commit_started = False
     try:
         await asyncio.to_thread(validate_share_tree_limits, source)
         parsed = await asyncio.to_thread(
@@ -110,20 +114,24 @@ async def submit_skill_share_request(
             description=parsed["description"],
             content_hash=await asyncio.to_thread(compute_skill_dir_hash, snapshot),
             application_reason=reason,
+            channel=channel,
             status="pending",
             created_at=utc_now_naive(),
         )
         db.add(item)
+        commit_started = True
         await db.commit()
         await db.refresh(item)
         return item
     except IntegrityError as exc:
         await db.rollback()
-        shutil.rmtree(snapshot, ignore_errors=True)
+        if not commit_started:
+            shutil.rmtree(snapshot, ignore_errors=True)
         raise ValueError("该 Skill 已有待审核申请") from exc
     except BaseException:
         await db.rollback()
-        shutil.rmtree(snapshot, ignore_errors=True)
+        if not commit_started:
+            shutil.rmtree(snapshot, ignore_errors=True)
         raise
 
 
@@ -161,9 +169,13 @@ async def publish_personal_skill_directly(
         raise
 
 
-async def list_skill_share_requests(db: AsyncSession, *, operator: User) -> list[dict]:
+async def list_skill_share_requests(db: AsyncSession, *, operator: User, channel: str = "shared") -> list[dict]:
     """申请人只看自己的记录，管理员查看本部门待审和历史。"""
-    query = select(SkillShareRequest, User.username).outerjoin(User, User.uid == SkillShareRequest.owner_uid)
+    query = (
+        select(SkillShareRequest, User.username)
+        .outerjoin(User, User.uid == SkillShareRequest.owner_uid)
+        .where(SkillShareRequest.channel == channel)
+    )
     if operator.role == "admin":
         query = query.where(
             SkillShareRequest.owner_department_id == operator.department_id
@@ -176,7 +188,7 @@ async def list_skill_share_requests(db: AsyncSession, *, operator: User) -> list
     return [{**item.to_dict(), "owner_name": name} for item, name in rows]
 
 
-async def _authorized_snapshot_path(db: AsyncSession, *, request_id: str, operator: User) -> Path:
+async def authorized_share_snapshot_path(db: AsyncSession, *, request_id: str, operator: User) -> Path:
     """授权并校验不可变审核快照。"""
     item = await db.get(SkillShareRequest, request_id)
     allowed = item is not None and (
@@ -204,7 +216,7 @@ async def _authorized_snapshot_path(db: AsyncSession, *, request_id: str, operat
 
 async def list_skill_share_snapshot_tree(db: AsyncSession, *, request_id: str, operator: User) -> list[dict]:
     """列出提交时的全部目录和文件，供审核员逐项检查。"""
-    snapshot = await _authorized_snapshot_path(db, request_id=request_id, operator=operator)
+    snapshot = await authorized_share_snapshot_path(db, request_id=request_id, operator=operator)
     return await asyncio.to_thread(build_skill_tree, snapshot, snapshot)
 
 
@@ -212,7 +224,7 @@ async def read_skill_share_snapshot(
     db: AsyncSession, *, request_id: str, operator: User, relative_path: str = "SKILL.md"
 ) -> str:
     """读取提交时快照中的指定文本文件。"""
-    snapshot = await _authorized_snapshot_path(db, request_id=request_id, operator=operator)
+    snapshot = await authorized_share_snapshot_path(db, request_id=request_id, operator=operator)
     target, _ = resolve_skill_relative_path(snapshot, relative_path)
     if not target.is_file():
         raise ValueError("文件不存在")
@@ -226,7 +238,7 @@ async def read_skill_share_snapshot(
 
 async def export_skill_share_snapshot(db: AsyncSession, *, request_id: str, operator: User) -> tuple[str, str]:
     """打包完整审核快照，供管理员检查非文本附件。"""
-    snapshot = await _authorized_snapshot_path(db, request_id=request_id, operator=operator)
+    snapshot = await authorized_share_snapshot_path(db, request_id=request_id, operator=operator)
 
     def archive() -> str:
         """在线程中创建临时 ZIP，响应结束后由路由清理。"""
@@ -257,7 +269,7 @@ async def reject_skill_share_request(
         and (operator.department_id is None or item.owner_department_id != operator.department_id)
     ):
         raise ValueError("共享申请不存在")
-    if item.status != "pending":
+    if item.channel != "shared" or item.status != "pending":
         raise ValueError("共享申请已审核")
     item.status = "rejected"
     item.review_note = note.strip() or None
@@ -286,7 +298,7 @@ async def approve_skill_share_request(
         and (operator.department_id is None or item.owner_department_id != operator.department_id)
     ):
         raise ValueError("共享申请不存在")
-    if item.status != "pending":
+    if item.channel != "shared" or item.status != "pending":
         raise ValueError("共享申请已审核")
     if read_scope is not None and department_ids:
         raise ValueError("发布范围不能同时使用旧部门列表与读取范围")
@@ -301,7 +313,7 @@ async def approve_skill_share_request(
     )
     await validate_personal_share_read_scope(db, read_scope=share_config["read_scope"], operator=operator)
 
-    snapshot = await _authorized_snapshot_path(db, request_id=request_id, operator=operator)
+    snapshot = await authorized_share_snapshot_path(db, request_id=request_id, operator=operator)
     parsed = await asyncio.to_thread(parse_skill_dir_metadata, snapshot)
     if parsed["slug"] != item.personal_slug:
         raise ValueError("审核快照的 Skill slug 已变化")
@@ -313,6 +325,7 @@ async def approve_skill_share_request(
             SkillShareRequest.owner_uid == item.owner_uid,
             SkillShareRequest.personal_slug == item.personal_slug,
             SkillShareRequest.status == "approved",
+            SkillShareRequest.channel == "shared",
         )
     )
     parent = Skill(slug=slug, share_config=share_config, created_by=str(operator.uid), enabled=True)
@@ -331,6 +344,7 @@ async def approve_skill_share_request(
     staging = root / f".{slug}.tmp-{uuid.uuid4().hex[:8]}"
     published = root / slug
     moved = False
+    commit_started = False
     try:
         published_metadata = await asyncio.to_thread(
             copy_skill_snapshot, snapshot, staging, expected_slug=item.personal_slug, final_slug=slug
@@ -360,12 +374,13 @@ async def approve_skill_share_request(
         item.published_slug = slug
         item.department_ids = share_config["read_scope"]["department_ids"]
         item.read_scope = share_config["read_scope"]
+        commit_started = True
         await db.commit()
         await db.refresh(item)
         return item
     except BaseException:
         await db.rollback()
-        if moved:
+        if moved and not commit_started:
             shutil.rmtree(published, ignore_errors=True)
         raise
     finally:

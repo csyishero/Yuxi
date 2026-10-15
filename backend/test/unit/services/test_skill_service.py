@@ -357,6 +357,12 @@ async def test_runtime_access_still_excludes_disabled_shared_skill(monkeypatch: 
 
     monkeypatch.setattr(svc, "list_personal_skills", no_personal_skills)
 
+    async def no_installed_market_skills(_db, _user):
+        """隔离旧共享授权断言之外的新市场安装来源。"""
+        return []
+
+    monkeypatch.setattr("yuxi.agents.skills.market.list_installed_market_skills", no_installed_market_skills)
+
     assert svc.user_can_access_skill(_user("root", role="user"), skill) is False
     assert await svc.list_accessible_skills(None, _user("root", role="user")) == []
 
