@@ -333,6 +333,66 @@ def test_personal_skill_permission_is_limited_to_owner():
     assert resolve_skill_permission(_user(uid="user-2"), resource) == ResourcePermission.NONE
 
 
+def test_department_admin_manages_only_exclusively_own_department_shared_skill():
+    resource = SimpleNamespace(
+        source_type="personal_share",
+        source_scope="shared",
+        created_by="reviewer",
+        share_config={
+            "version": 2,
+            "owner_department_id": 7,
+            "read_scope": {"access_level": "department", "department_ids": [7]},
+            "manage_scope": None,
+        },
+    )
+
+    assert (
+        resolve_skill_permission(_user(uid="department-admin", role="admin", department_id=7), resource)
+        == ResourcePermission.MANAGE
+    )
+    assert resolve_skill_permission(_user(uid="member", department_id=7), resource) == ResourcePermission.READ
+    assert (
+        resolve_skill_permission(_user(uid="other-admin", role="admin", department_id=8), resource)
+        == ResourcePermission.NONE
+    )
+    assert (
+        resolve_skill_permission(_user(uid="unassigned-admin", role="admin", department_id=None), resource)
+        == ResourcePermission.NONE
+    )
+
+    resource.share_config["read_scope"]["department_ids"] = [7, 8]
+    assert (
+        resolve_skill_permission(_user(uid="department-admin", role="admin", department_id=7), resource)
+        == ResourcePermission.READ
+    )
+
+    resource.share_config["read_scope"] = {"access_level": "global"}
+    assert (
+        resolve_skill_permission(_user(uid="department-admin", role="admin", department_id=7), resource)
+        == ResourcePermission.READ
+    )
+
+    resource.source_type = "builtin"
+    assert (
+        resolve_skill_permission(_user(uid="department-admin", role="admin", department_id=7), resource)
+        == ResourcePermission.READ
+    )
+
+    resource.source_type = "personal_share"
+    resource.share_config["read_scope"] = {"access_level": "department", "department_ids": [7]}
+    resource.share_config["owner_department_id"] = 8
+    assert (
+        resolve_skill_permission(_user(uid="department-admin", role="admin", department_id=7), resource)
+        == ResourcePermission.READ
+    )
+
+    resource.share_config.pop("owner_department_id")
+    assert (
+        resolve_skill_permission(_user(uid="department-admin", role="admin", department_id=7), resource)
+        == ResourcePermission.READ
+    )
+
+
 def test_legacy_broad_manage_scope_does_not_grant_implicit_read_or_edit():
     resource = _resource(
         share_config={

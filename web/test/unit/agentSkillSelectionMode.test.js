@@ -159,7 +159,8 @@ test('Skill 三态切换保持原配置契约，固定模式只保存明确勾�
           item.props.class?.includes('skill-mode-option') &&
           visibleText(item).includes(mode)
       )[0]
-    assert.match(visibleText(host), /本账号当前可用\s+2\s+项/)
+    assert.match(visibleText(host), /同源发布默认只选一个版本/)
+    assert.doesNotMatch(visibleText(host), /全部 Skill/)
     assert.doesNotMatch(visibleText(host), /已选择 2 项/)
 
     modeButton('固定选择').props.onClick()
@@ -204,7 +205,7 @@ test('Skill 三态切换保持原配置契约，固定模式只保存明确勾�
     modeButton('不启用').props.onClick()
     await nextTick()
     assert.deepEqual(store.agentConfig.skills, [])
-    modeButton('动态使用全部').props.onClick()
+    modeButton('自动使用').props.onClick()
     await nextTick()
     assert.equal(store.agentConfig.skills, null)
 

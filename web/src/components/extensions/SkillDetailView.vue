@@ -20,6 +20,7 @@
       <div class="extension-detail-actions">
         <div class="detail-actions">
           <a-space :size="8">
+            <a-button v-if="canPublishCurrentSkill" type="primary" @click="publishOpen = true">发布技能</a-button>
             <button
               v-if="activeTab === 'editor'"
               type="button"
@@ -64,10 +65,10 @@
           你可以查看并使用此 Skill，但没有管理权限。
         </div>
         <div v-if="isApprovedSkillRelease" class="readonly-scope-hint readonly-detail-hint">
-          已发布的 Skill 内容和依赖不可原地修改；请从个人 Skill {{ userStore.isAdmin ? '重新发布共享版本' : '重新申请共享' }}。
+          已发布的 Skill 内容和依赖不可原地修改；需要更新时，请由原技能拥有者从个人版本重新提交或发布。
         </div>
         <div v-if="isPersonalSkill" class="readonly-scope-hint readonly-detail-hint">
-          个人 Skill 仅你自己可用。修改内容或依赖不会自动更新已提交或已发布的共享版本；如需共享新版，{{ userStore.isAdmin ? '请直接转为共享' : '请再次申请' }}。
+          个人 Skill 仅你自己可用。修改内容或依赖不会自动更新已提交或已发布的版本；需要更新时，请使用“发布技能”重新提交。
         </div>
         <div class="workspace" :class="{ 'tree-visible': treeVisible }">
           <Transition name="skill-tree">
@@ -168,7 +169,7 @@
               class="lucide-icon-btn"
             >
               <Save :size="14" />
-              <span>保存范围</span>
+              <span>{{ isDepartmentManagedCurrentSkill ? '保存状态' : '保存范围' }}</span>
             </a-button>
           </div>
           <div class="settings-stack extension-detail-divider-list">
@@ -199,6 +200,9 @@
               </div>
               <div v-if="isBuiltinInstalledSkill" class="readonly-scope-hint">
                 内置 Skill 固定为全局生效范围，可通过启用状态控制是否参与运行时。
+              </div>
+              <div v-else-if="isDepartmentManagedCurrentSkill" class="readonly-scope-hint">
+                此 Skill 面向本部门。你可以管理启用状态、导出和删除；共享范围需保持本部门。
               </div>
               <div v-else-if="isReadOnlySkill" class="readonly-scope-hint">
                 当前 Skill 对你只读，不能修改生效范围。
@@ -364,6 +368,7 @@
     </template>
 
     <template #overlays>
+      <PersonalSkillPublish v-model:open="publishOpen" :skill="currentSkill" />
       <a-modal
         v-model:open="createModalVisible"
         :title="createForm.isDir ? '新建目录' : '新建文件'"
@@ -410,6 +415,8 @@ import AgentFilePreview from '@/components/AgentFilePreview.vue'
 import ExtensionDetailLayout from '@/components/shared/ExtensionDetailLayout.vue'
 import FileTreeComponent from '@/components/FileTreeComponent.vue'
 import ShareConfigForm from '@/components/ShareConfigForm.vue'
+import PersonalSkillPublish from './PersonalSkillPublish.vue'
+import { canManageSkillRecord, canPublishPersonalSkill, isDepartmentManagedSkill } from './skillManagementAccess.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -442,6 +449,7 @@ const savingDependencies = ref(false)
 const savingShareConfig = ref(false)
 const activeTab = ref('editor')
 const treeVisible = ref(false)
+const publishOpen = ref(false)
 const filePreviewRef = ref(null)
 
 const skills = ref([])
@@ -466,6 +474,7 @@ const dependencySearch = reactive({ tools: '', mcps: '', skills: '' })
 const isPersonalSkill = computed(
   () => isPersonalRoute.value && currentSkill.value?.source_scope === 'personal'
 )
+const canPublishCurrentSkill = computed(() => isPersonalSkill.value && canPublishPersonalSkill(currentSkill.value, userStore.uid))
 const isInstalledSkill = computed(() => isPersonalSkill.value || !!currentSkill.value?.dir_path)
 
 const isBuiltinInstalledSkill = computed(() => {
@@ -477,7 +486,8 @@ const ownDepartmentOptions = computed(() =>
     ? [{ id: userStore.departmentId, name: userStore.departmentName || '本部门' }]
     : []
 )
-const canManageCurrentSkill = computed(() => currentSkill.value?.can_manage !== false)
+const canManageCurrentSkill = computed(() => canManageSkillRecord(currentSkill.value))
+const isDepartmentManagedCurrentSkill = computed(() => isDepartmentManagedSkill(currentSkill.value))
 const isReadOnlySkill = computed(() => isInstalledSkill.value && !canManageCurrentSkill.value)
 const canEditSkillFiles = computed(
   () => canManageCurrentSkill.value && !isBuiltinInstalledSkill.value && !isApprovedSkillRelease.value
@@ -876,7 +886,7 @@ const confirmDeletePersonalNode = () => {
 
 const saveShareConfig = async () => {
   if (!currentSkill.value || !isInstalledSkill.value || !canManageCurrentSkill.value) return
-  if (!isBuiltinInstalledSkill.value) {
+  if (!isBuiltinInstalledSkill.value && !isDepartmentManagedCurrentSkill.value) {
     const validation = shareConfigFormRef.value?.validate?.()
     if (validation && !validation.valid) {
       message.warning(validation.message || '请完善 Skill 生效范围')
@@ -884,17 +894,35 @@ const saveShareConfig = async () => {
     }
   }
 
-  savingShareConfig.value = true
   const requestId = detailRequestId
   const targetSlug = currentSkill.value.slug
   const targetEnabled = enabledForm.value
   const targetShareConfig = cloneShareConfig(shareConfigForm.value)
   const targetIsBuiltin = isBuiltinInstalledSkill.value
+  const updateEnabled = targetEnabled !== (currentSkill.value.enabled !== false)
+  const updateShareConfig =
+    !targetIsBuiltin &&
+    !isDepartmentManagedCurrentSkill.value &&
+    JSON.stringify(targetShareConfig) !== JSON.stringify(cloneShareConfig(currentSkill.value.share_config))
+  if (!updateEnabled && !updateShareConfig) return
+
+  savingShareConfig.value = true
+  let result = null
+  let savedPart = ''
   try {
-    if (!targetIsBuiltin) {
-      await skillApi.updateSkillShareConfig(targetSlug, targetShareConfig)
+    // 开启时先收敛范围；关闭时先停用，避免第二步失败后意外扩大可用范围。
+    if (updateShareConfig && targetEnabled) {
+      result = await skillApi.updateSkillShareConfig(targetSlug, targetShareConfig)
+      savedPart = '共享范围'
     }
-    const result = await skillApi.updateSkillEnabled(targetSlug, targetEnabled)
+    if (updateEnabled) {
+      result = await skillApi.updateSkillEnabled(targetSlug, targetEnabled)
+      savedPart = '启用状态'
+    }
+    if (updateShareConfig && !targetEnabled) {
+      result = await skillApi.updateSkillShareConfig(targetSlug, targetShareConfig)
+      savedPart = '共享范围'
+    }
     if (requestId !== detailRequestId) return
     if (result?.data) {
       currentSkill.value = result.data
@@ -903,7 +931,12 @@ const saveShareConfig = async () => {
     message.success('设置已保存')
   } catch (error) {
     if (requestId === detailRequestId) {
-      message.error(error?.response?.data?.detail || error.message || '保存设置失败')
+      if (result?.data) {
+        currentSkill.value = result.data
+        syncShareConfigFromSkill(result.data)
+      }
+      const reason = error?.response?.data?.detail || error.message || '保存设置失败'
+      message.error(savedPart ? `${savedPart}已保存，但后续设置保存失败：${reason}` : reason)
     }
   } finally {
     savingShareConfig.value = false
@@ -940,6 +973,7 @@ const saveDependencies = async () => {
 }
 
 watch([slug, isPersonalRoute], () => {
+  publishOpen.value = false
   detailRequestId += 1
   currentSkill.value = null
   treeData.value = []

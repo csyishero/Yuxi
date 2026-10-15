@@ -6,6 +6,7 @@ import asyncio
 import os
 import uuid
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -17,11 +18,19 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.agents.mcp import service as mcp_service
 from yuxi.agents.toolkits import service as tool_service
-from yuxi.permissions import ResourcePermissionDenied, normalize_permission_config
+from yuxi import storage_migration
+from yuxi.permissions import (
+    ResourcePermission,
+    ResourcePermissionDenied,
+    normalize_permission_config,
+    resolve_skill_permission,
+)
 from yuxi.storage.postgres.manager import BUSINESS_SCHEMA_VERSION, KNOWLEDGE_SCHEMA_VERSION, PostgresManager
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import Department, MCPServer, User
+from yuxi.storage.postgres.models_business import Department, MCPServer, Skill, SkillShareRequest, User
 from yuxi.storage.postgres.models_knowledge import KnowledgeBase
+from yuxi.storage_migrations.v071_workdirs import V071WorkdirMigrationPlan
+from yuxi.utils.datetime_utils import utc_now_naive
 
 from server.routers.mcp_router import mcp
 from server.utils.auth_middleware import get_db, get_required_user
@@ -286,7 +295,7 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
             "ix_scheduled_agent_runs_job_created",
             "ix_scheduled_agent_runs_dispatching",
         }.issubset(scheduled_indexes)
-        assert BUSINESS_SCHEMA_VERSION == 10
+        assert BUSINESS_SCHEMA_VERSION == 14
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 
@@ -304,9 +313,20 @@ async def test_skill_share_request_table_migrates_from_previous_business_schema(
         await manager.ensure_skill_share_request_schema()
         async with scoped_engine.begin() as connection:
             await connection.execute(text("ALTER TABLE skill_share_requests DROP COLUMN read_scope"))
+            await connection.execute(text("ALTER TABLE skill_share_requests DROP COLUMN published_skill_id"))
             await connection.execute(
                 text("ALTER TABLE skill_share_requests ALTER COLUMN owner_department_id SET NOT NULL")
             )
+            await connection.execute(
+                text(
+                    "INSERT INTO skill_share_requests "
+                    "(id, owner_uid, owner_department_id, personal_slug, name, description, "
+                    "content_hash, status, published_slug, department_ids) "
+                    "VALUES ('legacy-approved', 'owner', 1, 'credit-check', 'Credit Check', "
+                    "'legacy description', 'legacy-hash', 'approved', 'credit-check', '[]'::jsonb)"
+                )
+            )
+        await manager.ensure_skill_share_request_schema()
         await manager.ensure_skill_share_request_schema()
         async with scoped_engine.connect() as connection:
             columns = set(
@@ -331,9 +351,15 @@ async def test_skill_share_request_table_migrates_from_previous_business_schema(
                     )
                 ).scalars()
             )
-        assert {"owner_uid", "owner_department_id", "content_hash", "status", "published_slug", "read_scope"}.issubset(
-            columns
-        )
+        assert {
+            "owner_uid",
+            "owner_department_id",
+            "content_hash",
+            "status",
+            "published_slug",
+            "published_skill_id",
+            "read_scope",
+        }.issubset(columns)
         async with scoped_engine.connect() as connection:
             nullable = await connection.scalar(
                 text(
@@ -343,10 +369,337 @@ async def test_skill_share_request_table_migrates_from_previous_business_schema(
                 ),
                 {"schema": schema},
             )
+            legacy = (
+                await connection.execute(
+                    text(
+                        "SELECT status, published_slug, published_skill_id "
+                        "FROM skill_share_requests WHERE id = 'legacy-approved'"
+                    )
+                )
+            ).one()
         assert nullable == "YES"
+        assert tuple(legacy) == ("approved", "credit-check", None)
         assert "uq_skill_share_requests_pending" in indexes
-        assert BUSINESS_SCHEMA_VERSION == 10
+        assert BUSINESS_SCHEMA_VERSION == 14
         assert (await manager.get_schema_versions())["business"] == 8
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
+async def test_skill_owner_department_backfill_requires_unique_proven_approval() -> None:
+    """存量共享技能只从唯一且内容、审核人、时间吻合的申请获得部门归属。"""
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_skill_owner_department")
+    try:
+        await manager.create_business_tables()
+        sessions = async_sessionmaker(scoped_engine, expire_on_commit=False)
+        now = utc_now_naive()
+        async with sessions() as db:
+            for slug in (
+                "approved",
+                "reused",
+                "wrong-reviewer",
+                "wrong-name",
+                "duplicated",
+                "orphan",
+                "legacy-upload",
+            ):
+                db.add(
+                    Skill(
+                        slug=slug,
+                        name=slug,
+                        description=f"{slug} description",
+                        source_type="upload" if slug == "legacy-upload" else "personal_share",
+                        tool_dependencies=[],
+                        mcp_dependencies=[],
+                        skill_dependencies=[],
+                        dir_path=f"shared/{slug}",
+                        content_hash="published-hash",
+                        share_config={
+                            "version": 2,
+                            "read_scope": {"access_level": "department", "department_ids": [3]},
+                            "manage_scope": None,
+                        },
+                        enabled=True,
+                        created_by="reviewer",
+                        created_at=now,
+                    )
+                )
+            for request_id, slug, created_at, reviewed_at in (
+                ("approved", "approved", now - timedelta(minutes=1), now + timedelta(minutes=1)),
+                ("reused", "reused", now + timedelta(minutes=1), now + timedelta(minutes=2)),
+                ("wrong-reviewer", "wrong-reviewer", now - timedelta(minutes=1), now + timedelta(minutes=1)),
+                ("wrong-name", "wrong-name", now - timedelta(minutes=1), now + timedelta(minutes=1)),
+                ("dup-1", "duplicated", now - timedelta(minutes=1), now + timedelta(minutes=1)),
+                ("dup-2", "duplicated", now - timedelta(minutes=1), now + timedelta(minutes=1)),
+                ("upload", "legacy-upload", now - timedelta(minutes=1), now + timedelta(minutes=1)),
+            ):
+                db.add(
+                    SkillShareRequest(
+                        id=request_id,
+                        owner_uid="owner",
+                        owner_department_id=3,
+                        personal_slug=slug,
+                        name="other-skill" if slug == "wrong-name" else slug,
+                        description=f"{slug} description",
+                        content_hash="snapshot-hash",
+                        status="approved",
+                        channel="shared",
+                        reviewer_uid="other-reviewer" if slug == "wrong-reviewer" else "reviewer",
+                        published_slug=slug,
+                        department_ids=[3],
+                        created_at=created_at,
+                        reviewed_at=reviewed_at,
+                    )
+                )
+            await db.commit()
+
+        await manager.backfill_skill_owner_department_provenance()
+        await manager.backfill_skill_owner_department_provenance()
+        async with sessions() as db:
+            items = {item.slug: item for item in (await db.scalars(select(Skill))).all()}
+            admin = SimpleNamespace(uid="peer-admin", role="admin", department_id=3)
+            assert items["approved"].share_config["owner_department_id"] == 3
+            assert resolve_skill_permission(admin, items["approved"]) == ResourcePermission.MANAGE
+            for slug in ("reused", "wrong-reviewer", "wrong-name", "duplicated", "orphan", "legacy-upload"):
+                assert "owner_department_id" not in items[slug].share_config
+                assert resolve_skill_permission(admin, items[slug]) == ResourcePermission.READ
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
+@pytest.mark.parametrize("previous_version", [12, 13])
+async def test_business_migrator_preserves_legacy_share_and_records_v14_idempotently(
+    monkeypatch, tmp_path, previous_version: int
+) -> None:
+    """真实迁移入口升级 v12/v13，并保留旧共享记录的未知副本身份。"""
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_skill_v12_migration")
+    try:
+        manager.AsyncSession = async_sessionmaker(scoped_engine, expire_on_commit=False)
+        await manager.create_business_tables()
+        await manager.create_schema_version_table()
+        await manager.record_schema_version("business", previous_version)
+        await manager.record_schema_version("knowledge", KNOWLEDGE_SCHEMA_VERSION)
+        now = utc_now_naive()
+        async with manager.AsyncSession() as db:
+            db.add(
+                Skill(
+                    slug="department-approved",
+                    name="department-approved",
+                    description="Department approved skill",
+                    source_type="personal_share",
+                    tool_dependencies=[],
+                    mcp_dependencies=[],
+                    skill_dependencies=[],
+                    dir_path="shared/department-approved",
+                    content_hash="published-hash",
+                    share_config={
+                        "version": 2,
+                        "read_scope": {"access_level": "department", "department_ids": [3]},
+                        "manage_scope": None,
+                    },
+                    created_by="reviewer",
+                    created_at=now,
+                )
+            )
+            db.add(
+                SkillShareRequest(
+                    id="approved-request",
+                    owner_uid="owner",
+                    owner_department_id=3,
+                    personal_slug="department-approved",
+                    name="department-approved",
+                    description="Department approved skill",
+                    content_hash="snapshot-hash",
+                    status="approved",
+                    channel="shared",
+                    reviewer_uid="reviewer",
+                    published_slug="department-approved",
+                    department_ids=[3],
+                    created_at=now - timedelta(minutes=1),
+                    reviewed_at=now + timedelta(minutes=1),
+                )
+            )
+            await db.commit()
+        async with scoped_engine.begin() as connection:
+            await connection.execute(text("ALTER TABLE skill_share_requests DROP COLUMN IF EXISTS published_skill_id"))
+
+        async def no_effect(*_args, **_kwargs):
+            """隔离非 Schema 的运行时收敛。"""
+
+        async def read_empty_plan(_db):
+            """声明当前隔离库没有历史工作目录。"""
+            return V071WorkdirMigrationPlan(False, (), ())
+
+        monkeypatch.setattr(storage_migration, "pg_manager", manager)
+        monkeypatch.setattr(storage_migration, "read_v071_workdir_plan", read_empty_plan)
+        monkeypatch.setattr(storage_migration, "_legacy_skill_roots_exist", lambda: False)
+        monkeypatch.setattr(storage_migration, "_legacy_system_config_exists", lambda: False)
+        monkeypatch.setattr(storage_migration, "runtime_storage_requires_quiescence", lambda: False)
+        monkeypatch.setattr(storage_migration, "_converge_database_state", no_effect)
+        monkeypatch.setattr(storage_migration, "migrate_shared_skills", no_effect)
+        monkeypatch.setattr(storage_migration, "mark_v071_skills_migrated", lambda: None)
+        monkeypatch.setattr(storage_migration, "migrate_runtime_storage_identity", lambda: None)
+        monkeypatch.setattr(storage_migration, "get_legacy_storage_dir", lambda: tmp_path)
+        monkeypatch.setattr(manager, "close", no_effect)
+
+        await storage_migration.main()
+        async with scoped_engine.connect() as connection:
+            first_version = (
+                await connection.execute(
+                    text("SELECT version, applied_at FROM yuxi_schema_migrations WHERE domain = 'business'")
+                )
+            ).one()
+            first_config = await connection.scalar(
+                text("SELECT share_config FROM skills WHERE slug = 'department-approved'")
+            )
+            legacy_published_skill_id = await connection.scalar(
+                text("SELECT published_skill_id FROM skill_share_requests WHERE id = 'approved-request'")
+            )
+        assert first_version.version == BUSINESS_SCHEMA_VERSION
+        if previous_version == 12:
+            assert first_config["owner_department_id"] == 3
+        else:
+            assert "owner_department_id" not in first_config
+        assert legacy_published_skill_id is None
+
+        await storage_migration.main()
+        async with scoped_engine.connect() as connection:
+            second_version = (
+                await connection.execute(
+                    text("SELECT version, applied_at FROM yuxi_schema_migrations WHERE domain = 'business'")
+                )
+            ).one()
+            second_config = await connection.scalar(
+                text("SELECT share_config FROM skills WHERE slug = 'department-approved'")
+            )
+        assert second_version == first_version
+        assert second_config == first_config
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
+async def test_skill_market_schema_migrates_v10_idempotently() -> None:
+    """已有共享申请和业务行在市场表创建后保持原值。"""
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_skill_market_schema")
+    try:
+        await manager.create_business_tables()
+        async with scoped_engine.begin() as connection:
+            await connection.execute(text("DROP TABLE market_skill_likes"))
+            await connection.execute(text("DROP TABLE market_skill_installs"))
+            await connection.execute(text("DROP TABLE market_skill_releases"))
+            await connection.execute(text("DROP TABLE market_skills"))
+            await connection.execute(text("ALTER TABLE skill_share_requests DROP COLUMN channel"))
+            await connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX uq_skill_share_requests_pending "
+                    "ON skill_share_requests(owner_uid, personal_slug) WHERE status = 'pending'"
+                )
+            )
+
+        await manager.ensure_skill_market_schema()
+        await manager.ensure_skill_market_schema()
+        async with scoped_engine.connect() as connection:
+            tables = await connection.scalars(
+                text("SELECT table_name FROM information_schema.tables WHERE table_schema = :schema"),
+                {"schema": schema},
+            )
+            channel = await connection.scalar(
+                text(
+                    "SELECT column_default FROM information_schema.columns "
+                    "WHERE table_schema = :schema AND table_name = 'skill_share_requests' AND column_name = 'channel'"
+                ),
+                {"schema": schema},
+            )
+        assert {"market_skills", "market_skill_releases", "market_skill_installs", "market_skill_likes"}.issubset(
+            set(tables)
+        )
+        assert "shared" in channel
+        async with scoped_engine.connect() as connection:
+            columns = await connection.scalar(
+                text(
+                    "SELECT array_agg(att.attname ORDER BY ord.ordinality) FROM pg_class tbl "
+                    "JOIN pg_namespace ns ON ns.oid = tbl.relnamespace "
+                    "JOIN pg_index idx ON idx.indrelid = tbl.oid "
+                    "JOIN pg_class index_tbl ON index_tbl.oid = idx.indexrelid "
+                    "JOIN LATERAL unnest(idx.indkey) WITH ORDINALITY AS ord(attnum, ordinality) ON TRUE "
+                    "JOIN pg_attribute att ON att.attrelid = tbl.oid AND att.attnum = ord.attnum "
+                    "WHERE ns.nspname = :schema AND index_tbl.relname = 'uq_skill_share_requests_pending' "
+                    "GROUP BY index_tbl.relname"
+                ),
+                {"schema": schema},
+            )
+        assert columns == ["owner_uid", "personal_slug", "channel"]
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
+async def test_skill_category_schema_migrates_v11_rows_to_other_idempotently() -> None:
+    """v11 的技能、申请和市场版本保留原行并获得「其它」分类。"""
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_skill_category_schema")
+    try:
+        await manager.create_business_tables()
+        async with scoped_engine.begin() as connection:
+            for table in ("skills", "skill_share_requests", "market_skill_releases"):
+                await connection.execute(text(f"ALTER TABLE {table} DROP COLUMN category"))
+            await connection.execute(
+                text(
+                    "INSERT INTO skills (slug, name, description, source_type, tool_dependencies, "
+                    "mcp_dependencies, skill_dependencies, dir_path, share_config, enabled) "
+                    "VALUES ('old-shared', 'Old Shared', 'Old description', 'upload', '[]'::jsonb, "
+                    "'[]'::jsonb, '[]'::jsonb, 'shared/old-shared', '{}'::jsonb, TRUE)"
+                )
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO skill_share_requests "
+                    "(id, owner_uid, personal_slug, name, description, content_hash, channel, status, "
+                    "department_ids, created_at) VALUES "
+                    "('old-request', 'old-owner', 'old-market', 'Old Market', 'Old description', "
+                    "'old-hash', 'market', 'approved', '[]'::jsonb, NOW())"
+                )
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO market_skills "
+                    "(id, slug, owner_uid, personal_slug, scope, latest_release_id, created_at, updated_at) "
+                    "VALUES ('old-listing', 'old-market', 'old-owner', 'old-market', 'global', "
+                    "'old-release', NOW(), NOW())"
+                )
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO market_skill_releases "
+                    "(id, market_skill_id, version, name, description, dir_path, content_hash, "
+                    "tool_dependencies, mcp_dependencies, skill_dependencies, request_id, created_at) "
+                    "VALUES ('old-release', 'old-listing', 1, 'Old Market', 'Old description', "
+                    "'market/releases/old-release', 'old-hash', '[]'::jsonb, '[]'::jsonb, "
+                    "'[]'::jsonb, 'old-request', NOW())"
+                )
+            )
+        await manager.create_schema_version_table()
+        await manager.record_schema_version("business", 11)
+
+        await manager.ensure_skill_market_schema()
+        await manager.ensure_skill_market_schema()
+        async with scoped_engine.connect() as connection:
+            values = [
+                await connection.scalar(text("SELECT category FROM skills WHERE slug = 'old-shared'")),
+                await connection.scalar(text("SELECT category FROM skill_share_requests WHERE id = 'old-request'")),
+                await connection.scalar(text("SELECT category FROM market_skill_releases WHERE id = 'old-release'")),
+            ]
+            not_null = [
+                await connection.scalar(
+                    text(
+                        "SELECT is_nullable FROM information_schema.columns "
+                        "WHERE table_schema = :schema AND table_name = :table AND column_name = 'category'"
+                    ),
+                    {"schema": schema, "table": table},
+                )
+                for table in ("skills", "skill_share_requests", "market_skill_releases")
+            ]
+        assert values == ["other", "other", "other"]
+        assert not_null == ["NO", "NO", "NO"]
+        assert (await manager.get_schema_versions())["business"] == 11
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 
@@ -361,10 +714,12 @@ async def test_skill_share_reason_migrates_v9_rows_without_inventing_history() -
             await connection.execute(
                 text(
                     "INSERT INTO skill_share_requests "
-                    "(id, owner_uid, owner_department_id, personal_slug, name, description, "
-                    "content_hash, status, review_note, reviewer_uid, department_ids, created_at, reviewed_at) "
+                    "(id, owner_uid, owner_department_id, personal_slug, name, description, category, "
+                    "content_hash, channel, status, review_note, reviewer_uid, "
+                    "department_ids, created_at, reviewed_at) "
                     "VALUES ('legacy-approved', 'owner', 1, 'credit-check', 'Credit Check', "
-                    "'legacy description', 'legacy-hash', 'approved', '已通过', 'reviewer', '[]'::jsonb, NOW(), NOW())"
+                    "'legacy description', 'other', 'legacy-hash', 'shared', 'approved', '已通过', 'reviewer', "
+                    "'[]'::jsonb, NOW(), NOW())"
                 )
             )
         await manager.create_schema_version_table()

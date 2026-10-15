@@ -58,7 +58,12 @@ from yuxi.agents.skills.sharing import (
     publish_personal_skill_directly,
     submit_skill_share_request,
 )
-from yuxi.permissions import resolve_skill_permission
+from yuxi.permissions import (
+    SKILL_PERMISSION_POLICY,
+    ResourcePermission,
+    resolve_resource_permission,
+    resolve_skill_permission,
+)
 from yuxi.services.mcp_reference_service import get_visible_mcp_reference_slugs, project_mcp_references
 from yuxi.agents.skills.remote_install import list_remote_skills, search_remote_skills
 from yuxi.storage.postgres.models_business import User
@@ -115,10 +120,11 @@ class _DraftConfirmRequestBase(BaseModel):
 
 class SkillDraftConfirmRequest(_DraftConfirmRequestBase):
     share_config: dict | None = Field(None, description="共享权限配置")
+    categories: dict[str, str] | None = Field(None, description="按草稿 Skill slug 选择分类")
 
 
 class PersonalSkillDraftConfirmRequest(_DraftConfirmRequestBase):
-    pass
+    categories: dict[str, str] | None = Field(None, description="按草稿 Skill slug 选择分类")
 
 
 class SkillShareReviewRequest(BaseModel):
@@ -129,6 +135,14 @@ class SkillShareReviewRequest(BaseModel):
 
 class SkillShareSubmitRequest(BaseModel):
     application_reason: str = Field(..., min_length=1, max_length=1000, description="申请共享的原因")
+    category: str | None = Field(None, description="申请共享的技能方向")
+
+
+class SkillDirectPublishRequest(SkillShareReviewRequest):
+    """管理员发布自己个人 Skill 时指定方向与说明。"""
+
+    note: str = Field("", max_length=1000, description="发布说明")
+    category: str | None = Field(None, description="发布技能方向")
 
 
 def _raise_from_value_error(e: ValueError) -> None:
@@ -158,6 +172,13 @@ def _serialize_skill_for_user(item, user: User, visible_mcp_slugs: set[str] | No
     data["can_manage"] = user_can_manage_skill(user, item)
     data["effective_permission"] = resolve_skill_permission(user, item).value
     data["is_builtin"] = is_builtin_skill(item)
+    data["department_managed"] = (
+        user.role == "admin"
+        and item.source_type in {"upload", "remote", "personal_share"}
+        and getattr(item, "source_scope", "shared") == "shared"
+        and data["can_manage"]
+        and resolve_resource_permission(user, item, SKILL_PERMISSION_POLICY) != ResourcePermission.MANAGE
+    )
     return data
 
 
@@ -238,11 +259,11 @@ async def read_personal_skill_catalog_file_route(
 async def publish_personal_skill_directly_route(
     owner_uid: str,
     slug: str,
-    payload: SkillShareReviewRequest,
+    payload: SkillDirectPublishRequest,
     current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """管理员将权限范围内的个人 Skill 快照直接发布为共享副本。"""
+    """管理员将本人个人 Skill 快照直接发布为共享副本。"""
     try:
         item = await publish_personal_skill_directly(
             db,
@@ -251,6 +272,7 @@ async def publish_personal_skill_directly_route(
             department_ids=payload.department_ids,
             read_scope=payload.read_scope,
             note=payload.note,
+            category=payload.category,
             operator=current_user,
         )
         return {"success": True, "data": item.to_dict()}
@@ -371,6 +393,7 @@ async def confirm_skill_install_draft_route(
             draft_id=draft_id,
             share_config=payload.share_config,
             slugs=payload.slugs,
+            categories=payload.categories,
             operator=current_user,
         )
         return {"success": True, "data": results, "summary": _summarize_results(results)}
@@ -393,6 +416,7 @@ async def confirm_personal_skill_install_draft_route(
         results = await confirm_personal_skill_install_draft(
             draft_id=draft_id,
             slugs=payload.slugs,
+            categories=payload.categories,
             operator=current_user,
         )
         return {"success": True, "data": results, "summary": _summarize_results(results)}
@@ -415,7 +439,11 @@ async def submit_skill_share_request_route(
     """提交当前用户个人 Skill 的共享申请。"""
     try:
         item = await submit_skill_share_request(
-            db, slug=slug, application_reason=payload.application_reason, operator=current_user
+            db,
+            slug=slug,
+            application_reason=payload.application_reason,
+            operator=current_user,
+            category=payload.category,
         )
         return {"success": True, "data": item.to_dict()}
     except ValueError as e:
@@ -427,11 +455,12 @@ async def submit_skill_share_request_route(
 
 @user_skills.get("/share-requests")
 async def list_skill_share_requests_route(
+    mine_only: bool = Query(False),
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
     """列出当前用户可见的共享申请。"""
-    items = await list_skill_share_requests(db, operator=current_user)
+    items = await list_skill_share_requests(db, operator=current_user, mine_only=mine_only)
     return {"success": True, "data": items}
 
 

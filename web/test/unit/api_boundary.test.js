@@ -227,6 +227,38 @@ test('用户 Store 的普通错误传播链不附着或记录服务端任意响�
   })
 })
 
+test('市场审批只展示允许的范围冲突文案，其他响应仍脱敏', async () => {
+  await withServer(async (server) => {
+    storageValues.set('user_token', 'test-token')
+    setActivePinia(createPinia())
+    const { apiPost } = await server.ssrLoadModule('/src/apis/base.js')
+
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ detail: '已有市场条目的发布范围不可在新版本中修改' }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' }
+      })
+    await assert.rejects(
+      apiPost('/api/skill-market/requests/request-1/approve', { scope: 'department' }),
+      (error) => {
+        assert.equal(error.message, '已有市场条目的发布范围不可在新版本中修改')
+        assert.deepEqual(error.response.data, { detail: error.message })
+        return true
+      }
+    )
+
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ detail: 'secret server context' }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' }
+      })
+    await assert.rejects(
+      apiPost('/api/skill-market/requests/request-1/approve', { scope: 'department' }),
+      (error) => error.message === '请求参数错误' && error.response.data.detail === '请求参数错误'
+    )
+  })
+})
+
 test('用户管理分页 API 只请求当前页并编码服务端筛选条件', async () => {
   await withServer(async (server) => {
     storageValues.set('user_token', 'test-token')

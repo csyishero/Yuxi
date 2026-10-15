@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 from yuxi.agents.skills import service as svc
 from yuxi.agents.toolkits import service as tool_service
+from yuxi.permissions import ResourcePermission, resolve_skill_permission
 from yuxi.storage.postgres.models_business import Skill, User
 
 
@@ -94,6 +95,12 @@ def _user(uid: str = "root", role: str = "admin") -> User:
 
 
 class _UnitOfWork:
+    def get_bind(self):
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    async def scalar(self, _statement):
+        return None
+
     async def commit(self) -> None:
         pass
 
@@ -357,6 +364,12 @@ async def test_runtime_access_still_excludes_disabled_shared_skill(monkeypatch: 
 
     monkeypatch.setattr(svc, "list_personal_skills", no_personal_skills)
 
+    async def no_installed_market_skills(_db, _user):
+        """隔离旧共享授权断言之外的新市场安装来源。"""
+        return []
+
+    monkeypatch.setattr("yuxi.agents.skills.market.list_installed_market_skills", no_installed_market_skills)
+
     assert svc.user_can_access_skill(_user("root", role="user"), skill) is False
     assert await svc.list_accessible_skills(None, _user("root", role="user")) == []
 
@@ -515,6 +528,17 @@ def test_parse_skill_markdown_ok():
     assert name == "demo-skill"
     assert desc == "demo description"
     assert meta["name"] == "demo-skill"
+
+
+def test_legacy_skill_category_defaults_to_other(tmp_path: Path):
+    """旧技能及外部未知分类仍可解析并归入其它。"""
+    skill_dir = tmp_path / "legacy"
+    skill_dir.mkdir()
+    path = skill_dir / "SKILL.md"
+    path.write_text("---\nname: legacy\ndescription: legacy skill\n---\n", encoding="utf-8")
+    assert svc.parse_skill_dir_metadata(skill_dir)["category"] == "other"
+    path.write_text("---\nname: legacy\ndescription: legacy skill\ncategory: custom\n---\n", encoding="utf-8")
+    assert svc.parse_skill_dir_metadata(skill_dir)["category"] == "other"
 
 
 def test_parse_skill_markdown_supports_display_name_with_slug():
@@ -1063,11 +1087,15 @@ async def test_refresh_user_skill_projection_serializes_authorization_snapshots(
 
     async def get_user(_self, _db, uid):
         assert uid == "user-1"
-        return SimpleNamespace(is_deleted=0, role="admin")
+        return SimpleNamespace(uid=uid, is_deleted=0, role="admin")
 
     async def list_shared(_db, _user, *, require_enabled=True):
         del require_enabled
         return list(current_items)
+
+    async def no_market_projection(_db, _user):
+        """此用例只验证共享 Skill 投影的串行化。"""
+        return {}
 
     async def to_thread(_func, _uid, sources, _visible_mcp_slugs):
         if not synchronized_sources:
@@ -1083,6 +1111,7 @@ async def test_refresh_user_skill_projection_serializes_authorization_snapshots(
     monkeypatch.setattr(user_repository.UserRepository, "get_by_uid_with_db", get_user)
     monkeypatch.setattr(svc, "_list_accessible_shared_skills", list_shared)
     monkeypatch.setattr(svc, "_resolve_skill_dir", lambda item: item.source_dir)
+    monkeypatch.setattr("yuxi.agents.skills.market.market_projection_sources", no_market_projection)
     monkeypatch.setattr(svc.asyncio, "to_thread", to_thread)
 
     old_run = asyncio.create_task(svc.refresh_user_skill_projection_async("user-1"))
@@ -1116,8 +1145,8 @@ async def test_refresh_user_skill_projection_excludes_personal_skills(monkeypatc
         async def __aexit__(self, *_args):
             return None
 
-    async def get_user(_self, _db, _uid):
-        return SimpleNamespace(is_deleted=0, role="admin")
+    async def get_user(_self, _db, uid):
+        return SimpleNamespace(uid=uid, is_deleted=0, role="admin")
 
     async def list_shared(_db, _user, *, require_enabled=True):
         del require_enabled
@@ -1125,6 +1154,10 @@ async def test_refresh_user_skill_projection_excludes_personal_skills(monkeypatc
 
     async def fail_combined_list(*_args, **_kwargs):
         raise AssertionError("共享投影不得扫描或合并个人 Skill")
+
+    async def no_market_projection(_db, _user):
+        """此用例只验证共享投影不会合并个人 Skill。"""
+        return {}
 
     async def sync_projection(_uid, sources, _visible_mcp_slugs):
         synchronized_sources.append(dict(sources))
@@ -1134,6 +1167,7 @@ async def test_refresh_user_skill_projection_excludes_personal_skills(monkeypatc
     monkeypatch.setattr(svc, "_list_accessible_shared_skills", list_shared)
     monkeypatch.setattr(svc, "list_accessible_skills", fail_combined_list)
     monkeypatch.setattr(svc, "_resolve_skill_dir", lambda item: Path(f"/tmp/{item.slug}"))
+    monkeypatch.setattr("yuxi.agents.skills.market.market_projection_sources", no_market_projection)
     monkeypatch.setattr(svc, "sync_user_accessible_skills_async", sync_projection)
 
     sources = await svc.refresh_user_skill_projection_async("user-1")
@@ -1219,15 +1253,151 @@ async def test_skill_upload_prepare_confirm_rewrites_conflicting_name(tmp_path: 
     results = await svc.confirm_skill_install_draft(
         _UnitOfWork(),
         draft_id=draft["draft_id"],
-        share_config=draft["default_share_config"],
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "department", "department_ids": [1]},
+            "manage_scope": None,
+        },
         operator=operator,
     )
 
     assert results[0]["slug"] == "demo-v2"
     assert results[0]["success"] is True
     assert FakeRepo.created_item.slug == "demo-v2"
+    assert FakeRepo.created_item.share_config["owner_department_id"] == 1
     skill_md = (tmp_path / "skill-sources/shared" / "demo-v2" / "SKILL.md").read_text(encoding="utf-8")
-    assert "name: demo-v2" in skill_md
+    assert "slug: demo-v2" in skill_md
+
+
+@pytest.mark.parametrize(
+    ("source_type", "read_scope", "forged_department_id", "initial_permission"),
+    [
+        ("upload", {"access_level": "department", "department_ids": [1]}, 2, ResourcePermission.MANAGE),
+        ("remote", {"access_level": "department", "department_ids": [1]}, 2, ResourcePermission.MANAGE),
+        ("upload", {"access_level": "department", "department_ids": [2]}, 2, ResourcePermission.NONE),
+        ("upload", {"access_level": "global"}, 2, ResourcePermission.READ),
+        ("remote", {"access_level": "global"}, 2, ResourcePermission.READ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_admin_shared_draft_origin_comes_from_operator_independent_of_read_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_type: str,
+    read_scope: dict,
+    forged_department_id: int,
+    initial_permission: ResourcePermission,
+):
+    """上传与远程草稿始终记录发布部门；收窄可见范围后才继承部门管理权。"""
+    draft_dir = tmp_path / "draft"
+    source_dir = draft_dir / "items" / "skill"
+    source_dir.mkdir(parents=True)
+    (source_dir / "SKILL.md").write_text(
+        "---\nname: provenance-test\ndescription: provenance test\n---\n# Provenance\n", encoding="utf-8"
+    )
+    draft_data = {
+        "created_by": "root",
+        "source_type": source_type,
+        "items": [{"slug": "provenance-test", "source_dir": "items/skill", "success": True}],
+    }
+    monkeypatch.setattr(svc, "_load_skill_draft", lambda _draft_id: (draft_dir, draft_data))
+
+    class FakeRepo:
+        created_item: Skill | None = None
+
+        def __init__(self, _db):
+            pass
+
+        async def exists_slug(self, _slug: str) -> bool:
+            return False
+
+        async def create(self, **kwargs) -> Skill:
+            self.__class__.created_item = Skill(**kwargs)
+            return self.__class__.created_item
+
+    monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
+    results = await svc.confirm_skill_install_draft(
+        _UnitOfWork(),
+        draft_id="draft",
+        share_config={
+            "version": 2,
+            "read_scope": read_scope,
+            "manage_scope": None,
+            "owner_department_id": forged_department_id,
+        },
+        operator=_user("root"),
+    )
+
+    assert results[0]["success"] is True
+    assert FakeRepo.created_item is not None
+    assert FakeRepo.created_item.share_config["owner_department_id"] == 1
+    peer_admin = _user("peer-admin")
+    assert resolve_skill_permission(peer_admin, FakeRepo.created_item) == initial_permission
+    FakeRepo.created_item.share_config["read_scope"] = {
+        "access_level": "department",
+        "department_ids": [1],
+        "user_uids": [],
+    }
+    assert resolve_skill_permission(peer_admin, FakeRepo.created_item) == ResourcePermission.MANAGE
+
+
+@pytest.mark.asyncio
+async def test_shared_draft_categories_are_per_skill_and_validated_before_install(tmp_path: Path, monkeypatch):
+    """共享草稿的逐项分类进入数据库元数据及发布文件。"""
+
+    class FakeRepo:
+        created: list[Skill] = []
+
+        def __init__(self, _db):
+            pass
+
+        async def exists_slug(self, _slug: str) -> bool:
+            return False
+
+        async def create(self, **kwargs) -> Skill:
+            item = Skill(**kwargs, updated_by=kwargs["created_by"])
+            self.__class__.created.append(item)
+            return item
+
+    monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
+    operator = _user("root")
+    draft = await svc.prepare_skill_upload(
+        None,
+        filename="SKILL.md",
+        file_bytes=b"---\nname: alpha\ndescription: first\n---\n# Alpha\n",
+        operator=operator,
+    )
+    draft_dir = svc.get_skill_drafts_root_dir() / draft["draft_id"]
+    second_dir = draft_dir / "items" / "second"
+    second_dir.mkdir()
+    (second_dir / "SKILL.md").write_text("---\nname: beta\ndescription: second\n---\n# Beta\n", encoding="utf-8")
+    metadata_path = draft_dir / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["items"].append({"slug": "beta", "source_dir": "items/second", "success": True, "original_name": "beta"})
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="无效的技能分类"):
+        await svc.confirm_skill_install_draft(
+            _UnitOfWork(),
+            draft_id=draft["draft_id"],
+            share_config=draft["default_share_config"],
+            categories={"alpha": "office_tools", "beta": "invalid"},
+            operator=operator,
+        )
+    assert FakeRepo.created == []
+    assert not (tmp_path / "skill-sources/shared" / "alpha").exists()
+
+    results = await svc.confirm_skill_install_draft(
+        _UnitOfWork(),
+        draft_id=draft["draft_id"],
+        share_config=draft["default_share_config"],
+        categories={"alpha": "office_tools", "beta": "project_management"},
+        operator=operator,
+    )
+    assert [result["skill"]["category"] for result in results] == ["office_tools", "project_management"]
+    assert [item.category for item in FakeRepo.created] == ["office_tools", "project_management"]
+    for item in FakeRepo.created:
+        assert svc.parse_skill_dir_metadata(tmp_path / "skill-sources/shared" / item.slug)["category"] == item.category
 
 
 @pytest.mark.asyncio
@@ -1462,7 +1632,17 @@ async def test_skill_md_prepare_confirm_creates_single_file_skill(tmp_path: Path
     assert results[0]["slug"] == "demo"
     assert results[0]["success"] is True
     assert FakeRepo.created_item.name == "demo"
-    assert (tmp_path / "skill-sources/shared" / "demo" / "SKILL.md").read_text(encoding="utf-8") == skill_md
+    assert FakeRepo.created_item.category == "other"
+    skill_dir = tmp_path / "skill-sources/shared" / "demo"
+    metadata = svc.parse_skill_dir_metadata(skill_dir)
+    assert (metadata["slug"], metadata["name"], metadata["description"], metadata["category"]) == (
+        "demo",
+        "demo",
+        "this is demo",
+        "other",
+    )
+    stored_md = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert stored_md.rsplit("\n---\n", 1)[1] == "# Demo\n"
 
 
 @pytest.mark.asyncio
@@ -1508,7 +1688,7 @@ async def test_update_skill_md_syncs_metadata(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(svc, "get_manageable_skill_or_raise", fake_get_manageable_skill_or_raise)
     monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
 
-    new_content = "---\nname: demo\ndescription: updated desc\n---\n# updated\n"
+    new_content = "---\nname: demo\ndescription: updated desc\ncategory: office_tools\n---\n# updated\n"
     await svc.update_skill_file(
         _UnitOfWork(),
         slug="demo",
@@ -1521,6 +1701,7 @@ async def test_update_skill_md_syncs_metadata(tmp_path: Path, monkeypatch: pytes
     assert updates["name"] == "demo"
     assert updates["description"] == "updated desc"
     assert updates["updated_by"] == "admin"
+    assert item.category == "office_tools"
     saved_content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     assert "description: updated desc" in saved_content
 
@@ -2266,7 +2447,12 @@ async def test_personal_skill_overrides_shared_skill_without_inheriting_dependen
         async def list_enabled(self):
             return [shared]
 
+    async def no_installed_market_skills(_db, _user):
+        """此用例只验证个人 Skill 对传统共享 Skill 的覆盖。"""
+        return []
+
     monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
+    monkeypatch.setattr("yuxi.agents.skills.market.list_installed_market_skills", no_installed_market_skills)
 
     items = await svc.list_accessible_skills(None, _user("user-1", role="user"))
 
@@ -2306,6 +2492,43 @@ async def test_personal_skill_frontmatter_dependencies_reach_runtime(
     assert runtime["tools"] == ["calculator"]
     assert runtime["mcps"] == ["reports"]
     assert runtime["skills"] == ["base"]
+
+
+@pytest.mark.asyncio
+async def test_personal_dependency_save_preserves_category(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """保存依赖后返回和重新扫描的个人技能分类保持一致。"""
+    personal_root = _personal_skill_root(tmp_path, monkeypatch)
+    skill_dir = _write_personal_skill(personal_root, "demo", "personal")
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: personal\ncategory: office_tools\n---\n# Demo\n", encoding="utf-8"
+    )
+
+    async def no_shared(_db, _operator):
+        return []
+
+    async def no_mcps(_db, _operator):
+        return set()
+
+    async def valid_dependencies(**_kwargs):
+        return [], [], []
+
+    monkeypatch.setattr(svc, "_list_accessible_shared_skills", no_shared)
+    monkeypatch.setattr(svc, "get_usable_mcp_server_slugs", no_mcps)
+    monkeypatch.setattr(svc, "get_visible_mcp_reference_slugs", no_mcps)
+    monkeypatch.setattr(svc, "validate_skill_dependencies", valid_dependencies)
+
+    saved = await svc.update_personal_skill_dependencies(
+        _UnitOfWork(),
+        slug="demo",
+        tool_dependencies=[],
+        mcp_dependencies=[],
+        skill_dependencies=[],
+        operator=_user("user-1", role="user"),
+    )
+
+    assert saved.category == "office_tools"
+    assert (await svc.list_personal_skills("user-1"))[0].category == "office_tools"
+    assert svc.parse_skill_dir_metadata(skill_dir)["category"] == "office_tools"
 
 
 @pytest.mark.asyncio
@@ -2377,6 +2600,12 @@ async def test_confirm_personal_skill_draft_uses_original_slug_without_database(
         "---\nname: demo\ndescription: personal demo\n---\n# Demo\n",
         encoding="utf-8",
     )
+    second_dir = draft_dir / "items" / "item-2"
+    second_dir.mkdir(parents=True)
+    (second_dir / "SKILL.md").write_text(
+        "---\nname: beta\ndescription: second skill\n---\n# Beta\n",
+        encoding="utf-8",
+    )
     (draft_dir / "metadata.json").write_text(
         svc.json.dumps(
             {
@@ -2389,7 +2618,8 @@ async def test_confirm_personal_skill_draft_uses_original_slug_without_database(
                         "original_name": "demo",
                         "source_dir": "items/item-1",
                         "success": True,
-                    }
+                    },
+                    {"slug": "beta", "original_name": "beta", "source_dir": "items/item-2", "success": True},
                 ],
             }
         ),
@@ -2398,16 +2628,30 @@ async def test_confirm_personal_skill_draft_uses_original_slug_without_database(
 
     monkeypatch.setenv("YUXI_RUNTIME_DIR", str(tmp_path / "runtime"))
 
+    with pytest.raises(ValueError, match="无效的技能分类"):
+        await svc.confirm_personal_skill_install_draft(
+            draft_id=draft_id,
+            slugs=["demo-v2", "beta"],
+            categories={"demo-v2": "invalid"},
+            operator=_user("user-1", role="user"),
+        )
+    assert not (personal_root / "demo").exists()
+    assert not (personal_root / "beta").exists()
+
     results = await svc.confirm_personal_skill_install_draft(
         draft_id=draft_id,
-        slugs=["demo-v2"],
+        slugs=["demo-v2", "beta"],
+        categories={"demo-v2": "office_tools", "beta": "data_analysis"},
         operator=_user("user-1", role="user"),
     )
 
     assert results[0]["success"] is True
     assert results[0]["slug"] == "demo"
     assert results[0]["requested_slug"] == "demo-v2"
+    assert [row["skill"]["category"] for row in results] == ["office_tools", "data_analysis"]
     assert (personal_root / "demo" / "SKILL.md").exists()
+    assert svc.parse_skill_dir_metadata(personal_root / "demo")["category"] == "office_tools"
+    assert svc.parse_skill_dir_metadata(personal_root / "beta")["category"] == "data_analysis"
     assert not draft_dir.exists()
 
 
@@ -2431,3 +2675,49 @@ def test_resolved_shared_skill_captures_original_version_and_hash(monkeypatch, t
     assert resolved.version == "v1"
     assert resolved.content_hash == "hash-v1"
     assert resolved.source_scope == "shared"
+
+
+@pytest.mark.asyncio
+async def test_default_skill_variant_metadata_matches_preload_selection(monkeypatch):
+    items = [
+        SimpleNamespace(id=1, slug="shared-old", source_scope="shared"),
+        SimpleNamespace(id=2, slug="shared-new", source_scope="shared"),
+        SimpleNamespace(id=11, slug="market", source_scope="market"),
+        SimpleNamespace(id=0, slug="personal", source_scope="personal"),
+        SimpleNamespace(id=3, slug="other", source_scope="shared"),
+    ]
+    user = SimpleNamespace(uid="author")
+
+    async def fake_accessible(_db, _user):
+        return items
+
+    async def fake_shared_origins(_db, _items):
+        return {"shared-old": ("author", "personal"), "shared-new": ("author", "personal")}
+
+    class FakeMarketRepository:
+        def __init__(self, _db):
+            pass
+
+        async def visible_by_ids(self, _user, ids):
+            assert ids == {"11"}
+            return [SimpleNamespace(id=11, owner_uid="author", personal_slug="personal")]
+
+    monkeypatch.setattr(svc, "list_accessible_skills", fake_accessible)
+    monkeypatch.setattr(svc, "approved_shared_origins", fake_shared_origins)
+    monkeypatch.setattr(svc, "MarketSkillRepository", FakeMarketRepository)
+
+    default_by_variant = await svc.default_skill_slug_by_variant(object(), user, items)
+    assert default_by_variant == {
+        "shared-old": "personal",
+        "shared-new": "personal",
+        "market": "personal",
+        "personal": "personal",
+        "other": "other",
+    }
+    assert await svc.select_default_skill_slugs(object(), user) == ["personal", "other"]
+    assert await svc.select_default_skill_slugs(object(), user, ["shared-old"]) == ["shared-old", "other"]
+    assert await svc.select_default_skill_slugs(object(), user, ["shared-old", "market"]) == [
+        "shared-old",
+        "market",
+        "other",
+    ]

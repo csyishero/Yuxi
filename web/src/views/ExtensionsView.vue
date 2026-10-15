@@ -18,7 +18,7 @@
         <ToolsCardList ref="toolsRef" />
       </div>
       <div v-if="activeTab === 'skills'" class="tab-panel">
-        <SkillCardList ref="skillsRef" />
+        <SkillMarket ref="skillsRef" />
       </div>
       <div v-if="activeTab === 'mcp'" class="tab-panel">
         <McpCardList ref="mcpRef" />
@@ -34,10 +34,11 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ToolsCardList from '@/components/extensions/ToolsCardList.vue'
 import McpCardList from '@/components/extensions/McpCardList.vue'
-import SkillCardList from '@/components/extensions/SkillCardList.vue'
+import SkillMarket from '@/components/extensions/SkillMarket.vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import DataBaseView from '@/views/DataBaseView.vue'
 import { useUserStore } from '@/stores/user'
+import { nextExtensionTabQuery } from './extensionTabQuery.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -66,17 +67,13 @@ const allowedTabKeys = computed(() => extensionTabs.value.map((tab) => tab.key))
 const defaultTabKey = computed(() => extensionTabs.value[0]?.key || 'skills')
 
 const normalizeTab = (tab) => {
+  if (tab === 'market') return 'skills'
   if (allowedTabKeys.value.includes(tab)) return tab
   return defaultTabKey.value
 }
 
 const replaceTabQuery = (tab) => {
-  const query = { ...route.query }
-  if (tab === defaultTabKey.value) {
-    delete query.tab
-  } else {
-    query.tab = tab
-  }
+  const query = nextExtensionTabQuery(route.query, tab, defaultTabKey.value)
   router.replace({ query })
 }
 

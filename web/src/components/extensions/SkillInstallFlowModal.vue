@@ -93,7 +93,7 @@
         <section v-else-if="phase === 'reviewing'" class="flow-section">
           <div class="review-heading">
             <strong>确认安装内容</strong>
-            <span>{{ readyItems.length }} 个 Skill，共用下方安装设置</span>
+            <span>{{ readyItems.length }} 个 Skill，逐项选择方向</span>
           </div>
           <div class="review-list">
             <div
@@ -106,6 +106,10 @@
                 <strong>{{ item.name || item.slug }}</strong>
                 <small>{{ item.description || item.error || '暂无描述' }}</small>
               </span>
+              <label v-if="item.success !== false" class="review-category">
+                <span>方向</span>
+                <a-select v-model:value="item.category" :options="skillCategories" :aria-label="`${item.name || item.slug} 的技能方向`" />
+              </label>
               <span v-if="item.success === false" class="status-badge error">解析失败</span>
               <button
                 type="button"
@@ -229,6 +233,7 @@ import { CheckCircle2, Circle, LoaderCircle, PackageOpen, X as XIcon, XCircle } 
 import ShareConfigForm from '@/components/ShareConfigForm.vue'
 import { skillApi } from '@/apis/skill_api'
 import { useUserStore } from '@/stores/user'
+import { skillCategories, skillCategory } from './skillCategories.js'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -425,6 +430,7 @@ const openReview = (draftPayloads) => {
   reviewItems.value = drafts.value.flatMap((draft) =>
     (draft.items || []).map((item) => ({
       ...item,
+      category: skillCategory(item.category),
       source: draft.source,
       source_type: draft.source_type,
       draft_id: draft.draft_id
@@ -469,6 +475,9 @@ const installDrafts = async () => {
       const slugs = readyItems.value
         .filter((item) => item.draft_id === draft.draft_id)
         .map((item) => item.slug)
+      const categories = Object.fromEntries(readyItems.value
+        .filter((item) => item.draft_id === draft.draft_id)
+        .map((item) => [item.slug, item.category]))
       if (!slugs.length) {
         await skillApi.discardSkillInstallDraft(draft.draft_id)
         forgetDraft(draft.draft_id)
@@ -477,8 +486,8 @@ const installDrafts = async () => {
 
       const result =
         installTarget.value === 'personal'
-          ? await skillApi.confirmPersonalSkillInstallDraft(draft.draft_id, slugs)
-          : await skillApi.confirmSkillInstallDraft(draft.draft_id, shareConfig.value, slugs)
+          ? await skillApi.confirmPersonalSkillInstallDraft(draft.draft_id, slugs, categories)
+          : await skillApi.confirmSkillInstallDraft(draft.draft_id, shareConfig.value, slugs, categories)
       const results = result?.data || []
       applyInstallResults(results, draft.source)
       if (!results.some((item) => item.success)) {
@@ -960,6 +969,17 @@ watch(
   font-size: 12px;
 }
 
+.review-category {
+  display: flex;
+  flex: 0 0 176px;
+  align-items: center;
+  gap: 8px;
+  color: var(--gray-600);
+  font-size: 12px;
+
+  :deep(.ant-select) { flex: 1; min-width: 0; }
+}
+
 .review-remove-button {
   display: inline-flex;
   align-items: center;
@@ -1115,6 +1135,16 @@ watch(
     min-height: calc(100vh - 48px);
     max-height: none;
   }
+
+  .review-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 28px;
+  }
+
+  .review-title { grid-column: 1; grid-row: 1; }
+  .review-remove-button { grid-column: 2; grid-row: 1; }
+  .review-category { grid-column: 1 / -1; grid-row: 2; width: 100%; }
+  .review-warning { grid-column: 1 / -1; }
 
   .install-flow-footer {
     align-items: stretch;

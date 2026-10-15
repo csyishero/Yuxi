@@ -1,9 +1,27 @@
 <template>
-  <div class="skill-cards-page extension-page-root">
+  <div class="skill-cards-page extension-page-root" :class="{ 'toolbar-only': toolbarOnly }">
+    <div v-if="toolbarOnly" class="skill-home-tools">
+      <a-button v-if="userStore.isAdmin" @click="openShareRequests" :disabled="loading">
+        共享申请<span v-if="pendingShareRequestCount"> ({{ pendingShareRequestCount }})</span>
+      </a-button>
+      <a-upload
+        accept=".zip,.md"
+        :show-upload-list="false"
+        :custom-request="handleImportUpload"
+        :before-upload="beforeSkillUpload"
+        :disabled="importing"
+      >
+        <a-button type="primary" :loading="importing" class="lucide-icon-btn">
+          <Upload :size="14" />
+          <span>上传技能</span>
+        </a-button>
+      </a-upload>
+    </div>
+    <template v-else>
     <PageShoulder search-placeholder="搜索技能..." v-model:search="searchQuery">
       <template #actions>
         <template v-if="!isBatchDeleteMode">
-          <a-button v-if="userStore.isAdmin" @click="openShareRequests" :disabled="loading">
+          <a-button v-if="userStore.isAdmin && !governanceOnly" @click="openShareRequests" :disabled="loading">
             共享申请<span v-if="pendingShareRequestCount"> ({{ pendingShareRequestCount }})</span>
           </a-button>
           <a-button
@@ -14,6 +32,7 @@
             <span>批量管理</span>
           </a-button>
           <a-upload
+            v-if="!governanceOnly"
             accept=".zip,.md"
             :show-upload-list="false"
             :custom-request="handleImportUpload"
@@ -82,13 +101,13 @@
           <WandSparkles :size="22" />
         </div>
         <div class="skill-empty-title">
-          {{ searchQuery ? '没有匹配的 Skill' : '还没有添加 Skill' }}
+          {{ searchQuery ? '没有匹配的 Skill' : governanceOnly ? '没有需要治理的 Skill' : '还没有添加 Skill' }}
         </div>
         <div class="skill-empty-desc">
           {{
             searchQuery
               ? '换个关键词试试，或清空搜索条件。'
-              : '可以上传本地 Skill 文件。'
+              : governanceOnly ? '共享或管理其他成员的技能后，可在这里查看。' : '可以上传本地 Skill 文件。'
           }}
         </div>
       </div>
@@ -130,7 +149,7 @@
             >
               <template #actions>
                 <button
-                  v-if="skill.sourceScope !== 'personal'"
+                  v-if="skill.sourceScope !== 'personal' && skill.kind !== 'market_install'"
                   type="button"
                   class="skill-enabled-action"
                   :class="{ enabled: skill.enabled !== false }"
@@ -145,6 +164,13 @@
                   </template>
                 </button>
               </template>
+              <template v-if="skill.kind === 'market_install'" #footer>
+                <div class="market-install-card-actions">
+                  <a-button v-if="skill.visible !== false" size="small" @click.stop="emit('open-market', skill.slug)">查看</a-button>
+                  <a-button v-if="skill.visible !== false" size="small" @click.stop="router.push('/agent-manage')">在 Agent 中配置</a-button>
+                  <a-button size="small" danger @click.stop="emit('uninstall-market', skill)">卸载</a-button>
+                </div>
+              </template>
             </InfoCard>
           </div>
         </ExtensionCardGrid>
@@ -155,6 +181,7 @@
           <a-button :loading="catalogLoading" @click="fetchCatalog()">加载更多人员的 Skill</a-button>
         </div>
       </template>
+    </template>
     </template>
 
     <a-modal
@@ -177,6 +204,7 @@
                 {{ formatExtensionCardTitle(previewSkill.name) }}
               </div>
               <div class="skill-preview-meta">
+                <span>{{ skillCategoryLabel(previewSkill.category) }}</span>
                 <span
                   >{{
                     sourceTypeLabel(previewSkill.sourceType || previewSkill.source_type)
@@ -221,15 +249,12 @@
             class="skill-share-warning"
           />
           <a-alert
-            v-if="previewSkill.sourceScope === 'personal' && previewShareRequest"
-            :type="previewShareRequest.status === 'rejected' ? 'warning' : 'info'"
+            v-if="isDepartmentManagedSkill(previewSkill)"
+            type="info"
             show-icon
-            :message="`共享申请：${shareRequestStatusLabel(previewShareRequest.status)}${previewShareRequest.published_slug ? ` · ${previewShareRequest.published_slug}` : ''}${previewShareRequest.review_note ? ` · ${previewShareRequest.review_note}` : ''}`"
+            message="你可以管理本部门共享 Skill 的启停和生命周期；可用范围保持本部门，已发布副本的内容与依赖只读。"
             class="skill-share-warning"
           />
-          <p v-if="previewShareRequest?.application_reason" class="skill-share-application-summary">
-            申请原因：{{ previewShareRequest.application_reason }}
-          </p>
           <div v-if="skillPreviewLoading" class="skill-preview-loading">
             <a-spin />
           </div>
@@ -255,21 +280,11 @@
           <div class="skill-preview-footer-right">
             <a-button @click="closeSkillPreview">关闭</a-button>
             <a-button
-              v-if="!userStore.isAdmin && previewSkill.sourceScope === 'personal' && !isOtherPersonalSkill(previewSkill)"
+              v-if="canPublishPersonalSkill(previewSkill, userStore.uid)"
               type="primary"
-              :disabled="previewShareRequest?.status === 'pending'"
-              :loading="submittingShareRequest"
-              @click="openShareApplication"
+              @click="openPersonalPublish"
             >
-              {{ previewShareRequest?.status === 'pending' ? '等待审核' : '申请共享' }}
-            </a-button>
-            <a-button
-              v-if="userStore.isAdmin && previewSkill.sourceScope === 'personal'"
-              type="primary"
-              :disabled="skillPreviewLoading || !!skillPreviewError || previewShareRequest?.status === 'pending'"
-              @click="openDirectPublish"
-            >
-              {{ previewShareRequest?.status === 'pending' ? '已有待审申请' : '直接转为共享' }}
+              发布技能
             </a-button>
             <a-button
               :type="previewSkill.sourceScope === 'personal' ? 'default' : 'primary'"
@@ -277,57 +292,18 @@
               class="lucide-icon-btn"
               @click="goToPreviewSkillManagement"
             >
-              <span>{{ previewSkill.sourceScope === 'personal' ? '管理个人 Skill' : '去管理' }}</span>
+              <span>{{ previewSkill.sourceScope === 'personal' ? '管理个人 Skill' : canManageSkill(previewSkill) ? '管理技能' : '查看技能' }}</span>
             </a-button>
           </div>
         </div>
       </div>
     </a-modal>
 
-    <a-modal
-      v-model:open="shareApplicationVisible"
-      title="申请共享 Skill"
-      width="560px"
-      ok-text="提交申请"
-      :confirm-loading="submittingShareRequest"
-      :ok-button-props="{ disabled: !applicationReason.trim() }"
-      @ok="submitPreviewShareRequest"
-      @cancel="closeShareApplication"
-    >
-      <p class="skill-share-application-intro">
-        将「{{ previewSkill?.name }}」的当前内容提交给管理员审核。提交后即使修改个人 Skill，本次审核内容也不会改变。
-      </p>
-      <label class="skill-share-application-label" for="skill-share-application-reason">申请原因</label>
-      <a-textarea
-        id="skill-share-application-reason"
-        v-model:value="applicationReason"
-        placeholder="说明共享用途、适用人员或使用场景"
-        :rows="4"
-        :maxlength="1000"
-        show-count
-      />
-    </a-modal>
-
-    <a-modal
-      v-model:open="directPublishVisible"
-      title="直接发布共享 Skill"
-      width="760px"
-      ok-text="确认发布"
-      :confirm-loading="publishingPersonalSkill"
-      @ok="confirmDirectPublish"
-    >
-      <p>将 {{ directPublishSkill?.owner_name || directPublishSkill?.owner_uid || userStore.uid }} 的「{{ directPublishSkill?.name }}」当前内容复制为共享版本，个人原件保留。</p>
-      <ShareConfigForm
-        v-model="directPublishShareConfig"
-        :require-read-scope="true"
-        :show-manage-scope="false"
-        :allowed-access-levels="['department', 'user']"
-        :available-departments="userStore.isSuperAdmin ? null : ownDepartmentOptions"
-        :available-users="shareUsers"
-        :disabled="shareUsersLoading"
-      />
-      <a-input v-model:value="directPublishNote" class="skill-share-note" placeholder="发布说明（可选）" :maxlength="2000" />
-    </a-modal>
+    <PersonalSkillPublish
+      v-model:open="personalPublishVisible"
+      :skill="personalPublishSkill"
+      @published="handlePersonalPublished"
+    />
 
     <a-modal
       v-model:open="shareRequestsVisible"
@@ -349,7 +325,9 @@
           <div class="skill-share-request-meta">
             申请人 {{ request.owner_name || request.owner_uid }}<span v-if="request.owner_name && request.owner_name !== request.owner_uid">（{{ request.owner_uid }}）</span>
             · 个人 Skill {{ request.personal_slug }} · 提交于 {{ formatDateTime(request.created_at) }}
-            <span v-if="request.published_slug"> · 已发布为 {{ request.published_slug }}</span>
+            · {{ skillCategoryLabel(request.category) }}
+            <span v-if="request.published_slug"> · 当时发布为 {{ request.published_slug }}</span>
+            <span v-if="request.status === 'approved'"> · {{ sharedCopyStatusLabel(request.published_copy_status) }}</span>
           </div>
           <div class="skill-share-request-reason">
             <span>申请原因</span>
@@ -708,6 +686,16 @@ import {
   Minus
 } from '@lucide/vue'
 import { skillApi } from '@/apis/skill_api'
+import { skillCategoryLabel } from './skillCategories.js'
+import { sharedCopyStatusLabel } from './sharePublicationStatus.js'
+import { marketInstallManagementItems } from './skillHubCatalog.js'
+import {
+  canManageSkillRecord,
+  canPublishPersonalSkill,
+  isDepartmentManagedSkill,
+  personalCatalogSkillForViewer
+} from './skillManagementAccess.js'
+import PersonalSkillPublish from './PersonalSkillPublish.vue'
 import ExtensionCardGrid from './ExtensionCardGrid.vue'
 import SkillInstallFlowModal from './SkillInstallFlowModal.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
@@ -726,6 +714,12 @@ const RETIRED_BUILTIN_SKILL_SLUGS = new Set(['image-gen', 'mysql-reporter'])
 
 const router = useRouter()
 const userStore = useUserStore()
+const props = defineProps({
+  marketInstalls: { type: Array, default: () => [] },
+  toolbarOnly: { type: Boolean, default: false },
+  governanceOnly: { type: Boolean, default: false }
+})
+const emit = defineEmits(['open-market', 'uninstall-market', 'updated'])
 
 const loading = ref(false)
 const importing = ref(false)
@@ -751,14 +745,8 @@ const skillPreviewMarkdown = ref('')
 const skillPreviewLoading = ref(false)
 const skillPreviewError = ref('')
 const deletingPreviewSkill = ref(false)
-const submittingShareRequest = ref(false)
-const shareApplicationVisible = ref(false)
-const applicationReason = ref('')
-const directPublishVisible = ref(false)
-const directPublishSkill = ref(null)
-const directPublishShareConfig = ref(null)
-const directPublishNote = ref('')
-const publishingPersonalSkill = ref(false)
+const personalPublishVisible = ref(false)
+const personalPublishSkill = ref(null)
 const shareRequests = ref([])
 const shareRequestsVisible = ref(false)
 const shareRequestsLoading = ref(false)
@@ -846,9 +834,11 @@ const installedSkillCards = computed(() =>
 )
 
 const filteredInstalledSkills = computed(() => installedSkillCards.value.filter(matchesSearch))
+const filteredMarketInstalls = computed(() => marketInstallManagementItems(props.marketInstalls).filter(matchesSearch))
 const catalogPersonalSkills = computed(() =>
   catalogCards.value
-    .map((skill) => ({ ...skill, sourceType: 'personal', sourceScope: 'personal' }))
+    .map((skill) => personalCatalogSkillForViewer(skill, userStore.uid))
+    .filter((skill) => !props.governanceOnly || skill.owner_uid !== userStore.uid)
     .filter(matchesSearch)
 )
 const getReadScope = (skill) =>
@@ -896,7 +886,9 @@ const skillGroups = computed(() => [
   },
   {
     key: 'personal',
-    title: userStore.isSuperAdmin
+    title: props.governanceOnly
+      ? '其他成员的个人 Skill'
+      : userStore.isSuperAdmin
       ? '全员个人 Skill'
       : userStore.isAdmin
         ? '本部门个人 Skill'
@@ -906,7 +898,12 @@ const skillGroups = computed(() => [
       ? []
       : userStore.isAdmin
         ? catalogPersonalSkills.value
-        : filteredInstalledSkills.value.filter((skill) => skill.sourceScope === 'personal')
+        : props.governanceOnly ? [] : filteredInstalledSkills.value.filter((skill) => skill.sourceScope === 'personal')
+  },
+  {
+    key: 'market-installed',
+    title: '我的市场安装',
+    skills: isBatchDeleteMode.value || props.governanceOnly ? [] : filteredMarketInstalls.value
   }
 ])
 const visibleSkillGroups = computed(() =>
@@ -933,13 +930,6 @@ const orderedShareRequests = computed(() =>
     (left, right) => Number(right.status === 'pending') - Number(left.status === 'pending')
   )
 )
-const previewShareRequest = computed(() => {
-  if (previewSkill.value?.sourceScope !== 'personal') return null
-  const ownerUid = previewSkill.value.owner_uid || userStore.uid
-  return shareRequests.value.find(
-    (request) => request.personal_slug === previewSkill.value.slug && request.owner_uid === ownerUid
-  )
-})
 const flatShareSnapshotTree = computed(() => {
   /** 按原有目录层级展示快照文件。 */
   const flatten = (entries, depth = 0) =>
@@ -952,7 +942,7 @@ const flatShareSnapshotTree = computed(() => {
 
 /** 返回共享申请的中文状态。 */
 const shareRequestStatusLabel = (status) =>
-  ({ pending: '待审核', approved: '已发布', rejected: '已驳回' })[status] || status
+  ({ pending: '待审核', approved: '审核通过', rejected: '已驳回' })[status] || status
 
 /** 读取当前用户可见的共享申请。 */
 const fetchShareRequests = async () => {
@@ -970,104 +960,6 @@ const loadShareUsers = async () => {
     message.error(error?.response?.data?.detail || '加载可共享人员失败')
   } finally {
     shareUsersLoading.value = false
-  }
-}
-
-/** 打开当前个人 Skill 的共享申请。 */
-const openShareApplication = () => {
-  if (userStore.isAdmin || !previewSkill.value?.slug || previewShareRequest.value?.status === 'pending') return
-  applicationReason.value = ''
-  shareApplicationVisible.value = true
-}
-
-/** 关闭共享申请并清空未提交内容。 */
-const closeShareApplication = () => {
-  shareApplicationVisible.value = false
-  applicationReason.value = ''
-}
-
-/** 从个人 Skill 预览提交独立的审核快照与申请原因。 */
-const submitPreviewShareRequest = async () => {
-  if (userStore.isAdmin || !previewSkill.value?.slug || submittingShareRequest.value) return
-  const reason = applicationReason.value.trim()
-  if (!reason) {
-    message.warning('请填写申请原因')
-    return
-  }
-  submittingShareRequest.value = true
-  try {
-    const result = await skillApi.submitSkillShareRequest(previewSkill.value.slug, reason)
-    if (result?.data) {
-      shareRequests.value = [result.data, ...shareRequests.value.filter((item) => item.id !== result.data.id)]
-    }
-    closeShareApplication()
-    message.success('共享申请已提交，等待管理员审核')
-  } catch (error) {
-    message.error(error?.response?.data?.detail || '提交共享申请失败')
-    return
-  } finally {
-    submittingShareRequest.value = false
-  }
-  try {
-    await fetchShareRequests()
-  } catch (error) {
-    message.warning(error?.response?.data?.detail || '申请已提交，但刷新状态失败')
-  }
-}
-
-/** 将当前预览的个人 Skill 交给管理员直接发布。 */
-const openDirectPublish = () => {
-  if (
-    !userStore.isAdmin ||
-    previewSkill.value?.sourceScope !== 'personal' ||
-    previewShareRequest.value?.status === 'pending'
-  ) return
-  directPublishSkill.value = previewSkill.value
-  directPublishShareConfig.value = {
-    version: 2,
-    read_scope: {
-      access_level: 'department',
-      department_ids: userStore.departmentId ? [Number(userStore.departmentId)] : [],
-      user_uids: []
-    },
-    manage_scope: null
-  }
-  directPublishNote.value = ''
-  skillPreviewVisible.value = false
-  directPublishVisible.value = true
-  loadShareUsers()
-}
-
-/** 发布当前个人原件的独立快照并刷新目录。 */
-const confirmDirectPublish = async () => {
-  const skill = directPublishSkill.value
-  if (!skill || publishingPersonalSkill.value) return
-  const readScope = directPublishShareConfig.value?.read_scope
-  if (!readScope) return
-  if (!(readScope.access_level === 'user' ? readScope.user_uids : readScope.department_ids).length) {
-    message.warning(readScope.access_level === 'user' ? '请选择可使用的人员' : '请选择发布部门')
-    return
-  }
-  publishingPersonalSkill.value = true
-  try {
-    await skillApi.publishPersonalSkillDirectly(
-      skill.owner_uid || userStore.uid,
-      skill.slug,
-      readScope,
-      directPublishNote.value
-    )
-    directPublishVisible.value = false
-    message.success('共享 Skill 已发布，个人原件仍保留')
-  } catch (error) {
-    message.error(error?.response?.data?.detail || '发布失败')
-    return
-  } finally {
-    publishingPersonalSkill.value = false
-  }
-  try {
-    await Promise.all([fetchSkills({ refreshPersonal: true }), fetchShareRequests()])
-  } catch (error) {
-    message.warning(error?.response?.data?.detail || '已发布，但刷新共享记录失败')
   }
 }
 
@@ -1197,6 +1089,7 @@ const reviewShareRequest = async (request, action) => {
     if (action === 'approve') {
       await skillApi.approveSkillShareRequest(request.id, readScope, reviewNotes[request.id] || '')
       message.success('共享 Skill 已发布，个人原件仍保留')
+      emit('updated')
     } else {
       await skillApi.rejectSkillShareRequest(request.id, reviewNotes[request.id] || '')
       message.success('申请已驳回')
@@ -1327,26 +1220,28 @@ const getSkillShareLabel = (skill) => {
 }
 
 const skillCardTags = (skill) => {
+  if (skill.kind === 'market_install') return [
+    { name: skill.visible === false ? '市场安装 · 当前不可用' : '市场已安装', color: skill.visible === false ? 'orange' : 'blue' },
+    { name: `v${skill.installed_version}`, color: 'gray' },
+    ...(skill.visible === false ? [] : [{ name: skillCategoryLabel(skill.category), color: 'blue' }])
+  ]
   if (skill.sourceScope === 'personal') {
-    const request = isOtherPersonalSkill(skill)
-      ? null
-      : shareRequests.value.find(
-          (item) => item.personal_slug === skill.slug && item.owner_uid === userStore.uid
-        )
     return [
       { name: '个人技能', color: 'gray' },
+      { name: skillCategoryLabel(skill.category), color: 'blue' },
       ...(skill.owner_uid
         ? [
             { name: skill.owner_name || skill.owner_uid, color: 'blue' },
             { name: skill.owner_department_name || '未分配部门', color: 'gray' }
           ]
         : []),
-      ...(request ? [{ name: shareRequestStatusLabel(request.status), color: 'blue' }] : []),
       ...(skill.overrides_shared ? [{ name: '覆盖共享版本', color: 'orange' }] : [])
     ]
   }
   return [
     { name: getSkillShareLabel(skill), color: 'gray' },
+    ...(isDepartmentManagedSkill(skill) ? [{ name: '本部门可管理', color: 'green' }] : []),
+    { name: skillCategoryLabel(skill.category), color: 'blue' },
     ...(skill.sourceType === 'personal_share' && skill.version
       ? [{ name: `v${skill.version}`, color: 'blue' }]
       : []),
@@ -1358,7 +1253,7 @@ const isOtherPersonalSkill = (skill) =>
   skill?.sourceScope === 'personal' &&
   !!skill?.owner_uid &&
   skill.owner_uid !== userStore.uid
-const canManageSkill = (skill) => !!skill && !isOtherPersonalSkill(skill) && skill.can_manage !== false
+const canManageSkill = (skill) => !isOtherPersonalSkill(skill) && canManageSkillRecord(skill)
 const isSkillToggling = (slug) => togglingSkillSlugs.value.includes(slug)
 const navigateToDetail = (skill) => {
   router.push({
@@ -1369,6 +1264,24 @@ const navigateToDetail = (skill) => {
 
 const closeSkillPreview = () => {
   skillPreviewVisible.value = false
+}
+
+/** 从个人原件打开两种发布方式的统一入口。 */
+const openPersonalPublish = () => {
+  if (!canPublishPersonalSkill(previewSkill.value, userStore.uid)) return
+  personalPublishSkill.value = previewSkill.value
+  skillPreviewVisible.value = false
+  personalPublishVisible.value = true
+}
+
+/** 发布后刷新共享申请和目录，保留弹窗中的服务端状态。 */
+const handlePersonalPublished = async () => {
+  emit('updated')
+  try {
+    await Promise.all([fetchSkills({ refreshPersonal: true }), fetchShareRequests()])
+  } catch {
+    message.warning('发布成功，但目录状态刷新失败，请稍后重试')
+  }
 }
 
 const openSkillPreview = async (skill) => {
@@ -1402,6 +1315,12 @@ const goToPreviewSkillManagement = () => {
 }
 
 const handleCardClick = (skill) => {
+  if (skill.kind === 'market_install') {
+    if (isBatchDeleteMode.value) return
+    if (skill.visible === false) return message.info('当前市场安装已不可用，可在此卸载旧安装')
+    emit('open-market', skill.slug)
+    return
+  }
   if (isBatchDeleteMode.value) {
     handleToggleCardSelect(skill.slug)
   } else {
@@ -1443,6 +1362,7 @@ const handleToggleSkillEnabled = async (skill) => {
         : { ...previewSkill.value, enabled }
     }
     message.success(`Skill 已${enabled ? '启用' : '禁用'}`)
+    emit('updated')
   } catch (error) {
     message.error(error?.response?.data?.detail || error.message || '更新 Skill 启用状态失败')
   } finally {
@@ -1480,6 +1400,7 @@ const confirmDeletePreviewSkill = () => {
         closeSkillPreview()
         previewSkill.value = null
         await fetchSkills()
+        emit('updated')
       } catch (error) {
         message.error(error?.response?.data?.detail || error.message || '卸载 Skill 失败')
       } finally {
@@ -1544,6 +1465,7 @@ const handleBatchDelete = () => {
 
         exitBatchDeleteMode()
         await fetchSkills()
+        if (successList.length) emit('updated')
       } catch (error) {
         message.error(error?.response?.data?.detail || error.message || '批量删除失败')
       } finally {
@@ -1649,7 +1571,8 @@ const closeInstallFlow = () => {
 const handleInstallFlowCompleted = async ({ success, failed }) => {
   if (failed === 0) message.success(`已添加 ${success} 个 Skill`)
   else message.warning(`安装完成：成功 ${success} 个，失败 ${failed} 个`)
-  await fetchSkills()
+  if (!props.toolbarOnly) await fetchSkills()
+  if (success) emit('updated')
 }
 
 const handleImportUpload = async ({ file, onSuccess, onError }) => {
@@ -1815,9 +1738,11 @@ watch(activeTab, () => {
 })
 
 onMounted(() => {
-  fetchSkills()
-  loadDepartments()
-  fetchShareRequests().catch(() => message.error('加载共享申请状态失败'))
+  if (!props.toolbarOnly) {
+    fetchSkills()
+    loadDepartments()
+  }
+  if (userStore.isAdmin && !props.governanceOnly) fetchShareRequests().catch(() => message.error('加载共享申请状态失败'))
   loadHistory()
 })
 
@@ -1834,6 +1759,8 @@ defineExpose({
 </style>
 
 <style lang="less" scoped>
+.skill-cards-page.toolbar-only { display: block; height: auto; min-height: 0; background: transparent; }
+.skill-home-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .skill-catalog-filters {
   display: flex;
   align-items: center;
@@ -1861,6 +1788,12 @@ defineExpose({
   color: var(--color-text-secondary);
 }
 
+.market-install-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 @media (max-width: 600px) {
   .skill-cards-page :deep(.page-shoulder) {
     flex-wrap: wrap;
@@ -1886,24 +1819,6 @@ defineExpose({
 
 .skill-share-warning {
   margin-bottom: 12px;
-}
-
-.skill-share-application-summary,
-.skill-share-application-intro {
-  color: var(--color-text-secondary);
-  line-height: 1.6;
-  overflow-wrap: anywhere;
-}
-
-.skill-share-application-summary {
-  white-space: pre-wrap;
-}
-
-.skill-share-application-label {
-  display: block;
-  margin: 12px 0 8px;
-  color: var(--color-text);
-  font-weight: 600;
 }
 
 .skill-share-request {
@@ -1951,10 +1866,6 @@ defineExpose({
 }
 
 .skill-share-review-actions {
-  margin-top: 12px;
-}
-
-.skill-share-note {
   margin-top: 12px;
 }
 

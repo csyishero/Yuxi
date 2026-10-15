@@ -2,6 +2,40 @@ import { apiGet, apiPost, apiPut, apiDelete, apiAdminGet, apiAdminPost } from '.
 
 const BASE_URL = '/api/system/skills'
 const USER_BASE_URL = '/api/skills'
+const MARKET_BASE_URL = '/api/skill-market'
+
+export const listMarketSkills = async ({ query = '', sort = 'recent', category, installedOnly = false, offset = 0, limit = 100 } = {}) => {
+  const params = new URLSearchParams({ sort, offset: String(offset), limit: String(limit) })
+  if (query.trim()) params.set('query', query.trim())
+  if (category && category !== 'all') params.set('category', category)
+  if (installedOnly) params.set('installed_only', 'true')
+  return apiGet(`${MARKET_BASE_URL}?${params}`)
+}
+
+export const listMarketRankings = async ({ metric = 'installs', scope = 'company', departmentId, limit = 20 } = {}) => {
+  const params = new URLSearchParams({ metric, scope, limit: String(limit) })
+  if (scope === 'department' && departmentId) params.set('department_id', String(departmentId))
+  return apiGet(`${MARKET_BASE_URL}/-/rankings?${params}`)
+}
+
+export const getMarketSkill = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}`)
+export const listMarketInstalls = async () => apiGet(`${MARKET_BASE_URL}/-/installs`)
+export const getMarketSkillTree = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/tree`)
+export const getMarketSkillFile = async (slug, path = 'SKILL.md') =>
+  apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/file?path=${encodeURIComponent(path)}`)
+export const installMarketSkill = async (slug) => apiPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/install`)
+export const uninstallMarketSkill = async (slug) => apiDelete(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/install`)
+export const upgradeMarketSkill = async (slug) => apiPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/upgrade`)
+export const toggleMarketSkillLike = async (slug) => apiPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/like`)
+export const submitMarketSkill = async (slug, applicationReason, category) =>
+  apiPost(`${MARKET_BASE_URL}/personal/${encodeURIComponent(slug)}/submit`, { application_reason: applicationReason, category })
+export const listMarketRequests = async ({ mineOnly = false } = {}) =>
+  apiGet(`${MARKET_BASE_URL}/requests${mineOnly ? '?mine_only=true' : ''}`)
+export const reviewMarketSkill = async (requestId, approved, scope, note) =>
+  apiAdminPost(`${MARKET_BASE_URL}/requests/${encodeURIComponent(requestId)}/${approved ? 'approve' : 'reject'}`, {
+    scope,
+    note
+  })
 
 export const listSkills = async () => {
   return apiGet(BASE_URL)
@@ -28,10 +62,10 @@ export const getPersonalSkillCatalogFile = async (ownerUid, slug, path) => {
   )
 }
 
-export const publishPersonalSkillDirectly = async (ownerUid, slug, readScope, note = '') => {
+export const publishPersonalSkillDirectly = async (ownerUid, slug, readScope, note = '', category) => {
   return apiPost(
     `${USER_BASE_URL}/personal-catalog/${encodeURIComponent(ownerUid)}/${encodeURIComponent(slug)}/publish`,
-    { read_scope: readScope, note }
+    { read_scope: readScope, note, ...(category ? { category } : {}) }
   )
 }
 
@@ -57,18 +91,20 @@ export const searchRemoteSkills = async (query) => {
   return apiPost(`${USER_BASE_URL}/remote/search`, { query })
 }
 
-export const confirmSkillInstallDraft = async (draftId, shareConfig, slugs) => {
+export const confirmSkillInstallDraft = async (draftId, shareConfig, slugs, categories = {}) => {
   return apiPost(`${USER_BASE_URL}/install-drafts/${encodeURIComponent(draftId)}/confirm`, {
     share_config: shareConfig,
-    slugs
+    slugs,
+    categories
   })
 }
 
-export const confirmPersonalSkillInstallDraft = async (draftId, slugs) => {
+export const confirmPersonalSkillInstallDraft = async (draftId, slugs, categories = {}) => {
   return apiPost(
     `${USER_BASE_URL}/personal/install-drafts/${encodeURIComponent(draftId)}/confirm`,
     {
-      slugs
+      slugs,
+      categories
     }
   )
 }
@@ -166,14 +202,15 @@ export const deletePersonalSkill = async (slug) => {
   return apiDelete(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}`)
 }
 
-export const submitSkillShareRequest = async (slug, applicationReason) => {
+export const submitSkillShareRequest = async (slug, applicationReason, category) => {
   return apiPost(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/share-request`, {
-    application_reason: applicationReason
+    application_reason: applicationReason,
+    ...(category ? { category } : {})
   })
 }
 
-export const listSkillShareRequests = async () => {
-  return apiGet(`${USER_BASE_URL}/share-requests`)
+export const listSkillShareRequests = async ({ mineOnly = false } = {}) => {
+  return apiGet(`${USER_BASE_URL}/share-requests${mineOnly ? '?mine_only=true' : ''}`)
 }
 
 export const getSkillShareSnapshot = async (requestId, path = 'SKILL.md') => {

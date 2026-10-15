@@ -492,8 +492,33 @@ def resolve_skill_permission(user: Any, resource: ShareableResource) -> Resource
             return ResourcePermission.MANAGE
         return ResourcePermission.NONE
 
-    return resolve_resource_permission(
+    permission = resolve_resource_permission(
         user,
         resource,
         SKILL_PERMISSION_POLICY,
     )
+    if permission == ResourcePermission.MANAGE or _value(user, "role") != "admin":
+        return permission
+    if _value(resource, "source_scope") not in {None, "shared"}:
+        return permission
+    if _value(resource, "source_type") not in {"upload", "remote", "personal_share"}:
+        return permission
+
+    department_id = _value(user, "department_id")
+    if department_id is None:
+        return permission
+    share_config = _value(resource, "share_config")
+    owner_department_id = share_config.get("owner_department_id") if isinstance(share_config, Mapping) else None
+    try:
+        if owner_department_id is None or int(owner_department_id) != int(department_id):
+            return permission
+    except (TypeError, ValueError):
+        return permission
+    read_scope = normalize_permission_config(share_config)["read_scope"]
+    if read_scope and read_scope["access_level"] == "department":
+        try:
+            if read_scope["department_ids"] == [int(department_id)]:
+                return ResourcePermission.MANAGE
+        except (TypeError, ValueError):
+            pass
+    return permission

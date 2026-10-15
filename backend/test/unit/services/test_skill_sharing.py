@@ -4,11 +4,145 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.agents.skills import service, sharing
 from yuxi.permissions import ResourcePermission, resolve_skill_permission
 from yuxi.storage.postgres.models_business import Base, Department, Skill, SkillShareRequest, User
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["shared", "market"])
+async def test_duplicate_pending_share_commit_removes_losing_snapshot(monkeypatch, tmp_path: Path, channel: str):
+    """唯一约束在提交时拒绝并发申请后，只保留胜出申请的快照。"""
+    personal_root = tmp_path / "personal"
+    source = personal_root / "demo"
+    source.mkdir(parents=True)
+    markdown = "---\nname: demo\ndescription: test\n---\n# Demo\n"
+    (source / "SKILL.md").write_text(markdown, encoding="utf-8")
+    monkeypatch.setattr(sharing, "personal_skills_root", lambda _uid: personal_root)
+    monkeypatch.setattr(sharing, "get_skill_data_dir", lambda: tmp_path)
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(lambda conn: Base.metadata.create_all(conn, tables=[SkillShareRequest.__table__]))
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    user = User(uid="owner", username="owner", password_hash="x", role="user")
+    try:
+        async with sessions() as db:
+            winner = await sharing.submit_skill_share_request(
+                db, slug="demo", application_reason="first", operator=user, channel=channel
+            )
+            winner_id = winner.id
+
+            async def stale_pending_check(_statement):
+                """模拟另一事务在申请预检之后提交了待审记录。"""
+                return None
+
+            monkeypatch.setattr(db, "scalar", stale_pending_check)
+            with pytest.raises(ValueError, match="已有待审核申请"):
+                await sharing.submit_skill_share_request(
+                    db, slug="demo", application_reason="second", operator=user, channel=channel
+                )
+
+            assert (await db.scalars(select(SkillShareRequest.id))).all() == [winner_id]
+            snapshot_root = tmp_path / "share_requests"
+            assert sorted(path.name for path in snapshot_root.iterdir()) == [winner_id]
+            assert (snapshot_root / winner_id / "SKILL.md").read_text(encoding="utf-8") == markdown
+            assert (source / "SKILL.md").read_text(encoding="utf-8") == markdown
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_committed_share_request_keeps_snapshot_if_refresh_fails(monkeypatch, tmp_path: Path):
+    """数据库已提交而响应装配失败时保留已持久化记录的快照。"""
+    personal_root = tmp_path / "personal"
+    source = personal_root / "demo"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("---\nname: demo\ndescription: test\n---\n# Demo\n", encoding="utf-8")
+    monkeypatch.setattr(sharing, "personal_skills_root", lambda _uid: personal_root)
+    monkeypatch.setattr(sharing, "get_skill_data_dir", lambda: tmp_path)
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(lambda conn: Base.metadata.create_all(conn, tables=[SkillShareRequest.__table__]))
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    user = User(uid="owner", username="owner", password_hash="x", role="user")
+    try:
+        async with sessions() as db:
+
+            async def fail_refresh(_item):
+                """模拟提交成功后的响应装配失败。"""
+                raise RuntimeError("refresh failed")
+
+            monkeypatch.setattr(db, "refresh", fail_refresh)
+            with pytest.raises(RuntimeError, match="refresh failed"):
+                await sharing.submit_skill_share_request(db, slug="demo", application_reason="first", operator=user)
+
+            stored = (await db.scalars(select(SkillShareRequest))).one()
+            assert (tmp_path / "share_requests" / stored.id / "SKILL.md").exists()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_direct_publish_only_uses_administrators_own_personal_skill(monkeypatch, tmp_path: Path):
+    """跨用户直接发布不创建申请或副本，管理员仍可发布自己的原件。"""
+    personal_root = tmp_path / "personal"
+    for uid, slug in (("member", "member-skill"), ("admin", "admin-skill")):
+        source = personal_root / uid / slug
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text(f"---\nname: {slug}\ndescription: test\n---\n# {slug}\n", encoding="utf-8")
+    shared_root = tmp_path / "shared"
+    shared_root.mkdir()
+    monkeypatch.setattr(sharing, "personal_skills_root", lambda uid: personal_root / uid)
+    monkeypatch.setattr(sharing, "get_skill_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(sharing, "get_skills_root_dir", lambda: shared_root)
+
+    async def no_dependencies(**_kwargs):
+        """本例只验证直接发布的所有权边界。"""
+        return [], [], []
+
+    monkeypatch.setattr(sharing, "validate_skill_dependencies", no_dependencies)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda conn: Base.metadata.create_all(
+                conn, tables=[Department.__table__, User.__table__, Skill.__table__, SkillShareRequest.__table__]
+            )
+        )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    admin = User(uid="admin", username="admin", password_hash="x", role="admin", department_id=1)
+    superadmin = User(uid="root", username="root", password_hash="x", role="superadmin")
+    try:
+        async with sessions() as db:
+            db.add_all(
+                [
+                    Department(id=1, name="Credit"),
+                    User(uid="member", username="member", password_hash="x", role="user", department_id=1),
+                    User(uid="admin", username="admin", password_hash="x", role="admin", department_id=1),
+                ]
+            )
+            await db.commit()
+
+            for operator in (admin, superadmin):
+                with pytest.raises(ValueError, match="只能直接发布自己的个人 Skill"):
+                    await sharing.publish_personal_skill_directly(
+                        db, owner_uid="member", slug="member-skill", department_ids=[1], note="", operator=operator
+                    )
+            assert (await db.scalars(select(SkillShareRequest))).all() == []
+            assert list(shared_root.iterdir()) == []
+
+            published = await sharing.publish_personal_skill_directly(
+                db, owner_uid="admin", slug="admin-skill", department_ids=[1], note="", operator=admin
+            )
+            assert published.status == "approved"
+            assert published.owner_uid == "admin"
+            assert (shared_root / "admin-skill" / "SKILL.md").exists()
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -104,7 +238,9 @@ async def test_share_request_keeps_snapshot_and_personal_source(monkeypatch, tmp
             )
             assert approved.status == "approved"
             assert approved.published_slug == "credit-check"
-            assert (shared_root / "credit-check" / "SKILL.md").read_text(encoding="utf-8") == original
+            published_markdown = (shared_root / "credit-check" / "SKILL.md").read_text(encoding="utf-8")
+            assert "category: other\n" in published_markdown
+            assert published_markdown.endswith("# Original\n")
             assert (shared_root / "credit-check" / "scripts" / "check.py").read_text(
                 encoding="utf-8"
             ) == "print('original')\n"

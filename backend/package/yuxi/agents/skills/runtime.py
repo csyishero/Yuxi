@@ -27,6 +27,7 @@ from yuxi.utils.paths import open_regular_file_fd
 class RuntimeSkill(TypedDict):
     """单个 Skill 的运行时信息。"""
 
+    slug: str
     name: str
     description: str
     path: str
@@ -45,9 +46,10 @@ def build_runtime_skills(skills: list) -> dict[str, RuntimeSkill]:
             VIRTUAL_PERSONAL_SKILLS_PATH if getattr(item, "source_scope", None) == "personal" else VIRTUAL_SKILLS_PATH
         )
         result[item.slug] = {
+            "slug": item.slug,
             "name": item.name,
             "description": item.description,
-            "path": f"{root}/{item.slug}/SKILL.md",
+            "path": f"{root}/{getattr(item, 'projection_slug', None) or item.slug}/SKILL.md",
             "tools": normalize_string_list(item.tool_dependencies or []),
             "mcps": normalize_string_list(item.mcp_dependencies or []),
             "skills": normalize_string_list(item.skill_dependencies or []),

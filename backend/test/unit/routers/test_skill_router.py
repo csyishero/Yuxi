@@ -150,9 +150,10 @@ def test_list_skill_cards_route_scans_personal_source(monkeypatch):
 
 
 def test_personal_skill_confirm_and_delete_routes(monkeypatch):
-    async def fake_confirm(*, draft_id, slugs, operator):
+    async def fake_confirm(*, draft_id, slugs, categories, operator):
         assert draft_id == "draft-1"
         assert slugs == ["demo-v2"]
+        assert categories is None
         assert operator.uid == "user"
         return [{"slug": "demo", "requested_slug": "demo-v2", "success": True}]
 
@@ -207,11 +208,12 @@ def test_remote_skill_prepare_and_admin_confirm_routes(monkeypatch):
         captured["prepare"] = {"source": source, "skills": skills, "operator_uid": operator.uid}
         return {"draft_id": "draft-remote", "items": [{"slug": "frontend-design", "success": True}]}
 
-    async def fake_confirm_skill_install_draft(_db, *, draft_id, share_config, slugs, operator):
+    async def fake_confirm_skill_install_draft(_db, *, draft_id, share_config, slugs, categories, operator):
         captured["confirm"] = {
             "draft_id": draft_id,
             "share_config": share_config,
             "slugs": slugs,
+            "categories": categories,
             "operator_uid": operator.uid,
         }
         return [
@@ -236,6 +238,7 @@ def test_remote_skill_prepare_and_admin_confirm_routes(monkeypatch):
                 "manage_scope": None,
             },
             "slugs": ["frontend-design"],
+            "categories": {"frontend-design": "development_tools"},
         },
     )
 
@@ -249,6 +252,7 @@ def test_remote_skill_prepare_and_admin_confirm_routes(monkeypatch):
     }
     assert captured["confirm"]["draft_id"] == "draft-remote"
     assert captured["confirm"]["slugs"] == ["frontend-design"]
+    assert captured["confirm"]["categories"] == {"frontend-design": "development_tools"}
     assert captured["confirm"]["operator_uid"] == "admin"
 
 

@@ -16,6 +16,10 @@ from yuxi.storage.postgres.models_business import (
     PROJECT_STATUS_CONSTRAINT_NAME,
     PROJECT_STATUS_CONSTRAINT_SQL,
     UNVIEWED_RUN_MARKER,
+    MarketSkill,
+    MarketSkillInstall,
+    MarketSkillLike,
+    MarketSkillRelease,
 )
 from yuxi.storage.postgres.models_business import Base as BusinessBase
 from yuxi.storage.postgres.models_knowledge import Base as KnowledgeBase
@@ -23,7 +27,7 @@ from yuxi.utils import logger
 from yuxi.utils.singleton import SingletonMeta
 
 AGENT_RUN_TERMINAL_STATUS_SQL = ", ".join(f"'{status}'" for status in AGENT_RUN_TERMINAL_STATUSES)
-BUSINESS_SCHEMA_VERSION = 10
+BUSINESS_SCHEMA_VERSION = 14
 KNOWLEDGE_SCHEMA_VERSION = 2
 SCHEMA_VERSION_TABLE = "yuxi_schema_migrations"
 AGENT_RUN_LEASE_SCHEMA_STATEMENTS = (
@@ -394,7 +398,7 @@ class PostgresManager(metaclass=SingletonMeta):
             )
 
             self._initialized = True
-            logger.info(f"PostgreSQL manager initialized for knowledge base: {db_url.split('@')[0]}://***")
+            logger.info("PostgreSQL manager initialized for knowledge base")
         except Exception as e:
             logger.error(f"Failed to initialize PostgreSQL manager: {e}")
             # 不抛出异常，允许应用启动，但在使用时会报错
@@ -937,6 +941,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 review_note TEXT,
                 reviewer_uid VARCHAR(64),
                 published_slug VARCHAR(128),
+                published_skill_id INTEGER,
                 department_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                 read_scope JSONB,
                 created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
@@ -946,6 +951,7 @@ class PostgresManager(metaclass=SingletonMeta):
             )
             """,
             "ALTER TABLE IF EXISTS skill_share_requests ADD COLUMN IF NOT EXISTS read_scope JSONB",
+            "ALTER TABLE IF EXISTS skill_share_requests ADD COLUMN IF NOT EXISTS published_skill_id INTEGER",
             "ALTER TABLE IF EXISTS skill_share_requests ALTER COLUMN owner_department_id DROP NOT NULL",
             "CREATE INDEX IF NOT EXISTS ix_skill_share_requests_owner_uid ON skill_share_requests(owner_uid)",
             (
@@ -968,6 +974,95 @@ class PostgresManager(metaclass=SingletonMeta):
         async with self.async_engine.begin() as conn:
             await conn.execute(
                 text("ALTER TABLE skill_share_requests ADD COLUMN IF NOT EXISTS application_reason TEXT")
+            )
+
+    async def backfill_skill_owner_department_provenance(self) -> None:
+        """仅从唯一匹配的已批准共享申请回填 Skill 原归属部门。"""
+        self._check_initialized()
+        async with self.async_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    WITH approved_origin AS (
+                        SELECT request.*,
+                               COUNT(*) OVER (PARTITION BY request.published_slug) AS source_count
+                        FROM skill_share_requests AS request
+                        WHERE request.status = 'approved'
+                          AND request.channel = 'shared'
+                          AND request.published_slug IS NOT NULL
+                    )
+                    UPDATE skills AS skill
+                    SET share_config = jsonb_set(
+                        skill.share_config,
+                        '{owner_department_id}',
+                        to_jsonb(origin.owner_department_id),
+                        true
+                    )
+                    FROM approved_origin AS origin
+                    WHERE skill.slug = origin.published_slug
+                      AND origin.source_count = 1
+                      AND origin.owner_department_id IS NOT NULL
+                      AND origin.content_hash <> ''
+                      AND skill.source_type = 'personal_share'
+                      AND skill.content_hash IS NOT NULL
+                      AND skill.name = origin.name
+                      AND skill.description = origin.description
+                      AND skill.created_by = origin.reviewer_uid
+                      AND skill.created_at BETWEEN origin.created_at AND origin.reviewed_at
+                      AND skill.share_config->>'owner_department_id' IS NULL
+                    """
+                )
+            )
+
+    async def ensure_skill_market_schema(self) -> None:
+        """幂等创建市场状态，并补齐共享申请与技能分类。"""
+        self._check_initialized()
+        tables = (
+            MarketSkill.__table__,
+            MarketSkillRelease.__table__,
+            MarketSkillInstall.__table__,
+            MarketSkillLike.__table__,
+        )
+        async with self.async_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS category "
+                    "VARCHAR(32) NOT NULL DEFAULT 'other'"
+                )
+            )
+            await conn.execute(
+                text(
+                    "ALTER TABLE IF EXISTS skill_share_requests ADD COLUMN IF NOT EXISTS category "
+                    "VARCHAR(32) NOT NULL DEFAULT 'other'"
+                )
+            )
+            await conn.execute(
+                text(
+                    "ALTER TABLE skill_share_requests ADD COLUMN IF NOT EXISTS channel "
+                    "VARCHAR(16) NOT NULL DEFAULT 'shared'"
+                )
+            )
+            existing_index = await conn.scalar(
+                text(
+                    "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() "
+                    "AND indexname = 'uq_skill_share_requests_pending'"
+                )
+            )
+            if existing_index is None or "channel" not in existing_index:
+                await conn.execute(text("DROP INDEX IF EXISTS uq_skill_share_requests_pending"))
+                await conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX uq_skill_share_requests_pending "
+                        "ON skill_share_requests(owner_uid, personal_slug, channel) WHERE status = 'pending'"
+                    )
+                )
+            for table in tables:
+                await conn.run_sync(lambda sync_conn, current=table: current.create(sync_conn, checkfirst=True))
+            await conn.execute(
+                text(
+                    "ALTER TABLE IF EXISTS market_skill_releases ADD COLUMN IF NOT EXISTS category "
+                    "VARCHAR(32) NOT NULL DEFAULT 'other'"
+                )
             )
 
     async def ensure_business_schema(self):

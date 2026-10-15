@@ -31,11 +31,20 @@ def _runtime(**context_values):
 @pytest.mark.asyncio
 async def test_install_skill_from_sandbox_installs_as_current_user_private_skill(monkeypatch, tmp_path: Path):
     assert exported_install_skill.name == "install_skill"
+    category_schema = exported_install_skill.args_schema.model_json_schema()["properties"]["category"]
+    assert set(next(item["enum"] for item in category_schema["anyOf"] if "enum" in item)) == (
+        skill_service.SKILL_CATEGORY_CODES
+    )
 
     calls = {}
     event_loop_thread_id = threading.get_ident()
     db = SimpleNamespace()
     source_dir = tmp_path / "demo-skill"
+    source_dir.mkdir()
+    (source_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: demo description\ncategory: office_tools\n---\n# Demo\n",
+        encoding="utf-8",
+    )
 
     def prepare_skill_from_sandbox(
         source,
@@ -100,12 +109,13 @@ async def test_install_skill_from_sandbox_installs_as_current_user_private_skill
         " /home/gem/user-data/demo-skill ",
         runtime,
         "tool-1",
+        category="office_tools",
     )
 
     assert "activated_skills" not in result.update
     assert calls["prepare"]["uid"] == "normal-user"
     assert calls["prepare_thread_id"] != event_loop_thread_id
-    assert calls["install"] == {"uid": "normal-user", "source_dir": source_dir}
+    assert calls["install"] == {"uid": "normal-user", "source_dir": source_dir, "category": "office_tools"}
     assert calls["prepare"]["source"] == "/home/gem/user-data/demo-skill"
     assert calls["enable"] == {
         "db": db,
@@ -118,6 +128,185 @@ async def test_install_skill_from_sandbox_installs_as_current_user_private_skill
         "Skill 路径: /home/gem/user-data/agents/skills/demo-skill/SKILL.md",
     ]
     assert runtime.context.skills == ["existing-skill"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("declared_category", "chosen_category", "expected_category"),
+    [
+        (None, "data_analysis", "data_analysis"),
+        (None, "other", "other"),
+        ("office_tools", None, "office_tools"),
+        ("other", None, "other"),
+    ],
+)
+async def test_agent_installed_skill_keeps_an_explicit_direction(
+    monkeypatch, tmp_path: Path, declared_category, chosen_category, expected_category
+):
+    source_dir = tmp_path / "source" / "demo-skill"
+    source_dir.mkdir(parents=True)
+    category_line = f"category: {declared_category}\n" if declared_category else ""
+    (source_dir / "SKILL.md").write_text(
+        f"---\nname: demo-skill\ndescription: analyze data\n{category_line}---\n# Demo\n", encoding="utf-8"
+    )
+    personal_root = tmp_path / "personal"
+    personal_root.mkdir()
+
+    monkeypatch.setattr(install_skill_module, "_prepare_skill_from_sandbox", lambda *_args: source_dir)
+    monkeypatch.setattr(skill_service, "personal_skills_root", lambda _uid: personal_root)
+    monkeypatch.setattr(
+        install_skill_module.pg_manager,
+        "get_async_session_context",
+        lambda: _AsyncSessionContext(SimpleNamespace()),
+    )
+
+    async def enabled(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(skill_service, "enable_personal_skills_for_agent_config", enabled)
+
+    result = await install_skill_module._run_install_task(
+        "/home/gem/user-data/demo-skill",
+        _runtime(uid="user-1", thread_id="thread-1"),
+        "tool-1",
+        category=chosen_category,
+    )
+
+    assert "已安装 Skill: demo-skill" in result.update["messages"][0].content
+    installed = personal_root / "demo-skill"
+    assert skill_service.parse_skill_dir_metadata(installed)["category"] == expected_category
+    assert (await skill_service.list_personal_skills("user-1"))[0].category == expected_category
+    if chosen_category:
+        assert f"category: {chosen_category}" in (installed / "SKILL.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_agent_install_without_direction_asks_for_one_before_creating_personal_skill(monkeypatch, tmp_path: Path):
+    source_dir = tmp_path / "source" / "demo-skill"
+    source_dir.mkdir(parents=True)
+    (source_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: analyze data\n---\n# Demo\n", encoding="utf-8"
+    )
+    personal_root = tmp_path / "personal"
+    personal_root.mkdir()
+    monkeypatch.setattr(install_skill_module, "_prepare_skill_from_sandbox", lambda *_args: source_dir)
+    monkeypatch.setattr(skill_service, "personal_skills_root", lambda _uid: personal_root)
+
+    result = await install_skill_module._run_install_task(
+        "/home/gem/user-data/demo-skill", _runtime(uid="user-1", thread_id="thread-1"), "tool-1"
+    )
+
+    assert "category" in result.update["messages"][0].content
+    assert "技能方向" in result.update["messages"][0].content
+    assert not (personal_root / "demo-skill").exists()
+
+
+@pytest.mark.asyncio
+async def test_agent_install_rejects_conflicting_declared_direction(monkeypatch, tmp_path: Path):
+    source_dir = tmp_path / "source" / "demo-skill"
+    source_dir.mkdir(parents=True)
+    (source_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: analyze data\ncategory: office_tools\n---\n# Demo\n",
+        encoding="utf-8",
+    )
+    personal_root = tmp_path / "personal"
+    personal_root.mkdir()
+    monkeypatch.setattr(install_skill_module, "_prepare_skill_from_sandbox", lambda *_args: source_dir)
+    monkeypatch.setattr(skill_service, "personal_skills_root", lambda _uid: personal_root)
+
+    result = await install_skill_module._run_install_task(
+        "/home/gem/user-data/demo-skill",
+        _runtime(uid="user-1", thread_id="thread-1"),
+        "tool-1",
+        category="data_analysis",
+    )
+
+    assert "不一致" in result.update["messages"][0].content
+    assert not (personal_root / "demo-skill").exists()
+
+
+@pytest.mark.asyncio
+async def test_agent_install_rejects_unknown_direction_before_downloading(monkeypatch):
+    def unexpected_download(*_args):
+        raise AssertionError("无效方向不应触发沙盒下载")
+
+    monkeypatch.setattr(install_skill_module, "_prepare_skill_from_sandbox", unexpected_download)
+
+    result = await install_skill_module._run_install_task(
+        "/home/gem/user-data/demo-skill",
+        _runtime(uid="user-1", thread_id="thread-1"),
+        "tool-1",
+        category="not-a-direction",
+    )
+
+    assert "无效的技能分类" in result.update["messages"][0].content
+
+
+@pytest.mark.asyncio
+async def test_git_install_rejects_one_direction_for_multiple_skills_before_fetch(monkeypatch):
+    async def unexpected_fetch(*_args, **_kwargs):
+        raise AssertionError("Git 批量 Skill 不应共用一个方向")
+
+    monkeypatch.setattr("yuxi.agents.skills.remote_install.prepare_remote_skills_batch", unexpected_fetch)
+
+    result = await install_skill_module._run_install_task(
+        "owner/repo",
+        _runtime(uid="user-1", thread_id="thread-1"),
+        "tool-1",
+        skill_names=["first", "second"],
+        category="data_analysis",
+    )
+
+    assert "Git 批量安装请在每个 SKILL.md 中分别声明 category" in result.update["messages"][0].content
+
+
+@pytest.mark.asyncio
+async def test_git_install_preserves_each_skill_file_direction(monkeypatch, tmp_path: Path):
+    personal_root = tmp_path / "personal"
+    personal_root.mkdir()
+    results = []
+    for slug, category in (("first", "office_tools"), ("second", "data_analysis")):
+        source_dir = tmp_path / slug
+        source_dir.mkdir()
+        (source_dir / "SKILL.md").write_text(
+            f"---\nname: {slug}\ndescription: {slug} skill\ncategory: {category}\n---\n# {slug}\n",
+            encoding="utf-8",
+        )
+        results.append({"success": True, "slug": slug, "source_dir": source_dir})
+
+    async def prepare_remote_skills_batch(*, source, skills):
+        assert source == "owner/repo"
+        assert skills == ["first", "second"]
+
+        async def cleanup():
+            return None
+
+        return SimpleNamespace(results=results, cleanup=cleanup)
+
+    async def enabled(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr("yuxi.agents.skills.remote_install.prepare_remote_skills_batch", prepare_remote_skills_batch)
+    monkeypatch.setattr(skill_service, "personal_skills_root", lambda _uid: personal_root)
+    monkeypatch.setattr(skill_service, "enable_personal_skills_for_agent_config", enabled)
+    monkeypatch.setattr(
+        install_skill_module.pg_manager,
+        "get_async_session_context",
+        lambda: _AsyncSessionContext(SimpleNamespace()),
+    )
+
+    result = await install_skill_module._run_install_task(
+        "owner/repo",
+        _runtime(uid="user-1", thread_id="thread-1"),
+        "tool-1",
+        skill_names=["first", "second"],
+    )
+
+    assert "已安装 Skill: first, second" in result.update["messages"][0].content
+    assert {item.slug: item.category for item in await skill_service.list_personal_skills("user-1")} == {
+        "first": "office_tools",
+        "second": "data_analysis",
+    }
 
 
 @pytest.mark.asyncio

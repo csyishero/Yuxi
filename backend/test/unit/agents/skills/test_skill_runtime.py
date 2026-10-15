@@ -3,7 +3,12 @@ from types import SimpleNamespace
 import pytest
 
 import yuxi.agents.skills.runtime as skill_runtime
-from yuxi.agents.skills.runtime import build_dependency_bundle, expand_skill_closure, resolve_runtime_skills_for_context
+from yuxi.agents.skills.runtime import (
+    build_dependency_bundle,
+    build_runtime_skills,
+    expand_skill_closure,
+    resolve_runtime_skills_for_context,
+)
 from yuxi.agents.skills.service import ResolvedSkill
 
 
@@ -31,6 +36,15 @@ def _skill(tmp_path, slug: str, *, dependencies: list[str] | None = None, conten
         mcp_dependencies=[],
         skill_dependencies=dependencies or [],
     )
+
+
+def test_market_runtime_uses_pinned_release_directory(tmp_path):
+    """市场稳定 slug 的运行路径指向审核版本目录。"""
+    item = _skill(tmp_path, "credit-review")
+    item.source_scope = "market"
+    item.projection_slug = "market-release-123456"
+    runtime = build_runtime_skills([item])
+    assert runtime["credit-review"]["path"] == "/home/gem/skills/market-release-123456/SKILL.md"
 
 
 @pytest.mark.asyncio

@@ -49,6 +49,13 @@ def build_prompt_with_context(context):
 - /home/gem/user-data/：当前用户的整个 UserWorkspace；可以读取其他 Project 目录作为参考
 - /home/gem/skills/：当前用户已授权共享/内置 Skill 的只读目录
 - /home/gem/user-data/agents/skills/：当前用户的个人 Skill 目录
+- 用户明确要求新建个人 Skill 时，先在当前 Project Workdir 创建目录和 SKILL.md，再调用 install_skill 安装到个人目录
+- 不要直接在 /home/gem/user-data/agents/skills/ 下新建个人 Skill
+- 在新建 SKILL.md 的 YAML frontmatter 中按用途写明 category：
+  office_tools 办公工具、office_efficiency 办公效率、office_automation 办公自动化、
+  data_processing 数据处理、data_analysis 数据分析、finance_analysis 财务分析、
+  business_review 经营复盘、project_management 项目管理、legal_compliance 法律合规、
+  development_tools 开发工具；确实无法归类时显式使用 other。通过 install_skill 安装时传相同 category
 - 未经用户明确要求，不得在当前 Project Workdir 之外创建、修改、移动或删除文件
 - 父子智能体共享同一个 Project Workdir 与执行树 runtime；并发写同一路径遵循真实 POSIX 结果
 """

@@ -125,7 +125,7 @@ async def main() -> None:
                 "business",
                 business_version,
                 BUSINESS_SCHEMA_VERSION,
-                upgrade_from=(2, 7, 8, 9),
+                upgrade_from=(2, 7, 8, 9, 10, 11, 12, 13),
             )
             knowledge_version = versions.get("knowledge")
             _require_supported_version(
@@ -150,8 +150,11 @@ async def main() -> None:
                 if business_version is None:
                     await pg_manager.setup_langgraph_checkpointer()
             await pg_manager.ensure_skill_share_request_schema()
+            await pg_manager.ensure_skill_market_schema()
             if business_version != BUSINESS_SCHEMA_VERSION:
-                await pg_manager.upgrade_skill_share_request_reason_schema()
+                if business_version != 13:
+                    await pg_manager.upgrade_skill_share_request_reason_schema()
+                    await pg_manager.backfill_skill_owner_department_provenance()
                 await pg_manager.record_schema_version("business", BUSINESS_SCHEMA_VERSION)
 
             if knowledge_version is None:

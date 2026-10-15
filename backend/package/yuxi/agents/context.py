@@ -259,7 +259,7 @@ class BaseContext:
         metadata={
             "name": "Skills",
             "options": [],
-            "description": "可选 Skill 拓展列表，默认选择当前用户可用的全部 Skill 拓展。"
+            "description": "可选 Skill 拓展列表，默认按来源选择当前用户可用的 Skill；同源发布只选一个版本。"
             "Skill 拓展依赖的工具和 MCP 服务器也会被自动挂载。",
             "type": "list",
             "kind": "skills",
@@ -483,13 +483,15 @@ async def resolve_agent_resource_options(
             if server.slug in usable_slugs
         ]
     if "skills" in fields_to_load:
-        from yuxi.agents.skills.service import list_accessible_skills
+        from yuxi.agents.skills.service import default_skill_slug_by_variant, list_accessible_skills
 
         skills = await list_accessible_skills(db, user)
+        default_by_variant = await default_skill_slug_by_variant(db, user, skills)
         options["skills"] = [
             {
                 **_resource_option(skill.slug, skill.name, skill.description),
                 "source_scope": skill.source_scope,
+                "auto_default_slug": default_by_variant[skill.slug],
             }
             for skill in skills
             if skill.slug
@@ -528,7 +530,15 @@ async def normalize_agent_context_config(
 
         for field_name, available_keys in available.items():
             current = normalized.get(field_name)
-            if current is None:
+            if field_name == "skills" and current is None:
+                from yuxi.agents.skills.service import select_default_skill_slugs
+
+                preload_slugs = normalized.get("preload_skills")
+                default_slugs = await select_default_skill_slugs(
+                    db, user, preload_slugs=preload_slugs if isinstance(preload_slugs, list) else []
+                )
+                normalized[field_name] = _normalize_selected_resource_keys(default_slugs, available_keys)
+            elif current is None:
                 normalized[field_name] = available_keys
             else:
                 normalized[field_name] = _normalize_selected_resource_keys(current, available_keys)

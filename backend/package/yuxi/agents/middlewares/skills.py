@@ -200,7 +200,7 @@ class SkillsMiddleware(AgentMiddleware):
             if not item:
                 logger.debug(f"Skill slug not found in prompt metadata, skip: {slug}")
                 continue
-            result.append(dict(item))
+            result.append({**item, "slug": slug})
         return result
 
     def _process_tool_call_result(self, result: Any, request: ToolCallRequest) -> Any:
@@ -214,6 +214,13 @@ class SkillsMiddleware(AgentMiddleware):
 
         if not slug:
             return result
+
+        raw_path = file_path.strip()
+        normalized_path = PurePosixPath(raw_path if raw_path.startswith("/") else f"/{raw_path}")
+        for stable_slug, item in self._get_runtime_skills(request.runtime.context).items():
+            if item.get("path") == str(normalized_path):
+                slug = stable_slug
+                break
 
         if slug not in self._get_effective_skills(request.runtime.context):
             logger.warning(f"SkillsMiddleware: deny skill activation for invisible slug: {slug}")
@@ -292,7 +299,12 @@ class SkillsMiddleware(AgentMiddleware):
         contents = getattr(runtime_context, "_skill_runtime_snapshot", {}).get("preloaded_skill_contents", {})
         if not isinstance(contents, dict):
             contents = {}
-        sections = ["# Preloaded Skills", "The following Skill instructions are already loaded and active."]
+        sections = [
+            "# Preloaded Skills",
+            "The following Skill instructions are already loaded and active.",
+            "A user reference `@skill:<slug>` identifies the exact slug in a preloaded_skill tag; "
+            "the Skill display name may differ from that slug.",
+        ]
         for slug in slugs:
             content = contents.get(slug)
             if isinstance(content, str):
@@ -330,7 +342,7 @@ class SkillsMiddleware(AgentMiddleware):
 
         lines = []
         for skill in skills_meta:
-            lines.append(f"- **{skill['name']}**: {skill['description']}")
+            lines.append(f"- **{skill['name']}** (slug: `{skill['slug']}`): {skill['description']}")
             lines.append(f"  -> Read `{skill['path']}` for full instructions")
         return "\n".join(lines)
 
@@ -342,4 +354,8 @@ class SkillsMiddleware(AgentMiddleware):
             skills_locations=skills_locations,
             skills_load_warnings="",
             skills_list=skills_list,
+        ) + (
+            "\n\nUser references like `@skill:<slug>` use the exact slug above. "
+            "The display name may differ from the slug; if the slug is listed, "
+            "read its SKILL.md instead of treating the mention as unavailable."
         )

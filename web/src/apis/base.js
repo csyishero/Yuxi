@@ -114,6 +114,8 @@ const PROJECT_MOVE_ERRORS = new Set([
   'request_id 已用于其他会话迁移意图'
 ])
 
+const MARKET_APPROVAL_ERRORS = new Set(['已有市场条目的发布范围不可在新版本中修改'])
+
 function publicErrorMessage(url, status, headers, requiresAuth, options, errorData) {
   const path = safeRequestMetadata(url, {}).path
   if (
@@ -143,6 +145,13 @@ function publicErrorMessage(url, status, headers, requiresAuth, options, errorDa
     /^\/api\/projects\/conversations\/[^/]+\/move\/?$/.test(path) &&
     [404, 409].includes(status) &&
     PROJECT_MOVE_ERRORS.has(errorData?.detail)
+  )
+    return errorData.detail
+  if (
+    options?.method?.toUpperCase() === 'POST' &&
+    /^\/api\/skill-market\/requests\/[^/]+\/approve\/?$/.test(path) &&
+    status === 400 &&
+    MARKET_APPROVAL_ERRORS.has(errorData?.detail)
   )
     return errorData.detail
   if (status === 400) return '请求参数错误'

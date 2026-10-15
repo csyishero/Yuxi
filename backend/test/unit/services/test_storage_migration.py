@@ -44,7 +44,9 @@ async def test_storage_migration_reads_legacy_schema_before_cutover(monkeypatch)
         create_knowledge_tables=lambda: _record(calls, "create_knowledge_tables"),
         ensure_business_schema=lambda: _record(calls, "ensure_business_schema"),
         ensure_skill_share_request_schema=lambda: _record(calls, "skill_share_schema"),
+        ensure_skill_market_schema=lambda: _record(calls, "skill_market_schema"),
         upgrade_skill_share_request_reason_schema=lambda: _record(calls, "skill_share_reason_schema"),
+        backfill_skill_owner_department_provenance=lambda: _record(calls, "skill_owner_department_backfill"),
         ensure_knowledge_schema=lambda: _record(calls, "ensure_knowledge_schema"),
         setup_langgraph_checkpointer=lambda: _record(calls, "setup_langgraph_checkpointer"),
         get_async_session_context=session_context,
@@ -116,7 +118,9 @@ async def test_storage_migration_rejects_v071_schema_without_quiescence_proof(mo
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
         ensure_business_schema=lambda: _record(calls, "schema"),
         ensure_skill_share_request_schema=lambda: _record(calls, "skill_share_schema"),
+        ensure_skill_market_schema=lambda: _record(calls, "skill_market_schema"),
         upgrade_skill_share_request_reason_schema=lambda: _record(calls, "skill_share_reason_schema"),
+        backfill_skill_owner_department_provenance=lambda: _record(calls, "skill_owner_department_backfill"),
         ensure_knowledge_schema=lambda: _record(calls, "knowledge_schema"),
         setup_langgraph_checkpointer=lambda: _record(calls, "checkpoint"),
         get_async_session_context=session_context,
@@ -164,7 +168,9 @@ async def test_current_schema_skips_schema_ddl(monkeypatch):
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
         ensure_business_schema=lambda: _record(calls, "business_schema"),
         ensure_skill_share_request_schema=lambda: _record(calls, "skill_share_schema"),
+        ensure_skill_market_schema=lambda: _record(calls, "skill_market_schema"),
         upgrade_skill_share_request_reason_schema=lambda: _record(calls, "skill_share_reason_schema"),
+        backfill_skill_owner_department_provenance=lambda: _record(calls, "skill_owner_department_backfill"),
         ensure_knowledge_schema=lambda: _record(calls, "knowledge_schema"),
         setup_langgraph_checkpointer=lambda: _record(calls, "checkpoint"),
         get_async_session_context=session_context,
@@ -240,7 +246,7 @@ async def test_main_rejects_unsupported_business_schema_before_ddl(monkeypatch, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("previous_version", [2, 7, 8, 9])
+@pytest.mark.parametrize("previous_version", [2, 7, 8, 9, 12, 13])
 async def test_supported_business_schema_is_converged_and_versioned_as_current(
     monkeypatch,
     previous_version: int,
@@ -264,7 +270,9 @@ async def test_supported_business_schema_is_converged_and_versioned_as_current(
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
         ensure_business_schema=lambda: _record(calls, "business_schema"),
         ensure_skill_share_request_schema=lambda: _record(calls, "skill_share_schema"),
+        ensure_skill_market_schema=lambda: _record(calls, "skill_market_schema"),
         upgrade_skill_share_request_reason_schema=lambda: _record(calls, "skill_share_reason_schema"),
+        backfill_skill_owner_department_provenance=lambda: _record(calls, "skill_owner_department_backfill"),
         ensure_knowledge_schema=lambda: _record(calls, "knowledge_schema"),
         setup_langgraph_checkpointer=lambda: _record(calls, "checkpoint"),
         get_async_session_context=session_context,
@@ -292,10 +300,18 @@ async def test_supported_business_schema_is_converged_and_versioned_as_current(
 
     assert ("business_schema" in calls) is (previous_version < 9)
     assert "skill_share_schema" in calls
-    assert calls.index("skill_share_schema") < calls.index("skill_share_reason_schema")
-    assert calls.index("skill_share_reason_schema") < calls.index(
-        f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
-    )
+    if previous_version == 13:
+        assert "skill_share_reason_schema" not in calls
+        assert "skill_owner_department_backfill" not in calls
+    else:
+        assert calls.index("skill_share_schema") < calls.index("skill_share_reason_schema")
+        assert calls.index("skill_share_reason_schema") < calls.index(
+            f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
+        )
+        assert calls.index("skill_market_schema") < calls.index("skill_owner_department_backfill")
+        assert calls.index("skill_owner_department_backfill") < calls.index(
+            f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
+        )
     assert f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}" in calls
     assert {"create_business", "checkpoint", "knowledge_schema"}.isdisjoint(calls)
 
@@ -322,7 +338,9 @@ async def test_failed_business_migration_does_not_record_version(monkeypatch):
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
         ensure_business_schema=lambda: _record(calls, "business_schema"),
         ensure_skill_share_request_schema=lambda: _record(calls, "skill_share_schema"),
+        ensure_skill_market_schema=lambda: _record(calls, "skill_market_schema"),
         upgrade_skill_share_request_reason_schema=lambda: _record(calls, "skill_share_reason_schema"),
+        backfill_skill_owner_department_provenance=lambda: _record(calls, "skill_owner_department_backfill"),
         ensure_knowledge_schema=lambda: _record(calls, "knowledge_schema"),
         setup_langgraph_checkpointer=fail_checkpoint_setup,
         get_async_session_context=session_context,
@@ -366,7 +384,9 @@ async def test_current_schema_does_not_rewrite_workdir_data(monkeypatch):
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
         ensure_business_schema=lambda: _record(calls, "schema"),
         ensure_skill_share_request_schema=lambda: _record(calls, "skill_share_schema"),
+        ensure_skill_market_schema=lambda: _record(calls, "skill_market_schema"),
         upgrade_skill_share_request_reason_schema=lambda: _record(calls, "skill_share_reason_schema"),
+        backfill_skill_owner_department_provenance=lambda: _record(calls, "skill_owner_department_backfill"),
         ensure_knowledge_schema=lambda: _record(calls, "knowledge_schema"),
         setup_langgraph_checkpointer=lambda: _record(calls, "checkpoint"),
         get_async_session_context=session_context,
