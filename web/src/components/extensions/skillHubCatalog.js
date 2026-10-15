@@ -61,6 +61,12 @@ export function ownPersonalSkill(marketCard, existingCards, uid) {
   ) || null
 }
 
+/** 个人原件使用独立详情范围，避免被同 slug 的共享技能覆盖。 */
+export function skillDetailRoute(item) {
+  const path = `/extensions/skill/${encodeURIComponent(item.slug)}`
+  return item.source_scope === 'personal' ? { path, query: { scope: 'personal' } } : { path }
+}
+
 /** 个人空间只展示本人源文件和已安装的市场版本。 */
 export function personalSkillItems(existingCards, marketCards, uid) {
   const personal = existingCards.filter((item) =>

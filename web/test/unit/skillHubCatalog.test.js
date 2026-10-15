@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { combineSkillCards, filterSkillCards, marketInstallManagementItems, ownPersonalSkill, personalSkillItems, personalSpaceSkillGroups, searchPersonalSpaceSkillGroups } from '../../src/components/extensions/skillHubCatalog.js'
+import { combineSkillCards, filterSkillCards, marketInstallManagementItems, ownPersonalSkill, personalSkillItems, personalSpaceSkillGroups, searchPersonalSpaceSkillGroups, skillDetailRoute } from '../../src/components/extensions/skillHubCatalog.js'
 import { skillCategory, skillCategoryLabel } from '../../src/components/extensions/skillCategories.js'
 
 test('统一目录保留市场版本，个人和退役内置技能不重复出现', () => {
@@ -106,6 +106,13 @@ test('作者个人原件删除后市场安装仍显示，其他作者同名原�
   assert.equal(ownPersonalSkill({ ...market, owner_uid: 'bob' }, [{ slug: 'mine', source_scope: 'personal', owner_uid: 'alice' }], 'alice'), null)
   assert.deepEqual(personalSkillItems([], [market], 'alice').map((item) => [item.kind, item.slug]), [['market', 'mine-2']])
   assert.deepEqual(ownPersonalSkill(market, [{ slug: 'mine', source_scope: 'personal', owner_uid: 'alice' }], 'alice')?.slug, 'mine')
+})
+
+test('市场卡链接到作者个人原件时携带个人范围，普通共享技能不携带', () => {
+  const market = { slug: 'reading-market', owner_uid: 'alice', own_personal_slug: 'reading' }
+  const personal = ownPersonalSkill(market, [{ slug: 'reading', source_scope: 'personal', owner_uid: 'alice' }], 'alice')
+  assert.deepEqual(skillDetailRoute(personal), { path: '/extensions/skill/reading', query: { scope: 'personal' } })
+  assert.deepEqual(skillDetailRoute({ slug: 'reading', source_scope: 'shared' }), { path: '/extensions/skill/reading' })
 })
 
 test('个人空间分类包含本人安装、共享和系统技能，全部视图折叠同源共享副本', () => {

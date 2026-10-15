@@ -256,7 +256,7 @@ import { Blocks, BookOpen, ChartNoAxesColumn, ChevronRight, ClipboardList, Downl
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import SkillCardList from '@/components/extensions/SkillCardList.vue'
 import { canManageSkillRecord, isDepartmentManagedSkill } from '@/components/extensions/skillManagementAccess'
-import { combineSkillCards, filterSkillCards, ownPersonalSkill, personalSpaceSkillGroups, searchPersonalSpaceSkillGroups } from '@/components/extensions/skillHubCatalog'
+import { combineSkillCards, filterSkillCards, ownPersonalSkill, personalSpaceSkillGroups, searchPersonalSpaceSkillGroups, skillDetailRoute } from '@/components/extensions/skillHubCatalog'
 import { skillCategories, skillCategory, skillCategoryLabel } from '@/components/extensions/skillCategories'
 import { useUserStore } from '@/stores/user'
 import { departmentApi } from '@/apis/department_api'
@@ -453,13 +453,12 @@ const marketCardWithSharedStatus = (item) => combineSkillCards([item], legacyCar
 
 function openCard(item) {
   if (item.kind === 'market') return openDetail(item.slug)
-  router.push(`/extensions/skill/${encodeURIComponent(item.slug)}`)
+  router.push(skillDetailRoute(item))
 }
 
 function openPersonalItem(item) {
   if (item.kind === 'market') return openDetail(item.slug)
-  if (item.kind === 'personal') return router.push({ path: `/extensions/skill/${encodeURIComponent(item.slug)}`, query: { scope: 'personal' } })
-  router.push(`/extensions/skill/${encodeURIComponent(item.slug)}`)
+  router.push(skillDetailRoute(item))
 }
 
 function openManagementMarket(slug) {
