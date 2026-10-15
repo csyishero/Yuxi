@@ -28,4 +28,5 @@ Owner：backend/package/yuxi/permissions/resource_permission.py
 
 - 相关权限和服务单测 60 项通过；真实 HTTP/PostgreSQL 集成测试 4 项通过，覆盖本部门管理员管理、他部门发布物拒绝、连续自委派和扩大全公司的请求均拒绝、数据库共享配置不变。
 - 真实 PostgreSQL 的 v12→v13 `storage_migration.main()` 测试通过，覆盖版本写入、可信申请回填和重复运行幂等。
+- 原项目数据在停机时完成成套备份并校验归档，迁移器退出码为 0；回读业务 Schema 为 13、知识 Schema 为 2，原有 `reading-v2` 的发布部门回填为 3。API readiness 为 ready 且未降级，技能预览入口返回 200。
 - Ruff、格式检查和 `git diff --check` 通过。整份相关集成文件另有两个未修改的旧用例失败：旧请求缺少必填方向；MCP 测试地址包含 `secret` 干扰旧断言。本次目标用例均通过。
