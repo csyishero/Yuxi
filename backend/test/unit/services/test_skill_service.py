@@ -2572,3 +2572,49 @@ def test_resolved_shared_skill_captures_original_version_and_hash(monkeypatch, t
     assert resolved.version == "v1"
     assert resolved.content_hash == "hash-v1"
     assert resolved.source_scope == "shared"
+
+
+@pytest.mark.asyncio
+async def test_default_skill_variant_metadata_matches_preload_selection(monkeypatch):
+    items = [
+        SimpleNamespace(id=1, slug="shared-old", source_scope="shared"),
+        SimpleNamespace(id=2, slug="shared-new", source_scope="shared"),
+        SimpleNamespace(id=11, slug="market", source_scope="market"),
+        SimpleNamespace(id=0, slug="personal", source_scope="personal"),
+        SimpleNamespace(id=3, slug="other", source_scope="shared"),
+    ]
+    user = SimpleNamespace(uid="author")
+
+    async def fake_accessible(_db, _user):
+        return items
+
+    async def fake_shared_origins(_db, _items):
+        return {"shared-old": ("author", "personal"), "shared-new": ("author", "personal")}
+
+    class FakeMarketRepository:
+        def __init__(self, _db):
+            pass
+
+        async def visible_by_ids(self, _user, ids):
+            assert ids == {"11"}
+            return [SimpleNamespace(id=11, owner_uid="author", personal_slug="personal")]
+
+    monkeypatch.setattr(svc, "list_accessible_skills", fake_accessible)
+    monkeypatch.setattr(svc, "approved_shared_origins", fake_shared_origins)
+    monkeypatch.setattr(svc, "MarketSkillRepository", FakeMarketRepository)
+
+    default_by_variant = await svc.default_skill_slug_by_variant(object(), user, items)
+    assert default_by_variant == {
+        "shared-old": "personal",
+        "shared-new": "personal",
+        "market": "personal",
+        "personal": "personal",
+        "other": "other",
+    }
+    assert await svc.select_default_skill_slugs(object(), user) == ["personal", "other"]
+    assert await svc.select_default_skill_slugs(object(), user, ["shared-old"]) == ["shared-old", "other"]
+    assert await svc.select_default_skill_slugs(object(), user, ["shared-old", "market"]) == [
+        "shared-old",
+        "market",
+        "other",
+    ]

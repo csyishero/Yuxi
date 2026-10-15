@@ -21,6 +21,14 @@ const getMentionResourceKind = (key, kind) => {
   return null
 }
 
+const normalizeSkillSlugs = (value) =>
+  Array.isArray(value)
+    ? value
+        .filter((slug) => typeof slug === 'string')
+        .map((slug) => slug.trim())
+        .filter(Boolean)
+    : []
+
 const normalizeMentionResource = (option, kind) => {
   const value = getAgentConfigOptionValue(option)
   if (!value) return null
@@ -100,18 +108,21 @@ export function useAgentMentionConfig({
     const includeAllByKind = createResourceMap(() => false)
     const selectedByKind = createResourceMap(() => new Set())
     const optionsByKind = createResourceMap(() => new Map())
+    const autoDefaultBySkill = new Map()
     const resourceItems = []
 
     Object.entries(configItems).forEach(([key, item]) => {
       const kind = getMentionResourceKind(key, item?.kind)
-      if (!kind) return
+      // Preloading changes the auto representative; it does not grant a Skill in fixed/off mode.
+      if (!kind || key === 'preload_skills') return
 
       resourceItems.push({ kind, item })
       const val = currentConfig[key]
       if (val === null && isDefaultAllAgentResourceKind(kind)) {
         includeAllByKind[kind] = true
       } else if (Array.isArray(val)) {
-        val.forEach((value) => selectedByKind[kind].add(value))
+        const selectedValues = kind === 'skills' ? normalizeSkillSlugs(val) : val
+        selectedValues.forEach((value) => selectedByKind[kind].add(value))
       }
     })
 
@@ -124,7 +135,10 @@ export function useAgentMentionConfig({
         if (!value || (!includeAllByKind[kind] && !selectedValues.has(value))) return
 
         const normalized = normalizeMentionResource(option, kind)
-        if (normalized) optionsByKind[kind].set(value, normalized)
+        if (normalized) {
+          optionsByKind[kind].set(value, normalized)
+          if (kind === 'skills') autoDefaultBySkill.set(value, option?.auto_default_slug)
+        }
       })
     })
 
@@ -133,7 +147,25 @@ export function useAgentMentionConfig({
       const optionMap = optionsByKind[kind]
 
       if (includeAllByKind[kind]) {
-        optionMap.forEach((option) => result.push(option))
+        if (kind === 'skills') {
+          const preloaded = new Set(normalizeSkillSlugs(currentConfig.preload_skills))
+          const preloadedGroups = new Set(
+            [...preloaded]
+              .filter((slug) => optionMap.has(slug))
+              .map((slug) => autoDefaultBySkill.get(slug))
+          )
+          optionMap.forEach((option, slug) => {
+            const defaultSlug = autoDefaultBySkill.get(slug)
+            if (
+              !defaultSlug ||
+              (preloadedGroups.has(defaultSlug) ? preloaded.has(slug) : slug === defaultSlug)
+            ) {
+              result.push(option)
+            }
+          })
+        } else {
+          optionMap.forEach((option) => result.push(option))
+        }
         return result
       }
 

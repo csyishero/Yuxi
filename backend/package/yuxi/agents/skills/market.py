@@ -314,6 +314,7 @@ async def _market_card(
         "category": release.category or "other",
         "owner_uid": listing.owner_uid,
         "owner_name": owner or listing.owner_uid,
+        "own_personal_slug": listing.personal_slug if listing.owner_uid == str(user.uid) else None,
         "scope": listing.scope,
         "department_id": listing.department_id,
         "latest_version": release.version,
@@ -340,6 +341,12 @@ async def install_market_skill(db: AsyncSession, *, slug: str, user: User, upgra
         raise ValueError("请先安装市场 Skill")
     if not upgrade and current is not None:
         return await get_market_skill(db, slug=slug, user=user)
+    if (
+        current is None
+        and listing.owner_uid == str(user.uid)
+        and any(personal.slug == listing.personal_slug for personal in await list_personal_skills(str(user.uid)))
+    ):
+        raise ValueError("个人原件已可使用，无需安装自己发布的市场 Skill")
     release = await repo.release(listing.latest_release_id)
     if release.tool_dependencies or release.mcp_dependencies or release.skill_dependencies:
         available = {

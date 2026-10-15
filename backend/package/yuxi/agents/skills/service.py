@@ -13,9 +13,10 @@ import threading
 import time
 import uuid
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -35,7 +36,7 @@ from yuxi.permissions import ResourcePermission, normalize_permission_config, re
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.mcp_reference_service import get_visible_mcp_reference_slugs, project_mcp_references
-from yuxi.storage.postgres.models_business import Department, MarketSkill, Skill, User
+from yuxi.storage.postgres.models_business import Department, MarketSkill, Skill, SkillShareRequest, User
 from yuxi.utils.logging_config import logger
 from yuxi.utils.paths import ensure_within_root, open_directory_fd, open_regular_file_fd
 
@@ -127,6 +128,8 @@ class ResolvedSkill:
     shadowed_by_personal: bool = False
     read_department_names: list[str] | None = None
     read_user_names: list[str] | None = None
+    related_market_slug: str | None = None
+    created_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """返回可安全提供给前端的 Skill 元数据。"""
@@ -154,6 +157,8 @@ class ResolvedSkill:
             data["read_department_names"] = self.read_department_names
         if self.read_user_names is not None:
             data["read_user_names"] = self.read_user_names
+        if self.related_market_slug is not None:
+            data["related_market_slug"] = self.related_market_slug
         return data
 
 
@@ -790,6 +795,97 @@ async def list_accessible_skills(
     return list(effective.values())
 
 
+async def approved_shared_origins(
+    db: AsyncSession, shared_items: Sequence[Skill | ResolvedSkill]
+) -> dict[str, tuple[str, str]]:
+    """按无冲突的已批准申请识别已审核共享副本的个人来源。"""
+    candidates = {
+        item.slug: item for item in shared_items if item.source_type == "personal_share" and item.content_hash
+    }
+    if not candidates:
+        return {}
+    requests = (
+        await db.scalars(
+            select(SkillShareRequest).where(
+                SkillShareRequest.channel == "shared",
+                SkillShareRequest.status == "approved",
+                SkillShareRequest.published_slug.in_(candidates),
+            )
+        )
+    ).all()
+    requests_by_slug: dict[str, list[SkillShareRequest]] = {}
+    for request in requests:
+        requests_by_slug.setdefault(request.published_slug, []).append(request)
+
+    origins: dict[str, tuple[str, str]] = {}
+    for slug, matching in requests_by_slug.items():
+        published = candidates[slug]
+        sources = {(item.owner_uid, item.personal_slug, item.content_hash) for item in matching}
+        if len(sources) != 1 or any(
+            not item.content_hash
+            or published.name != item.name
+            or published.description != item.description
+            or published.created_by != item.reviewer_uid
+            or published.created_at is None
+            or item.reviewed_at is None
+            or not (item.created_at <= published.created_at <= item.reviewed_at)
+            for item in matching
+        ):
+            continue
+        owner_uid, personal_slug, _content_hash = next(iter(sources))
+        origins[slug] = (owner_uid, personal_slug)
+    return origins
+
+
+async def default_skill_slug_by_variant(db: AsyncSession, user: User, items: Sequence[ResolvedSkill]) -> dict[str, str]:
+    """返回每个可访问 Skill 所在来源组的默认入口 slug。"""
+    shared_origins = await approved_shared_origins(db, [item for item in items if item.source_scope == "shared"])
+    market_by_id = {
+        item.id: item
+        for item in await MarketSkillRepository(db).visible_by_ids(
+            user, {str(item.id) for item in items if item.source_scope == "market"}
+        )
+    }
+    groups: dict[tuple[str, str, str], list[ResolvedSkill]] = {}
+    for item in items:
+        origin: tuple[str, str] | None = None
+        if item.source_scope == "personal":
+            origin = (str(user.uid), item.slug)
+        elif item.source_scope == "market" and item.id in market_by_id:
+            listing = market_by_id[item.id]
+            origin = (listing.owner_uid, listing.personal_slug)
+        elif item.source_scope == "shared":
+            origin = shared_origins.get(item.slug)
+        key = ("source", *origin) if origin is not None else ("slug", "", item.slug)
+        groups.setdefault(key, []).append(item)
+
+    default_by_variant: dict[str, str] = {}
+    for variants in groups.values():
+        chosen = max(
+            variants,
+            key=lambda item: (
+                3 if item.source_scope == "personal" else 2 if item.source_scope == "market" else 1,
+                item.id if isinstance(item.id, int) else 0,
+            ),
+        )
+        default_by_variant.update({item.slug: chosen.slug for item in variants})
+    return default_by_variant
+
+
+async def select_default_skill_slugs(db: AsyncSession, user: User, preload_slugs: list[str] | None = None) -> list[str]:
+    """为未显式配置技能的 Agent 每个个人来源选择一个默认入口。"""
+    items = await list_accessible_skills(db, user)
+    default_by_variant = await default_skill_slug_by_variant(db, user, items)
+    preload_set = set(normalize_string_list(preload_slugs)) & default_by_variant.keys()
+    preloaded_groups = {default_by_variant[slug] for slug in preload_set}
+    return [
+        item.slug
+        for item in items
+        if item.slug in preload_set
+        or (item.slug == default_by_variant[item.slug] and item.slug not in preloaded_groups)
+    ]
+
+
 async def list_skill_cards_for_user(
     db: AsyncSession,
     user: User,
@@ -817,6 +913,18 @@ async def list_skill_cards_for_user(
     shared_cards = [
         _resolved_shared_skill(item, shadowed_by_personal=item.slug in personal_slugs) for item in shared_items
     ]
+    if not (audience_search or audience_department_id is not None):
+        origins = await approved_shared_origins(db, shared_items)
+        visible_market = {
+            (item.owner_uid, item.personal_slug): item.slug
+            for item in await MarketSkillRepository(db).visible_by_sources(user, set(origins.values()))
+        }
+        shared_cards = [
+            replace(card, related_market_slug=visible_market[origins[card.slug]])
+            if card.slug in origins and origins[card.slug] in visible_market
+            else card
+            for card in shared_cards
+        ]
     if audience_search or audience_department_id is not None:
         audience = await UserRepository(db).list_skill_catalog_audience(
             search=audience_search, department_id=audience_department_id
@@ -1715,6 +1823,7 @@ def _resolved_shared_skill(item: Skill, *, shadowed_by_personal: bool = False) -
         version=item.version,
         content_hash=item.content_hash,
         shadowed_by_personal=shadowed_by_personal,
+        created_at=item.created_at,
     )
 
 

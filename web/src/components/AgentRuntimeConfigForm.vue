@@ -100,11 +100,8 @@
                   </div>
                   <div class="skill-mode-status" role="status">
                     <template v-if="getSkillSelectionMode(agentConfig[key]) === 'auto'">
-                      <strong>使用运行者有权限的全部 Skill</strong>
-                      <span
-                        >本账号当前可用
-                        {{ getConfigOptions(value).length }} 项；其他运行者的数量随权限变化。</span
-                      >
+                      <strong>按来源自动选择可用 Skill</strong>
+                      <span>随运行者权限变化；同源发布默认只选一个版本，预加载的版本仍会保留。</span>
                     </template>
                     <template v-else-if="getSkillSelectionMode(agentConfig[key]) === 'fixed'">
                       <strong>固定选择 {{ agentConfig[key].length }} 项 Skill</strong>
@@ -359,7 +356,7 @@
           "
           class="skill-switch-note"
         >
-          切换为固定选择后，只使用明确勾选的 Skill；不会自动把本账号当前可用的全部 Skill 固定下来。
+          切换为固定选择后，只使用明确勾选的 Skill；不会自动把当前可用列表固定下来。
         </p>
         <div class="selection-search">
           <a-input
@@ -558,7 +555,7 @@ const activeSegment = computed(() => (props.showSegmented ? currentSegment.value
 const isToolResourceKind = (kind) => isDefaultAllAgentResourceKind(kind)
 const KNOWLEDGE_BASE_SKILL_SLUG = 'knowledge-base'
 const skillModes = [
-  { value: 'auto', label: '动态使用全部', description: '随运行者权限变化' },
+  { value: 'auto', label: '自动使用', description: '按权限和来源选择' },
   { value: 'fixed', label: '固定选择', description: '仅使用指定的 Skill' },
   { value: 'off', label: '不启用', description: '不加载 Skill' }
 ]

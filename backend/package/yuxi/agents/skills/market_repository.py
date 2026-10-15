@@ -1,6 +1,6 @@
 """内部 Skill 市场的 PostgreSQL 查询。"""
 
-from sqlalchemy import func, or_, select, true
+from sqlalchemy import func, or_, select, true, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_business import (
@@ -131,6 +131,26 @@ class MarketSkillRepository:
             if item.slug == slug:
                 return item
         return None
+
+    async def visible_by_sources(self, user: User, sources: set[tuple[str, str]]) -> list[MarketSkill]:
+        """不经目录分页，读取当前用户可见的指定个人来源。"""
+        if not sources:
+            return []
+        statement = select(MarketSkill).where(
+            MarketSkill.latest_release_id.is_not(None),
+            self._visible_filter(user),
+            tuple_(MarketSkill.owner_uid, MarketSkill.personal_slug).in_(sources),
+        )
+        return list((await self.db.scalars(statement)).all())
+
+    async def visible_by_ids(self, user: User, ids: set[str]) -> list[MarketSkill]:
+        """读取已安装候选的可见来源身份。"""
+        if not ids:
+            return []
+        statement = select(MarketSkill).where(
+            MarketSkill.id.in_(ids), MarketSkill.latest_release_id.is_not(None), self._visible_filter(user)
+        )
+        return list((await self.db.scalars(statement)).all())
 
     async def by_slug_for_update(self, slug: str) -> MarketSkill | None:
         """锁定稳定条目以串行发布新版本。"""

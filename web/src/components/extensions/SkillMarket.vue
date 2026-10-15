@@ -7,7 +7,7 @@
             <div class="market-heading-icon"><Blocks :size="23" /></div>
             <div>
               <h2>技能</h2>
-              <p>找到适合任务的能力，安装后在 Agent 中使用。</p>
+              <p>找到适合任务的能力，在 Agent 中使用。</p>
             </div>
           </div>
           <div class="market-heading-actions">
@@ -73,6 +73,7 @@
               <div class="market-card-author">
                 {{ item.kind === 'market' ? `由 ${item.owner_name} 发布 · v${item.latest_version}` : item.source_type === 'builtin' ? '系统内置 · 可直接使用' : '已共享 · 可直接使用' }}
               </div>
+              <div v-if="item.kind === 'market' && item.shared_available_slug && !item.installed_version && !ownPersonalSkillFor(item)" class="market-shared-note">共享版本已可用</div>
               <div class="market-card-bottom">
                 <template v-if="item.kind === 'market'">
                   <button
@@ -83,9 +84,10 @@
                     :disabled="busySlug === item.slug"
                     @click="like(item)"
                   ><Heart :size="16" :fill="item.liked ? 'currentColor' : 'none'" /> {{ item.likes_count }}</button>
-                  <span class="market-install-count"><Download :size="15" /> {{ item.install_count }} 人安装</span>
+                  <span v-if="ownPersonalSkillFor(item) && !item.installed_version" class="market-available">个人技能已可用</span>
+                  <span v-else class="market-install-count"><Download :size="15" /> {{ item.install_count }} 人安装</span>
                   <a-button size="small" :loading="busySlug === item.slug" @click="act(item)">
-                    {{ item.upgrade_available ? '升级' : item.installed_version ? '查看' : '安装' }}
+                    {{ item.upgrade_available ? '升级' : item.installed_version ? '查看' : ownPersonalSkillFor(item) ? '查看个人技能' : item.shared_available_slug ? '安装市场版' : '安装' }}
                   </a-button>
                 </template>
                 <template v-else>
@@ -112,7 +114,7 @@
             <div v-else class="personal-list">
               <button v-for="item in filteredPersonalItems" :key="`${item.kind}:${item.slug}`" type="button" class="personal-item" @click="openPersonalItem(item)">
                 <span class="personal-item-icon"><BookOpen :size="17" /></span>
-                <span class="personal-item-copy"><strong>{{ item.name }}</strong><small>{{ item.kind === 'market' ? `市场已安装 · v${item.installed_version}` : '个人技能' }} · {{ skillCategoryLabel(item.category) }}</small></span>
+                <span class="personal-item-copy"><strong>{{ item.name }}</strong><small>{{ item.kind === 'market' ? `市场已安装 · v${item.installed_version}` : item.market_installed_version ? `个人技能 · 市场已安装 v${item.market_installed_version}` : '个人技能' }} · {{ skillCategoryLabel(item.category) }}</small></span>
                 <ChevronRight :size="15" class="personal-item-chevron" />
               </button>
             </div>
@@ -186,9 +188,12 @@
           <div class="market-detail-meta">
             <span>方向 · {{ skillCategoryLabel(detail.category) }}</span>
             <span>当前版本 v{{ detail.latest_version }}</span>
-            <span>已安装 {{ detail.installed_version ? `v${detail.installed_version}` : '—' }}</span>
+            <span v-if="ownPersonalSkillFor(detail) && !detail.installed_version">个人技能已可用</span>
+            <span v-else>已安装 {{ detail.installed_version ? `v${detail.installed_version}` : '—' }}</span>
             <span>{{ detail.install_count }} 人安装</span>
           </div>
+          <a-alert v-if="ownPersonalSkillFor(detail) && !detail.installed_version" type="info" show-icon message="你的个人技能已可在 Agent 中使用，无需再次安装。" />
+          <a-alert v-if="detail.shared_available_slug && !detail.installed_version && !ownPersonalSkillFor(detail)" type="info" show-icon message="共享版本已可直接使用；安装市场版可使用当前审核版本。" />
           <a-alert v-if="detail.upgrade_available" type="info" show-icon message="新版本已发布。升级需由你手动确认。" />
           <div v-if="dependencyLabels.length" class="market-dependencies">
             <strong>依赖</strong><a-tag v-for="dependency in dependencyLabels" :key="dependency">{{ dependency }}</a-tag>
@@ -203,8 +208,8 @@
             </div>
           </div>
           <div class="market-detail-actions">
-            <a-button v-if="detail.installed_version" @click="router.push('/agent-manage')">在 Agent 中使用</a-button>
-            <a-button type="primary" :loading="busySlug === detail.slug" :disabled="detail.installed_version && !detail.upgrade_available" @click="act(detail)">{{ detail.upgrade_available ? '升级到最新版本' : detail.installed_version ? '已安装' : '安装 Skill' }}</a-button>
+            <a-button v-if="detail.installed_version || ownPersonalSkillFor(detail)" @click="router.push('/agent-manage')">在 Agent 中使用</a-button>
+            <a-button type="primary" :loading="busySlug === detail.slug" :disabled="detail.installed_version && !detail.upgrade_available" @click="act(detail)">{{ detail.upgrade_available ? '升级到最新版本' : detail.installed_version ? '已安装' : ownPersonalSkillFor(detail) ? '查看个人技能' : detail.shared_available_slug ? '安装市场版' : '安装 Skill' }}</a-button>
           </div>
         </div>
       </a-spin>
@@ -256,7 +261,7 @@ import { message } from 'ant-design-vue'
 import { Blocks, BookOpen, ChartNoAxesColumn, ChevronRight, ClipboardList, Download, Heart, PanelRightClose, PanelRightOpen, Sparkles, Store } from '@lucide/vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import SkillCardList from '@/components/extensions/SkillCardList.vue'
-import { combineSkillCards, filterSkillCards, personalSkillItems } from '@/components/extensions/skillHubCatalog'
+import { combineSkillCards, filterSkillCards, ownPersonalSkill, personalSkillItems } from '@/components/extensions/skillHubCatalog'
 import { skillCategories, skillCategory, skillCategoryLabel } from '@/components/extensions/skillCategories'
 import { useUserStore } from '@/stores/user'
 import { departmentApi } from '@/apis/department_api'
@@ -399,6 +404,10 @@ const requestStatusLabel = (status) => ({ pending: '待审核', approved: '已�
 const requestScopeLabel = (request) => request.read_scope?.access_level === 'global'
   ? '全公司可见'
   : `${departmentNames.value[request.owner_department_id] || `部门 ${request.owner_department_id || '未分配'}`}及超级管理员可见`
+/** 当前用户已有个人原件时让市场入口回到原件。 */
+const ownPersonalSkillFor = (item) => ownPersonalSkill(item, legacyCards.value, userStore.uid)
+/** 详情响应补上当前已授权共享副本的可用状态。 */
+const marketCardWithSharedStatus = (item) => combineSkillCards([item], legacyCards.value)[0]
 
 function openCard(item) {
   if (item.kind === 'market') return openDetail(item.slug)
@@ -557,7 +566,7 @@ async function openDetail(slug) {
   fileContent.value = ''
   try {
     const [info, tree] = await Promise.all([getMarketSkill(slug), getMarketSkillTree(slug)])
-    detail.value = info.data
+    detail.value = marketCardWithSharedStatus(info.data)
     files.value = flattenFiles(tree.data || [])
     await selectFile('SKILL.md')
   } catch (failure) {
@@ -581,6 +590,10 @@ async function selectFile(path) {
 }
 
 async function act(item) {
+  if (!item.installed_version) {
+    const personal = ownPersonalSkillFor(item)
+    if (personal) return openPersonalItem(personal)
+  }
   if (item.installed_version && !item.upgrade_available) return openDetail(item.slug)
   busySlug.value = item.slug
   try {
@@ -589,7 +602,7 @@ async function act(item) {
     installedCards.value = installedCards.value.filter((card) => card.slug !== item.slug).concat(result.data)
     fetchInstalled().catch(() => message.warning('已安装，个人列表刷新失败，请稍后重试'))
     if (rankingsOpen.value) fetchRankings()
-    if (detail.value?.slug === item.slug) detail.value = result.data
+    if (detail.value?.slug === item.slug) detail.value = marketCardWithSharedStatus(result.data)
     message.success(item.installed_version ? '已升级到最新审核版本' : '已安装，可在 Agent 中使用')
   } catch (failure) {
     message.error(errorText(failure))
@@ -604,7 +617,7 @@ async function like(item) {
     const result = await toggleMarketSkillLike(item.slug)
     cards.value = cards.value.map((card) => card.slug === item.slug ? result.data : card)
     if (rankingsOpen.value) fetchRankings()
-    if (detail.value?.slug === item.slug) detail.value = result.data
+    if (detail.value?.slug === item.slug) detail.value = marketCardWithSharedStatus(result.data)
   } catch (failure) {
     message.error(errorText(failure))
   } finally {
@@ -775,6 +788,7 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .market-card-slug, .market-card-author, .market-request-meta { color: var(--color-text-tertiary); font-size: 12px; }
 .market-card p { margin: 11px 0; color: var(--color-text-secondary); line-height: 1.55; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; font-size: 13px; }
 .market-card-author { margin-top: auto; }
+.market-shared-note { margin-top: 5px; color: var(--main-600); font-size: 12px; }
 .market-card-bottom { border-top: 1px solid var(--gray-100); margin-top: 13px; padding-top: 11px; }
 .market-like { display: flex; align-items: center; gap: 5px; border: 0; background: none; color: var(--color-text-secondary); cursor: pointer; }
 .market-like.liked { color: var(--color-error-500); }

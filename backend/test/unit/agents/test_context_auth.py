@@ -31,6 +31,10 @@ def _load_context_module():
     return importlib.import_module("yuxi.agents.context")
 
 
+async def _identity_default_skill_slug_by_variant(_db, _user, items):
+    return {item.slug: item.slug for item in items}
+
+
 context_module = _load_context_module()
 BaseContext = context_module.BaseContext
 filter_config_by_role = context_module.filter_config_by_role
@@ -175,18 +179,128 @@ async def test_skill_options_include_source_scope_for_same_name_skills(monkeypat
             types.SimpleNamespace(slug="ppt-builder-team", name="PPT Builder", description="", source_scope="personal"),
         ]
 
+    async def fake_default_by_variant(_db, _user, items):
+        assert [item.slug for item in items] == ["ppt-builder", "ppt-builder-team"]
+        return {"ppt-builder": "ppt-builder-team", "ppt-builder-team": "ppt-builder-team"}
+
     monkeypatch.setitem(
         sys.modules,
         "yuxi.agents.skills.service",
-        types.SimpleNamespace(list_accessible_skills=fake_list_skills),
+        types.SimpleNamespace(
+            list_accessible_skills=fake_list_skills,
+            default_skill_slug_by_variant=fake_default_by_variant,
+        ),
     )
 
     options = await context_module.resolve_agent_resource_options({"skills"}, db=object(), user=object())
 
     assert options["skills"] == [
-        {"key": "ppt-builder", "name": "PPT Builder", "description": "", "source_scope": "shared"},
-        {"key": "ppt-builder-team", "name": "PPT Builder", "description": "", "source_scope": "personal"},
+        {
+            "key": "ppt-builder",
+            "name": "PPT Builder",
+            "description": "",
+            "source_scope": "shared",
+            "auto_default_slug": "ppt-builder-team",
+        },
+        {
+            "key": "ppt-builder-team",
+            "name": "PPT Builder",
+            "description": "",
+            "source_scope": "personal",
+            "auto_default_slug": "ppt-builder-team",
+        },
     ]
+
+
+@pytest.mark.asyncio
+async def test_default_skills_collapse_same_origin_and_preserve_explicit_preload(monkeypatch):
+    """默认选择按来源合并，显式预加载仍可指定旧共享标识。"""
+    options = {
+        "skills": [{"key": slug} for slug in ["local-pptx", "local-pptx-market", "local-pptx-shared", "other-skill"]],
+        "tools": [{"key": "calculator"}],
+    }
+
+    async def fake_options(fields, *, db, user):
+        assert db is not None
+        assert user.uid == "u1"
+        return {field_name: options[field_name] for field_name in fields}
+
+    calls = []
+
+    async def fake_select_default(db, user, preload_slugs):
+        assert db is not None
+        assert user.uid == "u1"
+        calls.append(preload_slugs)
+        if preload_slugs:
+            return ["local-pptx-shared", "other-skill", "hidden-skill"]
+        return ["local-pptx", "other-skill", "hidden-skill"]
+
+    monkeypatch.setattr(context_module, "resolve_agent_resource_options", fake_options)
+    monkeypatch.setitem(
+        sys.modules,
+        "yuxi.agents.skills.service",
+        types.SimpleNamespace(select_default_skill_slugs=fake_select_default),
+    )
+    user = types.SimpleNamespace(uid="u1")
+
+    default = await normalize_agent_context_config(
+        {"tools": None, "knowledges": [], "mcps": [], "skills": None, "summary_threshold": 13},
+        db=object(),
+        user=user,
+    )
+    assert default["skills"] == ["local-pptx", "other-skill"]
+    assert default["tools"] == ["calculator"]
+    assert default["summary_threshold"] == 13
+
+    preloaded = await normalize_agent_context_config(
+        {
+            "tools": [],
+            "knowledges": [],
+            "mcps": [],
+            "preload_skills": ["local-pptx-shared"],
+        },
+        db=object(),
+        user=user,
+    )
+    assert preloaded["skills"] == ["local-pptx-shared", "other-skill"]
+    assert preloaded["preload_skills"] == ["local-pptx-shared"]
+    assert calls == [[], ["local-pptx-shared"]]
+
+
+@pytest.mark.asyncio
+async def test_explicit_skill_selections_keep_legacy_slugs(monkeypatch):
+    """显式技能选择和空列表不触发默认来源合并。"""
+
+    async def fake_options(fields, *, db, user):
+        assert fields == {"skills"}
+        return {"skills": [{"key": slug} for slug in ["local-pptx", "local-pptx-market", "local-pptx-shared"]]}
+
+    async def fail_default_selection(*_args, **_kwargs):
+        raise AssertionError("显式技能配置不应查询默认技能")
+
+    monkeypatch.setattr(context_module, "resolve_agent_resource_options", fake_options)
+    monkeypatch.setitem(
+        sys.modules,
+        "yuxi.agents.skills.service",
+        types.SimpleNamespace(select_default_skill_slugs=fail_default_selection),
+    )
+    common = {"tools": [], "knowledges": [], "mcps": []}
+
+    selected = await normalize_agent_context_config(
+        {
+            **common,
+            "skills": ["local-pptx-shared", "local-pptx-market", "local-pptx-shared", "hidden-skill"],
+            "preload_skills": ["local-pptx-shared"],
+        },
+        db=object(),
+        user=object(),
+    )
+    assert selected["skills"] == ["local-pptx-shared", "local-pptx-market"]
+    assert selected["preload_skills"] == ["local-pptx-shared"]
+
+    empty = await normalize_agent_context_config({**common, "skills": []}, db=object(), user=object())
+    assert empty["skills"] == []
+    assert empty["preload_skills"] == []
 
 
 @pytest.mark.asyncio
@@ -248,7 +362,10 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
     monkeypatch.setitem(
         sys.modules,
         "yuxi.agents.skills.service",
-        types.SimpleNamespace(list_accessible_skills=fake_list_skills),
+        types.SimpleNamespace(
+            list_accessible_skills=fake_list_skills,
+            default_skill_slug_by_variant=_identity_default_skill_slug_by_variant,
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -404,12 +521,11 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
         "yuxi.agents.backends.knowledge_base_backend",
         types.SimpleNamespace(resolve_visible_knowledge_bases_for_context=fake_resolve_visible_knowledge_bases),
     )
+    runtime_module = types.SimpleNamespace(resolve_runtime_skills_for_context=fake_resolve_runtime_skills_for_context)
     monkeypatch.setitem(
         sys.modules,
         "yuxi.agents.skills.runtime",
-        types.SimpleNamespace(
-            resolve_runtime_skills_for_context=fake_resolve_runtime_skills_for_context,
-        ),
+        runtime_module,
     )
     monkeypatch.setitem(
         sys.modules,
@@ -446,7 +562,10 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
     monkeypatch.setitem(
         sys.modules,
         "yuxi.agents.skills.service",
-        types.SimpleNamespace(list_accessible_skills=fake_list_skills),
+        types.SimpleNamespace(
+            list_accessible_skills=fake_list_skills,
+            default_skill_slug_by_variant=_identity_default_skill_slug_by_variant,
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -484,7 +603,8 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
         AsyncMock(side_effect=AssertionError("同次执行不得再次规范化")),
     )
     monkeypatch.setattr(
-        "yuxi.agents.skills.runtime.resolve_runtime_skills_for_context",
+        runtime_module,
+        "resolve_runtime_skills_for_context",
         AsyncMock(side_effect=AssertionError("同次执行不得重新读取 Skill")),
     )
     prompt = prepared.system_prompt
