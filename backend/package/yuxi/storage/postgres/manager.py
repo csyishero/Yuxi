@@ -27,7 +27,7 @@ from yuxi.utils import logger
 from yuxi.utils.singleton import SingletonMeta
 
 AGENT_RUN_TERMINAL_STATUS_SQL = ", ".join(f"'{status}'" for status in AGENT_RUN_TERMINAL_STATUSES)
-BUSINESS_SCHEMA_VERSION = 13
+BUSINESS_SCHEMA_VERSION = 14
 KNOWLEDGE_SCHEMA_VERSION = 2
 SCHEMA_VERSION_TABLE = "yuxi_schema_migrations"
 AGENT_RUN_LEASE_SCHEMA_STATEMENTS = (
@@ -941,6 +941,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 review_note TEXT,
                 reviewer_uid VARCHAR(64),
                 published_slug VARCHAR(128),
+                published_skill_id INTEGER,
                 department_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                 read_scope JSONB,
                 created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
@@ -950,6 +951,7 @@ class PostgresManager(metaclass=SingletonMeta):
             )
             """,
             "ALTER TABLE IF EXISTS skill_share_requests ADD COLUMN IF NOT EXISTS read_scope JSONB",
+            "ALTER TABLE IF EXISTS skill_share_requests ADD COLUMN IF NOT EXISTS published_skill_id INTEGER",
             "ALTER TABLE IF EXISTS skill_share_requests ALTER COLUMN owner_department_id DROP NOT NULL",
             "CREATE INDEX IF NOT EXISTS ix_skill_share_requests_owner_uid ON skill_share_requests(owner_uid)",
             (

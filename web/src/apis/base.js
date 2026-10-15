@@ -75,6 +75,8 @@ const PROJECT_PROMOTION_ERRORS = new Set([
   '原对话目录不存在或不可用，未转换项目'
 ])
 
+const MARKET_APPROVAL_ERRORS = new Set(['已有市场条目的发布范围不可在新版本中修改'])
+
 function publicErrorMessage(url, status, headers, requiresAuth, options, errorData) {
   const path = safeRequestMetadata(url, {}).path
   if (
@@ -90,6 +92,13 @@ function publicErrorMessage(url, status, headers, requiresAuth, options, errorDa
     /^\/api\/projects\/from-conversation\/[^/]+\/?$/.test(path) &&
     [409, 422].includes(status) &&
     PROJECT_PROMOTION_ERRORS.has(errorData?.detail)
+  )
+    return errorData.detail
+  if (
+    options?.method?.toUpperCase() === 'POST' &&
+    /^\/api\/skill-market\/requests\/[^/]+\/approve\/?$/.test(path) &&
+    status === 400 &&
+    MARKET_APPROVAL_ERRORS.has(errorData?.detail)
   )
     return errorData.detail
   if (status === 400) return '请求参数错误'

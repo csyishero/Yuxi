@@ -437,6 +437,7 @@ class SkillShareRequest(Base):
     review_note = Column(Text, nullable=True)
     reviewer_uid = Column(String(64), nullable=True)
     published_slug = Column(String(128), nullable=True)
+    published_skill_id = Column(Integer, nullable=True, comment="已批准共享副本的 Skill ID；删除后保留历史身份")
     department_ids = Column(JSON_VALUE, nullable=False, default=list)
     read_scope = Column(JSON_VALUE, nullable=True)
     created_at = Column(DateTime, nullable=False, default=utc_now_naive)

@@ -159,6 +159,11 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
             assert wrong_admin.status_code == 404
 
             current = User(uid="credit-admin", username="Admin", password_hash="x", role="admin", department_id=1)
+            first_pending = (await client.get("/api/skill-market/requests")).json()["data"][0]
+            assert first_pending["existing_market_scope"] is None
+            assert first_pending["existing_market_department_id"] is None
+            assert first_pending["current_market_version"] is None
+            assert first_pending["published_version"] is None
             forbidden_global = await client.post(
                 f"/api/skill-market/requests/{request_id}/approve", json={"scope": "global"}
             )
@@ -222,11 +227,30 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
             )
             assert second.status_code == 200, second.text
             current = User(uid="credit-admin", username="Admin", password_hash="x", role="admin", department_id=1)
+            pending = next(
+                item
+                for item in (await client.get("/api/skill-market/requests")).json()["data"]
+                if item["id"] == second.json()["data"]["id"]
+            )
+            assert pending["existing_market_scope"] == "department"
+            assert pending["existing_market_department_id"] == 1
+            assert pending["current_market_version"] == 1
+            assert pending["published_version"] is None
+            current = User(uid="root", username="Root", password_hash="x", role="superadmin", department_id=2)
+            assert (await client.get("/api/skill-market/requests?mine_only=true")).json()["data"] == []
+            current = User(uid="credit-admin", username="Admin", password_hash="x", role="admin", department_id=1)
             second_approval = await client.post(
                 f"/api/skill-market/requests/{second.json()['data']['id']}/approve",
                 json={"scope": "department"},
             )
             assert second_approval.status_code == 200, second_approval.text
+            published = next(
+                item
+                for item in (await client.get("/api/skill-market/requests")).json()["data"]
+                if item["id"] == second.json()["data"]["id"]
+            )
+            assert published["current_market_version"] == 2
+            assert published["published_version"] == 2
 
             current = User(uid="credit-user", username="Credit", password_hash="x", role="user", department_id=1)
             detail = (await client.get("/api/skill-market/credit-review")).json()["data"]
@@ -388,6 +412,196 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
                 {"slug": "recent-other", "success": False, "error": "Skill slug 已被占用，请重新解析安装"}
             ]
             assert await db.scalar(select(Skill.id).where(Skill.slug == "recent-other")) is None
+
+        global_dir = personal_root / "company-guide"
+        global_dir.mkdir()
+        (global_dir / "SKILL.md").write_text(
+            "---\nname: company-guide\ndescription: company guide\n---\n# First\n", encoding="utf-8"
+        )
+        current = User(uid="author", username="Author", password_hash="x", role="user", department_id=1)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            first = await client.post(
+                "/api/skill-market/personal/company-guide/submit", json={"application_reason": "全公司使用"}
+            )
+            assert first.status_code == 200, first.text
+            current = User(uid="root", username="Root", password_hash="x", role="superadmin", department_id=2)
+            approved = await client.post(
+                f"/api/skill-market/requests/{first.json()['data']['id']}/approve", json={"scope": "global"}
+            )
+            assert approved.status_code == 200, approved.text
+            (global_dir / "SKILL.md").write_text(
+                "---\nname: company-guide\ndescription: revised guide\n---\n# Second\n", encoding="utf-8"
+            )
+            current = User(uid="author", username="Author", password_hash="x", role="user", department_id=1)
+            second = await client.post(
+                "/api/skill-market/personal/company-guide/submit", json={"application_reason": "更新全公司版本"}
+            )
+            assert second.status_code == 200, second.text
+            current = User(uid="root", username="Root", password_hash="x", role="superadmin", department_id=2)
+            pending = next(
+                item
+                for item in (await client.get("/api/skill-market/requests")).json()["data"]
+                if item["id"] == second.json()["data"]["id"]
+            )
+            assert pending["existing_market_scope"] == "global"
+            assert pending["existing_market_department_id"] is None
+            assert pending["current_market_version"] == 1
+            assert pending["published_version"] is None
+            wrong_scope = await client.post(
+                f"/api/skill-market/requests/{pending['id']}/approve", json={"scope": "department"}
+            )
+            assert wrong_scope.status_code == 400
+            assert "发布范围" in wrong_scope.json()["detail"]
+            correct_scope = await client.post(f"/api/skill-market/requests/{pending['id']}/approve", json={})
+            assert correct_scope.status_code == 200, correct_scope.text
+            published = next(
+                item
+                for item in (await client.get("/api/skill-market/requests")).json()["data"]
+                if item["id"] == pending["id"]
+            )
+            assert published["current_market_version"] == 2
+            assert published["published_version"] == 2
+    finally:
+        await engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_engine.dispose()
+
+
+async def test_market_department_release_stays_with_original_department_after_author_moves(monkeypatch, tmp_path: Path):
+    """作者换部门后仅超级管理员可续版，原部门仍是市场受众。"""
+    schema = f"pytest_skill_market_move_{uuid.uuid4().hex[:12]}"
+    admin_engine = create_async_engine(os.environ["POSTGRES_URL"])
+    async with admin_engine.begin() as connection:
+        await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    engine = create_async_engine(os.environ["POSTGRES_URL"], connect_args={"server_settings": {"search_path": schema}})
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    personal_root = tmp_path / "personal"
+    skill_dir = personal_root / "department-guide"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: department-guide\ndescription: first release\n---\n# First\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(sharing, "personal_skills_root", lambda _uid: personal_root)
+    monkeypatch.setattr(sharing, "get_skill_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(market, "get_skill_data_dir", lambda: tmp_path)
+
+    async def no_dependencies(**_kwargs):
+        """本例没有外部工具依赖。"""
+        return [], [], []
+
+    monkeypatch.setattr(market, "validate_skill_dependencies", no_dependencies)
+    current = User(uid="author", username="Author", password_hash="x", department_id=1)
+    app = FastAPI()
+    app.include_router(market_router, prefix="/api")
+
+    async def provide_user():
+        """模拟当前认证用户。"""
+        return current
+
+    async def provide_db():
+        """每次请求使用独立事务会话。"""
+        async with sessions() as db:
+            yield db
+
+    app.dependency_overrides[get_required_user] = provide_user
+    app.dependency_overrides[get_db] = provide_db
+
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda conn: Base.metadata.create_all(
+                    conn,
+                    tables=[
+                        Department.__table__,
+                        User.__table__,
+                        Skill.__table__,
+                        SkillShareRequest.__table__,
+                        MarketSkill.__table__,
+                        MarketSkillRelease.__table__,
+                        MarketSkillInstall.__table__,
+                        MarketSkillLike.__table__,
+                    ],
+                )
+            )
+            await connection.execute(text("INSERT INTO departments (id, name) VALUES (1, 'Original'), (2, 'New')"))
+        async with sessions() as db:
+            db.add(User(uid="author", username="Author", password_hash="x", department_id=1))
+            await db.commit()
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            first = await client.post(
+                "/api/skill-market/personal/department-guide/submit", json={"application_reason": "首次发布"}
+            )
+            assert first.status_code == 200, first.text
+            current = User(uid="old-admin", username="Old Admin", password_hash="x", role="admin", department_id=1)
+            first_approval = await client.post(
+                f"/api/skill-market/requests/{first.json()['data']['id']}/approve", json={"scope": "department"}
+            )
+            assert first_approval.status_code == 200, first_approval.text
+
+            async with sessions() as db:
+                author = await db.scalar(select(User).where(User.uid == "author"))
+                author.department_id = 2
+                await db.commit()
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: department-guide\ndescription: second release\n---\n# Second\n", encoding="utf-8"
+            )
+            current = User(uid="author", username="Author", password_hash="x", department_id=2)
+            second = await client.post(
+                "/api/skill-market/personal/department-guide/submit", json={"application_reason": "换部门后续版"}
+            )
+            assert second.status_code == 200, second.text
+            second_id = second.json()["data"]["id"]
+            assert second.json()["data"]["owner_department_id"] == 2
+
+            current = User(uid="new-admin", username="New Admin", password_hash="x", role="admin", department_id=2)
+            pending = next(
+                item
+                for item in (await client.get("/api/skill-market/requests")).json()["data"]
+                if item["id"] == second_id
+            )
+            assert pending["existing_market_scope"] == "department"
+            assert pending["existing_market_department_id"] == 1
+            denied = await client.post(f"/api/skill-market/requests/{second_id}/approve", json={"scope": "department"})
+            assert denied.status_code == 403
+            assert "仅超级管理员" in denied.json()["detail"]
+            async with sessions() as db:
+                assert (await db.get(SkillShareRequest, second_id)).status == "pending"
+                assert (await db.scalar(select(MarketSkill))).department_id == 1
+                assert (
+                    await db.scalar(select(MarketSkillRelease).order_by(MarketSkillRelease.version.desc()))
+                ).version == 1
+
+            current = User(uid="old-admin", username="Old Admin", password_hash="x", role="admin", department_id=1)
+            assert all(
+                item["id"] != second_id for item in (await client.get("/api/skill-market/requests")).json()["data"]
+            )
+            assert (await client.post(f"/api/skill-market/requests/{second_id}/approve", json={})).status_code == 404
+
+            current = User(uid="root", username="Root", password_hash="x", role="superadmin", department_id=2)
+            approved = await client.post(
+                f"/api/skill-market/requests/{second_id}/approve", json={"scope": "department"}
+            )
+            assert approved.status_code == 200, approved.text
+            assert approved.json()["data"]["department_ids"] == [1]
+            assert approved.json()["data"]["read_scope"]["department_ids"] == [1]
+            async with sessions() as db:
+                listing = await db.scalar(select(MarketSkill))
+                assert listing.department_id == 1
+                assert (await db.get(SkillShareRequest, second_id)).owner_department_id == 2
+                assert (
+                    await db.scalar(select(MarketSkillRelease).order_by(MarketSkillRelease.version.desc()))
+                ).version == 2
+
+            current = User(uid="old-reader", username="Old Reader", password_hash="x", department_id=1)
+            assert [item["slug"] for item in (await client.get("/api/skill-market")).json()["data"]] == [
+                "department-guide"
+            ]
+            assert (await client.get("/api/skill-market/department-guide")).json()["data"]["latest_version"] == 2
+            current = User(uid="author", username="Author", password_hash="x", department_id=2)
+            assert (await client.get("/api/skill-market")).json()["data"] == []
+            assert (await client.get("/api/skill-market/department-guide")).status_code == 404
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:

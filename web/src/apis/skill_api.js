@@ -29,7 +29,8 @@ export const upgradeMarketSkill = async (slug) => apiPost(`${MARKET_BASE_URL}/${
 export const toggleMarketSkillLike = async (slug) => apiPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/like`)
 export const submitMarketSkill = async (slug, applicationReason, category) =>
   apiPost(`${MARKET_BASE_URL}/personal/${encodeURIComponent(slug)}/submit`, { application_reason: applicationReason, category })
-export const listMarketRequests = async () => apiGet(`${MARKET_BASE_URL}/requests`)
+export const listMarketRequests = async ({ mineOnly = false } = {}) =>
+  apiGet(`${MARKET_BASE_URL}/requests${mineOnly ? '?mine_only=true' : ''}`)
 export const reviewMarketSkill = async (requestId, approved, scope, note) =>
   apiAdminPost(`${MARKET_BASE_URL}/requests/${encodeURIComponent(requestId)}/${approved ? 'approve' : 'reject'}`, {
     scope,
@@ -61,10 +62,10 @@ export const getPersonalSkillCatalogFile = async (ownerUid, slug, path) => {
   )
 }
 
-export const publishPersonalSkillDirectly = async (ownerUid, slug, readScope, note = '') => {
+export const publishPersonalSkillDirectly = async (ownerUid, slug, readScope, note = '', category) => {
   return apiPost(
     `${USER_BASE_URL}/personal-catalog/${encodeURIComponent(ownerUid)}/${encodeURIComponent(slug)}/publish`,
-    { read_scope: readScope, note }
+    { read_scope: readScope, note, ...(category ? { category } : {}) }
   )
 }
 
@@ -201,14 +202,15 @@ export const deletePersonalSkill = async (slug) => {
   return apiDelete(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}`)
 }
 
-export const submitSkillShareRequest = async (slug, applicationReason) => {
+export const submitSkillShareRequest = async (slug, applicationReason, category) => {
   return apiPost(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/share-request`, {
-    application_reason: applicationReason
+    application_reason: applicationReason,
+    ...(category ? { category } : {})
   })
 }
 
-export const listSkillShareRequests = async () => {
-  return apiGet(`${USER_BASE_URL}/share-requests`)
+export const listSkillShareRequests = async ({ mineOnly = false } = {}) => {
+  return apiGet(`${USER_BASE_URL}/share-requests${mineOnly ? '?mine_only=true' : ''}`)
 }
 
 export const getSkillShareSnapshot = async (requestId, path = 'SKILL.md') => {

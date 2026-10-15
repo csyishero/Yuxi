@@ -9,6 +9,7 @@ from yuxi.agents.skills.market import (
     get_market_skill,
     install_market_skill,
     list_market_rankings,
+    list_market_requests,
     list_market_skills,
     list_user_market_installs,
     market_skill_file,
@@ -18,7 +19,6 @@ from yuxi.agents.skills.market import (
     toggle_market_like,
     uninstall_market_skill,
 )
-from yuxi.agents.skills.sharing import list_skill_share_requests
 from yuxi.storage.postgres.models_business import User
 
 market_router = APIRouter(prefix="/skill-market", tags=["skill-market"])
@@ -34,7 +34,7 @@ class MarketSubmission(BaseModel):
 class MarketReview(BaseModel):
     """管理员选择发布范围并记录审核意见。"""
 
-    scope: str = Field("department")
+    scope: str | None = Field(None)
     note: str = Field("", max_length=2000)
 
 
@@ -83,9 +83,11 @@ async def list_market_route(
 
 
 @market_router.get("/requests")
-async def list_market_requests_route(user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+async def list_market_requests_route(
+    mine_only: bool = Query(False), user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)
+):
     """查看本人或授权范围内的市场审核申请。"""
-    return {"success": True, "data": await list_skill_share_requests(db, operator=user, channel="market")}
+    return {"success": True, "data": await list_market_requests(db, operator=user, mine_only=mine_only)}
 
 
 @market_router.get("/-/installs")

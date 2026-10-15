@@ -7,7 +7,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.agents.skills.market_repository import MarketSkillRepository
@@ -28,7 +28,11 @@ from yuxi.agents.skills.service import (
     user_can_access_skill,
     validate_skill_dependencies,
 )
-from yuxi.agents.skills.sharing import authorized_share_snapshot_path, submit_skill_share_request
+from yuxi.agents.skills.sharing import (
+    authorized_share_snapshot_path,
+    list_skill_share_requests,
+    submit_skill_share_request,
+)
 from yuxi.config import get_skill_data_dir
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.storage.postgres.models_business import (
@@ -66,12 +70,51 @@ async def submit_market_skill(
     )
 
 
+async def list_market_requests(db: AsyncSession, *, operator: User, mine_only: bool = False) -> list[dict]:
+    """为市场申请附上已有条目的发布范围，供新版审核沿用。"""
+    requests = await list_skill_share_requests(db, operator=operator, channel="market", mine_only=mine_only)
+    sources = {(item["owner_uid"], item["personal_slug"]) for item in requests}
+    if not sources:
+        return requests
+
+    rows = await db.execute(
+        select(
+            MarketSkill.owner_uid,
+            MarketSkill.personal_slug,
+            MarketSkill.scope,
+            MarketSkill.department_id,
+            MarketSkillRelease.version,
+        )
+        .outerjoin(MarketSkillRelease, MarketSkillRelease.id == MarketSkill.latest_release_id)
+        .where(tuple_(MarketSkill.owner_uid, MarketSkill.personal_slug).in_(sources))
+    )
+    existing = {
+        (owner_uid, slug): (scope, department_id, version)
+        for owner_uid, slug, scope, department_id, version in rows.all()
+    }
+    published_rows = await db.execute(
+        select(MarketSkillRelease.request_id, MarketSkillRelease.version).where(
+            MarketSkillRelease.request_id.in_([item["id"] for item in requests])
+        )
+    )
+    published_versions = dict(published_rows.all())
+    for item in requests:
+        scope, department_id, current_version = existing.get(
+            (item["owner_uid"], item["personal_slug"]), (None, None, None)
+        )
+        item["existing_market_scope"] = scope
+        item["existing_market_department_id"] = department_id
+        item["current_market_version"] = current_version
+        item["published_version"] = published_versions.get(item["id"])
+    return requests
+
+
 async def review_market_skill(
     db: AsyncSession,
     *,
     request_id: str,
     approved: bool,
-    scope: str,
+    scope: str | None,
     note: str,
     operator: User,
 ) -> SkillShareRequest:
@@ -100,12 +143,8 @@ async def review_market_skill(
         await db.refresh(item)
         return item
 
-    if scope not in {"department", "global"}:
+    if scope is not None and scope not in {"department", "global"}:
         raise ValueError("请选择发布范围")
-    if scope == "global" and operator.role != "superadmin":
-        raise ValueError("仅超级管理员可以向全公司发布")
-    if scope == "department" and item.owner_department_id is None:
-        raise ValueError("申请人没有所属部门")
 
     snapshot = await authorized_share_snapshot_path(db, request_id=request_id, operator=operator)
     parsed = await asyncio.to_thread(parse_skill_dir_metadata, snapshot)
@@ -115,7 +154,22 @@ async def review_market_skill(
     repo = MarketSkillRepository(db)
     await lock_skill_slug_allocation(db)
     listing = await repo.by_owner_source_for_update(item.owner_uid, item.personal_slug)
-    expected_department = item.owner_department_id if scope == "department" else None
+    if scope is None:
+        scope = listing.scope if listing is not None else "department"
+    if scope == "global" and operator.role != "superadmin":
+        raise ValueError("仅超级管理员可以向全公司发布")
+    if scope == "department" and listing is None and item.owner_department_id is None:
+        raise ValueError("申请人没有所属部门")
+    if (
+        listing is not None
+        and listing.scope == "department"
+        and listing.department_id != item.owner_department_id
+        and operator.role != "superadmin"
+    ):
+        raise ValueError("仅超级管理员可以批准跨部门新版本")
+    expected_department = None
+    if scope == "department":
+        expected_department = listing.department_id if listing is not None else item.owner_department_id
     if listing is not None and (listing.scope != scope or listing.department_id != expected_department):
         raise ValueError("已有市场条目的发布范围不可在新版本中修改")
     if listing is None:
@@ -133,7 +187,7 @@ async def review_market_skill(
         "version": 2,
         "read_scope": {
             "access_level": scope,
-            "department_ids": [item.owner_department_id] if scope == "department" else [],
+            "department_ids": [expected_department] if scope == "department" else [],
             "user_uids": [],
         },
         "manage_scope": None,
@@ -171,7 +225,7 @@ async def review_market_skill(
                 owner_uid=item.owner_uid,
                 personal_slug=item.personal_slug,
                 scope=scope,
-                department_id=item.owner_department_id if scope == "department" else None,
+                department_id=expected_department,
                 created_at=utc_now_naive(),
                 updated_at=utc_now_naive(),
             )

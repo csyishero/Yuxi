@@ -12,7 +12,6 @@
           </div>
           <div class="market-heading-actions">
             <a-button @click="managementOpen = true">管理与上传</a-button>
-            <a-button type="primary" @click="openSubmit">发布技能</a-button>
             <a-button class="personal-toggle" :aria-expanded="personalOpen" aria-controls="skill-personal-space" @click="personalOpen = !personalOpen">
               <PanelRightClose v-if="personalOpen" :size="16" />
               <PanelRightOpen v-else :size="16" />
@@ -209,13 +208,6 @@
       </a-spin>
     </a-modal>
 
-    <a-modal v-model:open="submitOpen" title="申请发布 Skill" ok-text="提交审核" :confirm-loading="submitLoading" @ok="submit">
-      <p>从你的个人 Skill 中选择一项。提交时会保存不可变快照，管理员审核该快照。</p>
-      <label class="market-submit-field"><span>个人 Skill</span><a-select v-model:value="submitSlug" placeholder="选择个人 Skill" :options="personalOptions" @change="selectSubmitSkill" /></label>
-      <label class="market-submit-field"><span>技能方向</span><a-select v-model:value="submitCategory" :options="skillCategories" aria-label="发布技能方向" /></label>
-      <a-textarea v-model:value="submitReason" placeholder="说明使用场景和适用人群" :rows="4" :maxlength="1000" show-count />
-    </a-modal>
-
     <a-modal v-model:open="requestsOpen" title="市场审核申请" :footer="null" width="760px">
       <a-spin :spinning="requestsLoading">
         <a-empty v-if="!requests.length" description="暂无申请" />
@@ -225,9 +217,10 @@
           <div class="market-request-meta">{{ request.owner_uid }} · {{ request.personal_slug }} · {{ skillCategoryLabel(request.category) }} <span v-if="request.status === 'approved'">· {{ requestScopeLabel(request) }}</span><span v-if="request.review_note"> · {{ request.review_note }}</span></div>
           <div v-if="request.status === 'pending' && userStore.isAdmin" class="market-request-actions">
             <a-button size="small" @click="previewRequest(request)">查看提交快照</a-button>
-            <a-button size="small" type="primary" @click="openReview(request, true)">批准</a-button>
+            <a-button size="small" type="primary" :disabled="Boolean(approvalBlockReason(request))" @click="openReview(request, true)">批准</a-button>
             <a-button size="small" danger @click="openReview(request, false)">拒绝</a-button>
           </div>
+          <p v-if="request.status === 'pending' && userStore.isAdmin && approvalBlockReason(request)" class="market-request-review-reason">{{ approvalBlockReason(request) }}</p>
         </div>
       </a-spin>
     </a-modal>
@@ -239,10 +232,10 @@
 
     <a-modal v-model:open="reviewOpen" :title="reviewApproved ? '批准发布' : '拒绝申请'" :ok-text="reviewApproved ? '确认发布' : '确认拒绝'" :confirm-loading="reviewLoading" @ok="review">
       <p>{{ reviewRequest?.name }} · {{ reviewRequest?.personal_slug }}</p>
-      <a-radio-group v-if="reviewApproved" v-model:value="reviewScope" class="market-review-scope">
-        <a-radio value="department">申请提交时所属部门（{{ reviewDepartmentName }}）</a-radio><a-radio v-if="userStore.isSuperAdmin" value="global">全公司</a-radio>
+      <a-radio-group v-if="reviewApproved" v-model:value="reviewScope" class="market-review-scope" :disabled="Boolean(reviewRequest?.existing_market_scope)">
+        <a-radio value="department">{{ reviewDepartmentLabel }}（{{ reviewDepartmentName }}）</a-radio><a-radio v-if="userStore.isSuperAdmin" value="global">全公司</a-radio>
       </a-radio-group>
-      <a-alert v-if="reviewApproved && reviewScope === 'department'" type="info" show-icon :message="reviewDepartmentNotice" />
+      <a-alert v-if="reviewApproved && reviewScopeNotice" type="info" show-icon :message="reviewScopeNotice" />
       <a-textarea v-model:value="reviewNote" placeholder="审核意见（可选）" :rows="3" :maxlength="2000" />
     </a-modal>
   </section>
@@ -257,7 +250,7 @@ import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import SkillCardList from '@/components/extensions/SkillCardList.vue'
 import { canManageSkillRecord, isDepartmentManagedSkill } from '@/components/extensions/skillManagementAccess'
 import { combineSkillCards, filterSkillCards, ownPersonalSkill, personalSpaceSkillGroups, searchPersonalSpaceSkillGroups, skillDetailRoute } from '@/components/extensions/skillHubCatalog'
-import { skillCategories, skillCategory, skillCategoryLabel } from '@/components/extensions/skillCategories'
+import { skillCategories, skillCategoryLabel } from '@/components/extensions/skillCategories'
 import { useUserStore } from '@/stores/user'
 import { departmentApi } from '@/apis/department_api'
 import {
@@ -275,7 +268,6 @@ import {
   getSkillShareSnapshot,
   exportSkillShareSnapshot,
   reviewMarketSkill,
-  submitMarketSkill,
   toggleMarketSkillLike,
   upgradeMarketSkill
 } from '@/apis/skill_api'
@@ -388,13 +380,6 @@ const dependencyLabels = computed(() => detail.value ? [
   ...detail.value.skill_dependencies.map((item) => `Skill · ${item}`)
 ] : [])
 
-const submitOpen = ref(false)
-const submitLoading = ref(false)
-const submitSlug = ref()
-const submitCategory = ref('other')
-const submitReason = ref('')
-const personalOptions = ref([])
-
 const requestsOpen = ref(false)
 const requestsLoading = ref(false)
 const requests = ref([])
@@ -404,12 +389,24 @@ const reviewApproved = ref(true)
 const reviewRequest = ref(null)
 const reviewScope = ref('department')
 const reviewNote = ref('')
-const reviewDepartmentName = computed(() => departmentNames.value[reviewRequest.value?.owner_department_id] || `部门 ${reviewRequest.value?.owner_department_id || '未分配'}`)
+const reviewDepartmentId = computed(() => reviewRequest.value?.existing_market_scope === 'department'
+  ? reviewRequest.value.existing_market_department_id
+  : reviewRequest.value?.owner_department_id)
+const reviewDepartmentName = computed(() => departmentNames.value[reviewDepartmentId.value] || `部门 ${reviewDepartmentId.value || '未分配'}`)
+const reviewDepartmentLabel = computed(() => reviewRequest.value?.existing_market_scope === 'department' ? '原发布部门' : '申请提交时所属部门')
 const reviewDepartmentNotice = computed(() => {
-  const departmentId = reviewRequest.value?.owner_department_id
+  const departmentId = reviewDepartmentId.value
   if (!departmentId) return '申请人未分配部门，无法按部门发布。'
   if (!userStore.isSuperAdmin && Number(userStore.departmentId) !== Number(departmentId)) return '申请提交时所属部门成员和超级管理员可见。你当前不属于该部门，发布后不会在你的市场目录出现。'
   return '申请提交时所属部门成员和超级管理员可在市场查看和安装。'
+})
+const reviewScopeNotice = computed(() => {
+  const scope = reviewRequest.value?.existing_market_scope
+  if (scope === 'global') return '新版本沿用原有发布范围（全公司可见），审核时不可更改。'
+  if (scope === 'department') {
+    return `新版本沿用原有发布范围（${reviewDepartmentName.value}及超级管理员可见），审核时不可更改。`
+  }
+  return reviewScope.value === 'department' ? reviewDepartmentNotice.value : ''
 })
 const snapshotOpen = ref(false)
 const snapshotLoading = ref(false)
@@ -443,9 +440,17 @@ const personalItemStatus = (item) => {
     ? `个人技能 · 市场安装已失效 v${item.market_installed_version}`
     : `个人技能 · 市场已安装 v${item.market_installed_version}`
 }
-const requestScopeLabel = (request) => request.read_scope?.access_level === 'global'
-  ? '全公司可见'
-  : `${departmentNames.value[request.owner_department_id] || `部门 ${request.owner_department_id || '未分配'}`}及超级管理员可见`
+const requestScopeLabel = (request) => {
+  if (request.read_scope?.access_level === 'global') return '全公司可见'
+  const departmentId = request.read_scope?.department_ids?.[0] ?? request.existing_market_department_id ?? request.owner_department_id
+  return `${departmentNames.value[departmentId] || `部门 ${departmentId || '未分配'}`}及超级管理员可见`
+}
+/** 已发布技能的新版本沿用原范围，跨部门及全公司续版由超级管理员审核。 */
+function approvalBlockReason(request) {
+  if (request.existing_market_scope === 'global' && !userStore.isSuperAdmin) return '此技能已向全公司发布，只有超级管理员可以批准新版本。'
+  if (request.existing_market_scope === 'department' && Number(request.existing_market_department_id) !== Number(request.owner_department_id) && !userStore.isSuperAdmin) return '原发布部门与申请提交时所属部门不一致，仅超级管理员可以批准新版本。'
+  return ''
+}
 /** 当前用户已有个人原件时让市场入口回到原件。 */
 const ownPersonalSkillFor = (item) => ownPersonalSkill(item, legacyCards.value, userStore.uid)
 /** 详情响应补上当前已授权共享副本的可用状态。 */
@@ -475,11 +480,6 @@ function selectCategory(category) {
   if (selectedCategory.value === category) return
   selectedCategory.value = category
   refresh()
-}
-
-/** 从个人技能带出原有方向，提交时仍可修改。 */
-function selectSubmitSkill(slug) {
-  submitCategory.value = skillCategory(personalOptions.value.find((item) => item.value === slug)?.category)
 }
 
 function openRankings() {
@@ -708,36 +708,6 @@ async function like(item) {
   }
 }
 
-async function openSubmit() {
-  submitSlug.value = undefined
-  submitCategory.value = 'other'
-  submitOpen.value = true
-  try {
-    const result = await listSkillCards()
-    personalOptions.value = (result?.data || []).filter((item) => item.source_scope === 'personal' && (!item.owner_uid || item.owner_uid === userStore.uid)).map((item) => ({ label: `${item.name} · ${item.slug}`, value: item.slug, category: item.category }))
-  } catch (failure) {
-    message.error(errorText(failure))
-  }
-}
-
-async function submit() {
-  if (!submitSlug.value || !submitReason.value.trim()) return message.warning('请选择个人 Skill 并填写使用场景')
-  submitLoading.value = true
-  try {
-    await submitMarketSkill(submitSlug.value, submitReason.value.trim(), submitCategory.value)
-    submitOpen.value = false
-    submitSlug.value = undefined
-    submitCategory.value = 'other'
-    submitReason.value = ''
-    await fetchRequests()
-    message.success('已提交审核')
-  } catch (failure) {
-    message.error(errorText(failure))
-  } finally {
-    submitLoading.value = false
-  }
-}
-
 async function openRequests() {
   requestsOpen.value = true
   await fetchRequests()
@@ -789,9 +759,10 @@ async function downloadSnapshot() {
 }
 
 function openReview(request, approved) {
+  if (approved && approvalBlockReason(request)) return
   reviewRequest.value = request
   reviewApproved.value = approved
-  reviewScope.value = 'department'
+  reviewScope.value = request.existing_market_scope || 'department'
   reviewNote.value = ''
   reviewOpen.value = true
 }
@@ -799,15 +770,17 @@ function openReview(request, approved) {
 async function review() {
   reviewLoading.value = true
   try {
-    const result = await reviewMarketSkill(reviewRequest.value.id, reviewApproved.value, reviewScope.value, reviewNote.value)
+    const scope = reviewRequest.value.existing_market_scope || reviewScope.value
+    const result = await reviewMarketSkill(reviewRequest.value.id, reviewApproved.value, scope, reviewNote.value)
     reviewOpen.value = false
-    const outsideDepartment = reviewApproved.value && reviewScope.value === 'department' && !userStore.isSuperAdmin && Number(userStore.departmentId) !== Number(result.data.owner_department_id)
+    const publishedDepartmentId = result.data.read_scope?.department_ids?.[0] ?? result.data.department_ids?.[0]
+    const outsideDepartment = reviewApproved.value && scope === 'department' && !userStore.isSuperAdmin && publishedDepartmentId != null && Number(userStore.departmentId) !== Number(publishedDepartmentId)
     if (reviewApproved.value && !outsideDepartment) {
       query.value = ''
       sourceFilter.value = 'market'
     }
     await Promise.all([openRequests(), refresh()])
-    if (outsideDepartment) message.info('已发布到申请提交时所属部门；当前账号不在该部门，市场目录不会展示此技能')
+    if (outsideDepartment) message.info(`已发布到${departmentNames.value[publishedDepartmentId] || `部门 ${publishedDepartmentId}`}；当前账号不在该部门，市场目录不会展示此技能`)
     else message.success(reviewApproved.value ? '已发布到市场，可在技能目录查看' : '已拒绝申请')
   } catch (failure) {
     message.error(errorText(failure))
@@ -920,11 +893,10 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .market-files-list button.active { color: var(--color-primary-700); background: var(--color-primary-50); }
 .market-file-content { min-height: 0; overflow: auto; padding: 16px; }
 .market-detail-actions { justify-content: flex-end; margin-top: 20px; }
-.market-submit-field { display: grid; gap: 6px; margin: 16px 0; color: var(--color-text-secondary); font-size: 13px; }
-.market-submit-field :deep(.ant-select) { width: 100%; }
 .market-request { padding: 16px 0; border-bottom: 1px solid var(--gray-150); }
 .market-request p { margin: 8px 0; color: var(--color-text-secondary); }
 .market-request-actions { justify-content: flex-end; margin-top: 10px; }
+.market-request-review-reason { color: var(--color-warning-900); font-size: 12px; }
 .market-review-scope { display: block; margin: 18px 0; }
 @media (max-width: 1100px) { .skill-hub-layout { grid-template-columns: minmax(0, 1fr); } .personal-space { border-left: 0; border-top: 1px solid var(--gray-150); } }
 @media (max-width: 680px) { .market-heading { align-items: start; flex-direction: column; } .market-heading-actions { width: 100%; flex-wrap: wrap; } .market-heading-actions :deep(.ant-btn) { flex: 1; } .market-search, .market-toolbar-actions { width: 100%; } .market-toolbar-actions { justify-content: space-between; } .market-files { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); } .market-files-list { max-height: 120px; border-right: 0; border-bottom: 1px solid var(--gray-150); } .market-card-bottom { flex-wrap: wrap; } }

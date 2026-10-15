@@ -20,6 +20,7 @@
       <div class="extension-detail-actions">
         <div class="detail-actions">
           <a-space :size="8">
+            <a-button v-if="canPublishCurrentSkill" type="primary" @click="publishOpen = true">发布技能</a-button>
             <button
               v-if="activeTab === 'editor'"
               type="button"
@@ -67,7 +68,7 @@
           已发布的 Skill 内容和依赖不可原地修改；需要更新时，请由原技能拥有者从个人版本重新提交或发布。
         </div>
         <div v-if="isPersonalSkill" class="readonly-scope-hint readonly-detail-hint">
-          个人 Skill 仅你自己可用。修改内容或依赖不会自动更新已提交或已发布的共享版本；如需共享新版，{{ userStore.isAdmin ? '请直接转为共享' : '请再次申请' }}。
+          个人 Skill 仅你自己可用。修改内容或依赖不会自动更新已提交或已发布的版本；需要更新时，请使用“发布技能”重新提交。
         </div>
         <div class="workspace" :class="{ 'tree-visible': treeVisible }">
           <Transition name="skill-tree">
@@ -367,6 +368,7 @@
     </template>
 
     <template #overlays>
+      <PersonalSkillPublish v-model:open="publishOpen" :skill="currentSkill" />
       <a-modal
         v-model:open="createModalVisible"
         :title="createForm.isDir ? '新建目录' : '新建文件'"
@@ -413,7 +415,8 @@ import AgentFilePreview from '@/components/AgentFilePreview.vue'
 import ExtensionDetailLayout from '@/components/shared/ExtensionDetailLayout.vue'
 import FileTreeComponent from '@/components/FileTreeComponent.vue'
 import ShareConfigForm from '@/components/ShareConfigForm.vue'
-import { canManageSkillRecord, isDepartmentManagedSkill } from './skillManagementAccess.js'
+import PersonalSkillPublish from './PersonalSkillPublish.vue'
+import { canManageSkillRecord, canPublishPersonalSkill, isDepartmentManagedSkill } from './skillManagementAccess.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -446,6 +449,7 @@ const savingDependencies = ref(false)
 const savingShareConfig = ref(false)
 const activeTab = ref('editor')
 const treeVisible = ref(false)
+const publishOpen = ref(false)
 const filePreviewRef = ref(null)
 
 const skills = ref([])
@@ -470,6 +474,7 @@ const dependencySearch = reactive({ tools: '', mcps: '', skills: '' })
 const isPersonalSkill = computed(
   () => isPersonalRoute.value && currentSkill.value?.source_scope === 'personal'
 )
+const canPublishCurrentSkill = computed(() => isPersonalSkill.value && canPublishPersonalSkill(currentSkill.value, userStore.uid))
 const isInstalledSkill = computed(() => isPersonalSkill.value || !!currentSkill.value?.dir_path)
 
 const isBuiltinInstalledSkill = computed(() => {
@@ -968,6 +973,7 @@ const saveDependencies = async () => {
 }
 
 watch([slug, isPersonalRoute], () => {
+  publishOpen.value = false
   detailRequestId += 1
   currentSkill.value = null
   treeData.value = []

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  canPublishPersonalSkill,
   canManageSkillRecord,
   isDepartmentManagedSkill,
   personalCatalogSkillForViewer
@@ -32,4 +33,15 @@ test('管理员个人目录仅恢复本人 Skill 的管理入口', () => {
   assert.equal(own.sourceScope, 'personal')
   assert.equal(canManageSkillRecord(other), false)
   assert.equal(canManageSkillRecord(unknown), false)
+})
+
+test('发布入口只接受本人的个人技能，兼容本人目录旧记录', () => {
+  const own = personalCatalogSkillForViewer({ slug: 'mine', owner_uid: 'admin-3' }, 'admin-3')
+  const other = personalCatalogSkillForViewer({ slug: 'other', owner_uid: 'worker-3' }, 'admin-3')
+
+  assert.equal(canPublishPersonalSkill(own, 'admin-3'), true)
+  assert.equal(canPublishPersonalSkill(other, 'admin-3'), false)
+  assert.equal(canPublishPersonalSkill({ source_scope: 'personal', slug: 'unknown' }, 'admin-3'), true)
+  assert.equal(canPublishPersonalSkill({ sourceScope: 'shared', owner_uid: 'admin-3' }, 'admin-3'), false)
+  assert.equal(canPublishPersonalSkill({ sourceScope: 'personal', owner_uid: 'admin-3' }, 'admin-3'), false)
 })

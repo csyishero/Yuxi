@@ -246,7 +246,7 @@ async def test_main_rejects_unsupported_business_schema_before_ddl(monkeypatch, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("previous_version", [2, 7, 8, 9, 12])
+@pytest.mark.parametrize("previous_version", [2, 7, 8, 9, 12, 13])
 async def test_supported_business_schema_is_converged_and_versioned_as_current(
     monkeypatch,
     previous_version: int,
@@ -300,14 +300,18 @@ async def test_supported_business_schema_is_converged_and_versioned_as_current(
 
     assert ("business_schema" in calls) is (previous_version < 9)
     assert "skill_share_schema" in calls
-    assert calls.index("skill_share_schema") < calls.index("skill_share_reason_schema")
-    assert calls.index("skill_share_reason_schema") < calls.index(
-        f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
-    )
-    assert calls.index("skill_market_schema") < calls.index("skill_owner_department_backfill")
-    assert calls.index("skill_owner_department_backfill") < calls.index(
-        f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
-    )
+    if previous_version == 13:
+        assert "skill_share_reason_schema" not in calls
+        assert "skill_owner_department_backfill" not in calls
+    else:
+        assert calls.index("skill_share_schema") < calls.index("skill_share_reason_schema")
+        assert calls.index("skill_share_reason_schema") < calls.index(
+            f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
+        )
+        assert calls.index("skill_market_schema") < calls.index("skill_owner_department_backfill")
+        assert calls.index("skill_owner_department_backfill") < calls.index(
+            f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
+        )
     assert f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}" in calls
     assert {"create_business", "checkpoint", "knowledge_schema"}.isdisjoint(calls)
 

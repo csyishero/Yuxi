@@ -208,7 +208,9 @@ async def test_skill_share_http_uses_snapshot_and_department_review(monkeypatch,
             assert approved.json()["data"]["reviewer_uid"] == "credit-admin"
             assert approved.json()["data"]["reviewed_at"]
             assert approved.json()["data"]["published_slug"] == "credit-check"
-            assert (shared_root / "credit-check" / "SKILL.md").read_text(encoding="utf-8") == original
+            published_markdown = (shared_root / "credit-check" / "SKILL.md").read_text(encoding="utf-8")
+            assert "category: other\n" in published_markdown
+            assert published_markdown.endswith("# First copy\n")
             assert (shared_root / "credit-check" / "scripts" / "check.py").read_text(
                 encoding="utf-8"
             ) == "print('submitted')\n"
@@ -312,7 +314,7 @@ async def test_skill_share_http_uses_snapshot_and_department_review(monkeypatch,
                 },
             )
             assert widened_scope.status_code == 400, widened_scope.text
-            assert (shared_root / "credit-check" / "SKILL.md").read_text(encoding="utf-8") == original
+            assert (shared_root / "credit-check" / "SKILL.md").read_text(encoding="utf-8") == published_markdown
 
             user_scope = {"access_level": "user", "department_ids": [], "user_uids": ["target-risk"]}
             updated_scope = await client.put(
@@ -507,8 +509,8 @@ async def test_uploaded_skill_keeps_publisher_department_when_scope_narrows(monk
         await admin_engine.dispose()
 
 
-async def test_department_admin_direct_publish_keeps_owner_file(monkeypatch, tmp_path: Path):
-    """直接发布走真实 HTTP、PostgreSQL 和快照，并拒绝越权与无效范围。"""
+async def test_direct_publish_requires_admin_to_own_personal_skill(monkeypatch, tmp_path: Path):
+    """直接发布只复制管理员本人的原件，跨用户发布不产生快照或共享记录。"""
     schema = f"pytest_skill_direct_{uuid.uuid4().hex[:12]}"
     admin_engine = create_async_engine(os.environ["POSTGRES_URL"])
     async with admin_engine.begin() as connection:
@@ -520,6 +522,10 @@ async def test_department_admin_direct_publish_keeps_owner_file(monkeypatch, tmp
     source.mkdir(parents=True)
     original = "---\nname: member-skill\ndescription: member skill\n---\n# Owner copy\n"
     (source / "SKILL.md").write_text(original, encoding="utf-8")
+    admin_source = personal_root / "credit-admin" / "admin-skill"
+    admin_source.mkdir(parents=True)
+    admin_original = "---\nname: admin-skill\ndescription: admin skill\n---\n# Admin copy\n"
+    (admin_source / "SKILL.md").write_text(admin_original, encoding="utf-8")
     unassigned_source = personal_root / "unassigned" / "unassigned-skill"
     unassigned_source.mkdir(parents=True)
     (unassigned_source / "SKILL.md").write_text(
@@ -573,6 +579,7 @@ async def test_department_admin_direct_publish_keeps_owner_file(monkeypatch, tmp
             db.add_all(
                 [
                     User(uid="member", username="member", password_hash="x", role="user", department_id=1),
+                    User(uid="credit-admin", username="credit-admin", password_hash="x", role="admin", department_id=1),
                     User(
                         uid="credit-reader", username="credit-reader", password_hash="x", role="user", department_id=1
                     ),
@@ -583,84 +590,164 @@ async def test_department_admin_direct_publish_keeps_owner_file(monkeypatch, tmp
             await db.commit()
 
         url = "/api/skills/personal-catalog/member/member-skill/publish"
+        own_url = "/api/skills/personal-catalog/credit-admin/admin-skill/publish"
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             denied = await client.post(url, json={"department_ids": [1]})
             assert denied.status_code == 403
 
             current = User(uid="risk-admin", username="risk-admin", password_hash="x", role="admin", department_id=2)
             wrong_department = await client.post(url, json={"department_ids": [2]})
-            assert wrong_department.status_code == 404
+            assert wrong_department.status_code == 400
 
             current = User(
                 uid="credit-admin", username="credit-admin", password_hash="x", role="admin", department_id=1
             )
-            wrong_target = await client.post(url, json={"department_ids": [2]})
+            other_person = await client.post(url, json={"department_ids": [1]})
+            assert other_person.status_code == 400
+            assert not (shared_root / "member-skill").exists()
+            assert not (tmp_path / "share_requests").exists()
+
+            wrong_target = await client.post(own_url, json={"department_ids": [2]})
             assert wrong_target.status_code == 400
             assert not list((tmp_path / "share_requests").iterdir())
 
-            published = await client.post(url, json={"department_ids": [1], "note": "已核对"})
+            published = await client.post(
+                own_url, json={"department_ids": [1], "note": "已核对", "category": "finance_analysis"}
+            )
             assert published.status_code == 200, published.text
             record = published.json()["data"]
             assert record["status"] == "approved"
-            assert record["owner_uid"] == "member"
+            assert record["owner_uid"] == "credit-admin"
             assert record["reviewer_uid"] == "credit-admin"
             assert record["review_note"] == "管理员直接发布：已核对"
-            assert record["application_reason"] == "管理员直接发布"
-            assert record["published_slug"] == "member-skill"
-            assert (shared_root / "member-skill" / "SKILL.md").read_text(encoding="utf-8") == original
+            assert record["application_reason"] == "已核对"
+            assert record["category"] == "finance_analysis"
+            assert record["published_slug"] == "admin-skill"
+            assert (shared_root / "admin-skill" / "SKILL.md").read_text(encoding="utf-8").endswith("# Admin copy\n")
             assert (source / "SKILL.md").read_text(encoding="utf-8") == original
+            assert (admin_source / "SKILL.md").read_text(encoding="utf-8") == admin_original
 
             user_scope = {"access_level": "user", "department_ids": [], "user_uids": ["credit-reader"]}
             conflicting_target = await client.post(
-                url,
+                own_url,
                 json={"department_ids": [1], "read_scope": user_scope},
             )
             assert conflicting_target.status_code == 400, conflicting_target.text
             assert "同时" in conflicting_target.json()["detail"]
             cross_department_reader = await client.post(
-                url,
+                own_url,
                 json={"read_scope": {**user_scope, "user_uids": ["risk-reader"]}},
             )
             assert cross_department_reader.status_code == 400, cross_department_reader.text
-            published_to_person = await client.post(url, json={"read_scope": user_scope})
+            published_to_person = await client.post(own_url, json={"read_scope": user_scope})
             assert published_to_person.status_code == 200, published_to_person.text
             assert published_to_person.json()["data"]["read_scope"] == user_scope
             assert published_to_person.json()["data"]["department_ids"] == []
-            assert (shared_root / "member-skill-v2" / "SKILL.md").read_text(encoding="utf-8").endswith("# Owner copy\n")
+            assert (shared_root / "admin-skill-v2" / "SKILL.md").read_text(encoding="utf-8").endswith("# Admin copy\n")
 
             current = User(uid="member", username="member", password_hash="x", role="user", department_id=1)
             pending = await client.post(
-                "/api/skills/personal/member-skill/share-request", json={"application_reason": "申请公开"}
+                "/api/skills/personal/member-skill/share-request",
+                json={"application_reason": "申请公开", "category": "office_tools"},
             )
             assert pending.status_code == 200, pending.text
+            assert pending.json()["data"]["category"] == "office_tools"
             current = User(
                 uid="credit-admin", username="credit-admin", password_hash="x", role="admin", department_id=1
             )
             existing_request = await client.post(url, json={"department_ids": [1]})
             assert existing_request.status_code == 400
-            assert "待审核申请" in existing_request.json()["detail"]
+            approved_request = await client.post(
+                f"/api/skills/share-requests/{pending.json()['data']['id']}/approve",
+                json={"department_ids": [1]},
+            )
+            assert approved_request.status_code == 200, approved_request.text
+            assert approved_request.json()["data"]["published_slug"] == "member-skill"
+            assert (shared_root / "member-skill" / "SKILL.md").read_text(encoding="utf-8").endswith("# Owner copy\n")
+            shared_history = (await client.get("/api/skills/share-requests")).json()["data"]
+            assert next(item for item in shared_history if item["id"] == record["id"])["published_version"] == "1.0.0"
+            assert (
+                next(item for item in shared_history if item["id"] == record["id"])["published_copy_status"]
+                == "enabled"
+            )
+            assert (
+                next(item for item in shared_history if item["id"] == pending.json()["data"]["id"])["published_version"]
+                == "1.0.0"
+            )
+            current = User(
+                uid="credit-admin", username="credit-admin", password_hash="x", role="admin", department_id=2
+            )
+            assert (await client.get("/api/skills/share-requests")).json()["data"] == []
+            own_history = (await client.get("/api/skills/share-requests?mine_only=true")).json()["data"]
+            assert {item["id"] for item in own_history} == {record["id"], published_to_person.json()["data"]["id"]}
+            assert {item["published_version"] for item in own_history} == {"1.0.0", "2.0.0"}
 
             current = User(uid="super-admin", username="super-admin", password_hash="x", role="superadmin")
             unassigned_publish = await client.post(
                 "/api/skills/personal-catalog/unassigned/unassigned-skill/publish",
                 json={"department_ids": [1]},
             )
-            assert unassigned_publish.status_code == 200, unassigned_publish.text
-            assert unassigned_publish.json()["data"]["owner_department_id"] is None
-            assert (shared_root / "unassigned-skill" / "SKILL.md").exists()
+            assert unassigned_publish.status_code == 400
+            assert not (shared_root / "unassigned-skill").exists()
 
         async with sessions() as db:
             saved = await db.get(SkillShareRequest, record["id"])
             pending_record = await db.get(SkillShareRequest, pending.json()["data"]["id"])
             skill = await db.get(Skill, 1)
             assert saved.content_hash
-            assert pending_record.status == "pending"
+            assert saved.published_skill_id == skill.id
+            assert pending_record.status == "approved"
             assert skill.source_type == "personal_share"
+            assert skill.category == "finance_analysis"
             assert skill.share_config["read_scope"]["department_ids"] == [1]
             person_skill = await db.get(Skill, 2)
             assert person_skill.share_config["read_scope"] == user_scope
             person_request = await db.get(SkillShareRequest, published_to_person.json()["data"]["id"])
             assert person_request.read_scope == user_scope
+            assert person_request.published_skill_id == person_skill.id
+            member_skill = await db.get(Skill, 3)
+            assert member_skill.source_type == "personal_share"
+            assert member_skill.category == "office_tools"
+            assert pending_record.published_skill_id == member_skill.id
+
+        async with sessions() as db:
+            original_shared = await db.scalar(select(Skill).where(Skill.slug == "admin-skill"))
+            original_shared.enabled = False
+            await db.commit()
+        current = User(uid="credit-admin", username="credit-admin", password_hash="x", role="admin", department_id=1)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            history = (await client.get("/api/skills/share-requests?mine_only=true")).json()["data"]
+            assert next(item for item in history if item["id"] == record["id"])["published_copy_status"] == "disabled"
+
+        async with sessions() as db:
+            original_shared = await db.scalar(select(Skill).where(Skill.slug == "admin-skill"))
+            await db.delete(original_shared)
+            await db.flush()
+            db.add(
+                Skill(
+                    slug="admin-skill",
+                    name="admin-skill",
+                    description="admin skill",
+                    source_type="personal_share",
+                    dir_path="shared/admin-skill",
+                    version="1.0.0",
+                    share_config={"version": 2, "read_scope": {"access_level": "user", "user_uids": []}},
+                )
+            )
+            person_request = await db.get(SkillShareRequest, published_to_person.json()["data"]["id"])
+            person_request.published_skill_id = None
+            await db.commit()
+        current = User(uid="credit-admin", username="credit-admin", password_hash="x", role="admin", department_id=1)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            history = (await client.get("/api/skills/share-requests?mine_only=true")).json()["data"]
+            assert next(item for item in history if item["id"] == record["id"])["published_version"] == "1.0.0"
+            assert next(item for item in history if item["id"] == record["id"])["published_copy_status"] == "missing"
+            assert (
+                next(item for item in history if item["id"] == published_to_person.json()["data"]["id"])[
+                    "published_copy_status"
+                ]
+                == "unknown"
+            )
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:

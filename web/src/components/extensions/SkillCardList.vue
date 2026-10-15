@@ -229,22 +229,12 @@
             class="skill-share-warning"
           />
           <a-alert
-            v-if="previewSkill.sourceScope === 'personal' && previewShareRequest"
-            :type="previewShareRequest.status === 'rejected' ? 'warning' : 'info'"
-            show-icon
-            :message="`共享申请：${shareRequestStatusLabel(previewShareRequest.status)}${previewShareRequest.published_slug ? ` · ${previewShareRequest.published_slug}` : ''}${previewShareRequest.review_note ? ` · ${previewShareRequest.review_note}` : ''}`"
-            class="skill-share-warning"
-          />
-          <a-alert
             v-if="isDepartmentManagedSkill(previewSkill)"
             type="info"
             show-icon
             message="你可以管理本部门共享 Skill 的启停和生命周期；可用范围保持本部门，已发布副本的内容与依赖只读。"
             class="skill-share-warning"
           />
-          <p v-if="previewShareRequest?.application_reason" class="skill-share-application-summary">
-            申请原因：{{ previewShareRequest.application_reason }}
-          </p>
           <div v-if="skillPreviewLoading" class="skill-preview-loading">
             <a-spin />
           </div>
@@ -270,21 +260,11 @@
           <div class="skill-preview-footer-right">
             <a-button @click="closeSkillPreview">关闭</a-button>
             <a-button
-              v-if="!userStore.isAdmin && previewSkill.sourceScope === 'personal' && !isOtherPersonalSkill(previewSkill)"
+              v-if="canPublishPersonalSkill(previewSkill, userStore.uid)"
               type="primary"
-              :disabled="previewShareRequest?.status === 'pending'"
-              :loading="submittingShareRequest"
-              @click="openShareApplication"
+              @click="openPersonalPublish"
             >
-              {{ previewShareRequest?.status === 'pending' ? '等待审核' : '申请共享' }}
-            </a-button>
-            <a-button
-              v-if="userStore.isAdmin && previewSkill.sourceScope === 'personal'"
-              type="primary"
-              :disabled="skillPreviewLoading || !!skillPreviewError || previewShareRequest?.status === 'pending'"
-              @click="openDirectPublish"
-            >
-              {{ previewShareRequest?.status === 'pending' ? '已有待审申请' : '直接转为共享' }}
+              发布技能
             </a-button>
             <a-button
               :type="previewSkill.sourceScope === 'personal' ? 'default' : 'primary'"
@@ -299,50 +279,11 @@
       </div>
     </a-modal>
 
-    <a-modal
-      v-model:open="shareApplicationVisible"
-      title="申请共享 Skill"
-      width="560px"
-      ok-text="提交申请"
-      :confirm-loading="submittingShareRequest"
-      :ok-button-props="{ disabled: !applicationReason.trim() }"
-      @ok="submitPreviewShareRequest"
-      @cancel="closeShareApplication"
-    >
-      <p class="skill-share-application-intro">
-        将「{{ previewSkill?.name }}」的当前内容提交给管理员审核。提交后即使修改个人 Skill，本次审核内容也不会改变。
-      </p>
-      <label class="skill-share-application-label" for="skill-share-application-reason">申请原因</label>
-      <a-textarea
-        id="skill-share-application-reason"
-        v-model:value="applicationReason"
-        placeholder="说明共享用途、适用人员或使用场景"
-        :rows="4"
-        :maxlength="1000"
-        show-count
-      />
-    </a-modal>
-
-    <a-modal
-      v-model:open="directPublishVisible"
-      title="直接发布共享 Skill"
-      width="760px"
-      ok-text="确认发布"
-      :confirm-loading="publishingPersonalSkill"
-      @ok="confirmDirectPublish"
-    >
-      <p>将 {{ directPublishSkill?.owner_name || directPublishSkill?.owner_uid || userStore.uid }} 的「{{ directPublishSkill?.name }}」当前内容复制为共享版本，个人原件保留。</p>
-      <ShareConfigForm
-        v-model="directPublishShareConfig"
-        :require-read-scope="true"
-        :show-manage-scope="false"
-        :allowed-access-levels="['department', 'user']"
-        :available-departments="userStore.isSuperAdmin ? null : ownDepartmentOptions"
-        :available-users="shareUsers"
-        :disabled="shareUsersLoading"
-      />
-      <a-input v-model:value="directPublishNote" class="skill-share-note" placeholder="发布说明（可选）" :maxlength="2000" />
-    </a-modal>
+    <PersonalSkillPublish
+      v-model:open="personalPublishVisible"
+      :skill="personalPublishSkill"
+      @published="handlePersonalPublished"
+    />
 
     <a-modal
       v-model:open="shareRequestsVisible"
@@ -364,7 +305,9 @@
           <div class="skill-share-request-meta">
             申请人 {{ request.owner_name || request.owner_uid }}<span v-if="request.owner_name && request.owner_name !== request.owner_uid">（{{ request.owner_uid }}）</span>
             · 个人 Skill {{ request.personal_slug }} · 提交于 {{ formatDateTime(request.created_at) }}
-            <span v-if="request.published_slug"> · 已发布为 {{ request.published_slug }}</span>
+            · {{ skillCategoryLabel(request.category) }}
+            <span v-if="request.published_slug"> · 当时发布为 {{ request.published_slug }}</span>
+            <span v-if="request.status === 'approved'"> · {{ sharedCopyStatusLabel(request.published_copy_status) }}</span>
           </div>
           <div class="skill-share-request-reason">
             <span>申请原因</span>
@@ -724,12 +667,15 @@ import {
 } from '@lucide/vue'
 import { skillApi } from '@/apis/skill_api'
 import { skillCategoryLabel } from './skillCategories.js'
+import { sharedCopyStatusLabel } from './sharePublicationStatus.js'
 import { marketInstallManagementItems } from './skillHubCatalog.js'
 import {
   canManageSkillRecord,
+  canPublishPersonalSkill,
   isDepartmentManagedSkill,
   personalCatalogSkillForViewer
 } from './skillManagementAccess.js'
+import PersonalSkillPublish from './PersonalSkillPublish.vue'
 import ExtensionCardGrid from './ExtensionCardGrid.vue'
 import SkillInstallFlowModal from './SkillInstallFlowModal.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
@@ -775,14 +721,8 @@ const skillPreviewMarkdown = ref('')
 const skillPreviewLoading = ref(false)
 const skillPreviewError = ref('')
 const deletingPreviewSkill = ref(false)
-const submittingShareRequest = ref(false)
-const shareApplicationVisible = ref(false)
-const applicationReason = ref('')
-const directPublishVisible = ref(false)
-const directPublishSkill = ref(null)
-const directPublishShareConfig = ref(null)
-const directPublishNote = ref('')
-const publishingPersonalSkill = ref(false)
+const personalPublishVisible = ref(false)
+const personalPublishSkill = ref(null)
 const shareRequests = ref([])
 const shareRequestsVisible = ref(false)
 const shareRequestsLoading = ref(false)
@@ -963,13 +903,6 @@ const orderedShareRequests = computed(() =>
     (left, right) => Number(right.status === 'pending') - Number(left.status === 'pending')
   )
 )
-const previewShareRequest = computed(() => {
-  if (previewSkill.value?.sourceScope !== 'personal') return null
-  const ownerUid = previewSkill.value.owner_uid || userStore.uid
-  return shareRequests.value.find(
-    (request) => request.personal_slug === previewSkill.value.slug && request.owner_uid === ownerUid
-  )
-})
 const flatShareSnapshotTree = computed(() => {
   /** 按原有目录层级展示快照文件。 */
   const flatten = (entries, depth = 0) =>
@@ -982,7 +915,7 @@ const flatShareSnapshotTree = computed(() => {
 
 /** 返回共享申请的中文状态。 */
 const shareRequestStatusLabel = (status) =>
-  ({ pending: '待审核', approved: '已发布', rejected: '已驳回' })[status] || status
+  ({ pending: '待审核', approved: '审核通过', rejected: '已驳回' })[status] || status
 
 /** 读取当前用户可见的共享申请。 */
 const fetchShareRequests = async () => {
@@ -1000,105 +933,6 @@ const loadShareUsers = async () => {
     message.error(error?.response?.data?.detail || '加载可共享人员失败')
   } finally {
     shareUsersLoading.value = false
-  }
-}
-
-/** 打开当前个人 Skill 的共享申请。 */
-const openShareApplication = () => {
-  if (userStore.isAdmin || !previewSkill.value?.slug || previewShareRequest.value?.status === 'pending') return
-  applicationReason.value = ''
-  shareApplicationVisible.value = true
-}
-
-/** 关闭共享申请并清空未提交内容。 */
-const closeShareApplication = () => {
-  shareApplicationVisible.value = false
-  applicationReason.value = ''
-}
-
-/** 从个人 Skill 预览提交独立的审核快照与申请原因。 */
-const submitPreviewShareRequest = async () => {
-  if (userStore.isAdmin || !previewSkill.value?.slug || submittingShareRequest.value) return
-  const reason = applicationReason.value.trim()
-  if (!reason) {
-    message.warning('请填写申请原因')
-    return
-  }
-  submittingShareRequest.value = true
-  try {
-    const result = await skillApi.submitSkillShareRequest(previewSkill.value.slug, reason)
-    if (result?.data) {
-      shareRequests.value = [result.data, ...shareRequests.value.filter((item) => item.id !== result.data.id)]
-    }
-    closeShareApplication()
-    message.success('共享申请已提交，等待管理员审核')
-  } catch (error) {
-    message.error(error?.response?.data?.detail || '提交共享申请失败')
-    return
-  } finally {
-    submittingShareRequest.value = false
-  }
-  try {
-    await fetchShareRequests()
-  } catch (error) {
-    message.warning(error?.response?.data?.detail || '申请已提交，但刷新状态失败')
-  }
-}
-
-/** 将当前预览的个人 Skill 交给管理员直接发布。 */
-const openDirectPublish = () => {
-  if (
-    !userStore.isAdmin ||
-    previewSkill.value?.sourceScope !== 'personal' ||
-    previewShareRequest.value?.status === 'pending'
-  ) return
-  directPublishSkill.value = previewSkill.value
-  directPublishShareConfig.value = {
-    version: 2,
-    read_scope: {
-      access_level: 'department',
-      department_ids: userStore.departmentId ? [Number(userStore.departmentId)] : [],
-      user_uids: []
-    },
-    manage_scope: null
-  }
-  directPublishNote.value = ''
-  skillPreviewVisible.value = false
-  directPublishVisible.value = true
-  loadShareUsers()
-}
-
-/** 发布当前个人原件的独立快照并刷新目录。 */
-const confirmDirectPublish = async () => {
-  const skill = directPublishSkill.value
-  if (!skill || publishingPersonalSkill.value) return
-  const readScope = directPublishShareConfig.value?.read_scope
-  if (!readScope) return
-  if (!(readScope.access_level === 'user' ? readScope.user_uids : readScope.department_ids).length) {
-    message.warning(readScope.access_level === 'user' ? '请选择可使用的人员' : '请选择发布部门')
-    return
-  }
-  publishingPersonalSkill.value = true
-  try {
-    await skillApi.publishPersonalSkillDirectly(
-      skill.owner_uid || userStore.uid,
-      skill.slug,
-      readScope,
-      directPublishNote.value
-    )
-    directPublishVisible.value = false
-    message.success('共享 Skill 已发布，个人原件仍保留')
-    emit('updated')
-  } catch (error) {
-    message.error(error?.response?.data?.detail || '发布失败')
-    return
-  } finally {
-    publishingPersonalSkill.value = false
-  }
-  try {
-    await Promise.all([fetchSkills({ refreshPersonal: true }), fetchShareRequests()])
-  } catch (error) {
-    message.warning(error?.response?.data?.detail || '已发布，但刷新共享记录失败')
   }
 }
 
@@ -1365,11 +1199,6 @@ const skillCardTags = (skill) => {
     ...(skill.visible === false ? [] : [{ name: skillCategoryLabel(skill.category), color: 'blue' }])
   ]
   if (skill.sourceScope === 'personal') {
-    const request = isOtherPersonalSkill(skill)
-      ? null
-      : shareRequests.value.find(
-          (item) => item.personal_slug === skill.slug && item.owner_uid === userStore.uid
-        )
     return [
       { name: '个人技能', color: 'gray' },
       { name: skillCategoryLabel(skill.category), color: 'blue' },
@@ -1379,7 +1208,6 @@ const skillCardTags = (skill) => {
             { name: skill.owner_department_name || '未分配部门', color: 'gray' }
           ]
         : []),
-      ...(request ? [{ name: shareRequestStatusLabel(request.status), color: 'blue' }] : []),
       ...(skill.overrides_shared ? [{ name: '覆盖共享版本', color: 'orange' }] : [])
     ]
   }
@@ -1409,6 +1237,24 @@ const navigateToDetail = (skill) => {
 
 const closeSkillPreview = () => {
   skillPreviewVisible.value = false
+}
+
+/** 从个人原件打开两种发布方式的统一入口。 */
+const openPersonalPublish = () => {
+  if (!canPublishPersonalSkill(previewSkill.value, userStore.uid)) return
+  personalPublishSkill.value = previewSkill.value
+  skillPreviewVisible.value = false
+  personalPublishVisible.value = true
+}
+
+/** 发布后刷新共享申请和目录，保留弹窗中的服务端状态。 */
+const handlePersonalPublished = async () => {
+  emit('updated')
+  try {
+    await Promise.all([fetchSkills({ refreshPersonal: true }), fetchShareRequests()])
+  } catch {
+    message.warning('发布成功，但目录状态刷新失败，请稍后重试')
+  }
 }
 
 const openSkillPreview = async (skill) => {
@@ -1944,24 +1790,6 @@ defineExpose({
   margin-bottom: 12px;
 }
 
-.skill-share-application-summary,
-.skill-share-application-intro {
-  color: var(--color-text-secondary);
-  line-height: 1.6;
-  overflow-wrap: anywhere;
-}
-
-.skill-share-application-summary {
-  white-space: pre-wrap;
-}
-
-.skill-share-application-label {
-  display: block;
-  margin: 12px 0 8px;
-  color: var(--color-text);
-  font-weight: 600;
-}
-
 .skill-share-request {
   padding: 16px 0;
   border-bottom: 1px solid var(--gray-100);
@@ -2007,10 +1835,6 @@ defineExpose({
 }
 
 .skill-share-review-actions {
-  margin-top: 12px;
-}
-
-.skill-share-note {
   margin-top: 12px;
 }
 

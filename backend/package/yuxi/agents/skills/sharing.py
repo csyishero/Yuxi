@@ -11,7 +11,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -155,10 +155,15 @@ async def publish_personal_skill_directly(
     note: str,
     operator: User,
     read_scope: dict | None = None,
+    category: str | None = None,
 ) -> SkillShareRequest:
-    """管理员对授权成员的当前原件创建快照并发布共享副本。"""
+    """管理员对自己的当前原件创建快照并发布共享副本。"""
+    if owner_uid != str(operator.uid):
+        raise ValueError("只能直接发布自己的个人 Skill")
     owner = await get_manageable_personal_skill_owner(db, operator=operator, owner_uid=owner_uid)
-    request = await submit_skill_share_request(db, slug=slug, application_reason="管理员直接发布", operator=owner)
+    request = await submit_skill_share_request(
+        db, slug=slug, application_reason=note.strip() or "管理员直接发布", operator=owner, category=category
+    )
     request_id = request.id
     review_note = "管理员直接发布" + (f"：{note.strip()}" if note.strip() else "")
     try:
@@ -180,23 +185,67 @@ async def publish_personal_skill_directly(
         raise
 
 
-async def list_skill_share_requests(db: AsyncSession, *, operator: User, channel: str = "shared") -> list[dict]:
-    """申请人只看自己的记录，管理员查看本部门待审和历史。"""
+async def list_skill_share_requests(
+    db: AsyncSession, *, operator: User, channel: str = "shared", mine_only: bool = False
+) -> list[dict]:
+    """申请人读取本人记录；管理员默认读取本部门，必要时只读取本人。"""
     query = (
         select(SkillShareRequest, User.username)
         .outerjoin(User, User.uid == SkillShareRequest.owner_uid)
         .where(SkillShareRequest.channel == channel)
     )
-    if operator.role == "admin":
+    if mine_only or operator.role not in {"admin", "superadmin"}:
+        query = query.where(SkillShareRequest.owner_uid == operator.uid)
+    elif operator.role == "admin":
         query = query.where(
             SkillShareRequest.owner_department_id == operator.department_id
             if operator.department_id is not None
             else SkillShareRequest.id.is_(None)
         )
-    elif operator.role != "superadmin":
-        query = query.where(SkillShareRequest.owner_uid == operator.uid)
     rows = (await db.execute(query.order_by(SkillShareRequest.created_at.desc()))).all()
-    return [{**item.to_dict(), "owner_name": name} for item, name in rows]
+    published_versions: dict[str, str] = {}
+    published_copies: dict[int, tuple[str, bool]] = {}
+    if channel == "shared" and rows:
+        sources = {(item.owner_uid, item.personal_slug) for item, _ in rows}
+        approved = await db.execute(
+            select(SkillShareRequest.id, SkillShareRequest.owner_uid, SkillShareRequest.personal_slug)
+            .where(
+                SkillShareRequest.channel == "shared",
+                SkillShareRequest.status == "approved",
+                tuple_(SkillShareRequest.owner_uid, SkillShareRequest.personal_slug).in_(sources),
+            )
+            .order_by(
+                SkillShareRequest.owner_uid,
+                SkillShareRequest.personal_slug,
+                SkillShareRequest.created_at,
+                SkillShareRequest.id,
+            )
+        )
+        counts: dict[tuple[str, str], int] = {}
+        for request_id, owner_uid, personal_slug in approved.all():
+            key = (owner_uid, personal_slug)
+            counts[key] = counts.get(key, 0) + 1
+            published_versions[request_id] = f"{counts[key]}.0.0"
+        skill_ids = {item.published_skill_id for item, _ in rows if item.published_skill_id is not None}
+        if skill_ids:
+            copies = await db.execute(select(Skill.id, Skill.source_type, Skill.enabled).where(Skill.id.in_(skill_ids)))
+            published_copies = {skill_id: (source_type, enabled) for skill_id, source_type, enabled in copies.all()}
+    result = []
+    for item, name in rows:
+        version = published_versions.get(item.id)
+        copy_status = None
+        if channel == "shared" and item.status == "approved":
+            copy = published_copies.get(item.published_skill_id)
+            if item.published_skill_id is None:
+                copy_status = "unknown"
+            elif copy and copy[0] == "personal_share":
+                copy_status = "enabled" if copy[1] else "disabled"
+            else:
+                copy_status = "missing"
+        result.append(
+            {**item.to_dict(), "owner_name": name, "published_version": version, "published_copy_status": copy_status}
+        )
+    return result
 
 
 async def authorized_share_snapshot_path(db: AsyncSession, *, request_id: str, operator: User) -> Path:
@@ -367,7 +416,7 @@ async def approve_skill_share_request(
             raise ValueError("共享 Skill slug 已被占用，请重试")
         staging.rename(published)
         moved = True
-        await repo.create(
+        published_skill = await repo.create(
             slug=slug,
             name=published_metadata["name"],
             description=published_metadata["description"],
@@ -387,6 +436,7 @@ async def approve_skill_share_request(
         item.reviewer_uid = str(operator.uid)
         item.reviewed_at = utc_now_naive()
         item.published_slug = slug
+        item.published_skill_id = published_skill.id
         item.department_ids = share_config["read_scope"]["department_ids"]
         item.read_scope = share_config["read_scope"]
         commit_started = True
