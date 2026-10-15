@@ -19,10 +19,12 @@ export const listMarketRankings = async ({ metric = 'installs', scope = 'company
 }
 
 export const getMarketSkill = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}`)
+export const listMarketInstalls = async () => apiGet(`${MARKET_BASE_URL}/-/installs`)
 export const getMarketSkillTree = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/tree`)
 export const getMarketSkillFile = async (slug, path = 'SKILL.md') =>
   apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/file?path=${encodeURIComponent(path)}`)
 export const installMarketSkill = async (slug) => apiPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/install`)
+export const uninstallMarketSkill = async (slug) => apiDelete(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/install`)
 export const upgradeMarketSkill = async (slug) => apiPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/upgrade`)
 export const toggleMarketSkillLike = async (slug) => apiPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/like`)
 export const submitMarketSkill = async (slug, applicationReason, category) =>

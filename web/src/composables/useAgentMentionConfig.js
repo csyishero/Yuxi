@@ -55,7 +55,7 @@ const normalizeMentionResource = (option, kind) => {
 
   return {
     slug: value,
-    name,
+    name: kind === 'skills' && name !== value ? `${name} (${value})` : name,
     description
   }
 }

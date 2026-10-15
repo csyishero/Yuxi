@@ -112,11 +112,15 @@
           <a-spin :spinning="legacyLoading || installedLoading">
             <div v-if="!filteredPersonalItems.length && !legacyLoading && !installedLoading" class="personal-empty">暂无个人技能。可先上传，再申请发布。</div>
             <div v-else class="personal-list">
-              <button v-for="item in filteredPersonalItems" :key="`${item.kind}:${item.slug}`" type="button" class="personal-item" @click="openPersonalItem(item)">
-                <span class="personal-item-icon"><BookOpen :size="17" /></span>
-                <span class="personal-item-copy"><strong>{{ item.name }}</strong><small>{{ item.kind === 'market' ? `市场已安装 · v${item.installed_version}` : item.market_installed_version ? `个人技能 · 市场已安装 v${item.market_installed_version}` : '个人技能' }} · {{ skillCategoryLabel(item.category) }}</small></span>
-                <ChevronRight :size="15" class="personal-item-chevron" />
-              </button>
+              <div v-for="item in filteredPersonalItems" :key="`${item.kind}:${item.slug}`" class="personal-item">
+                <button type="button" class="personal-item-main" :disabled="item.kind === 'market' && item.visible === false" @click="openPersonalItem(item)">
+                  <span class="personal-item-icon"><BookOpen :size="17" /></span>
+                  <span class="personal-item-copy"><strong>{{ item.name }}</strong><small>{{ personalItemStatus(item) }}<template v-if="item.kind !== 'market' || item.visible !== false"> · {{ skillCategoryLabel(item.category) }}</template></small></span>
+                  <ChevronRight v-if="!item.market_installed_version && item.visible !== false" :size="15" class="personal-item-chevron" />
+                </button>
+                <a-button v-if="item.market_installed_version" size="small" :danger="item.market_visible === false" @click="item.market_visible === false ? confirmUninstall(item.market_install) : openDetail(item.market_slug)">{{ item.market_visible === false ? '卸载旧安装' : '管理安装' }}</a-button>
+                <a-button v-else-if="item.kind === 'market' && item.visible === false" size="small" danger @click="confirmUninstall(item)">卸载</a-button>
+              </div>
             </div>
           </a-spin>
           <a-button block class="personal-manage" @click="managementOpen = true">管理个人技能</a-button>
@@ -181,7 +185,7 @@
       <a-spin :spinning="detailLoading">
         <div v-if="detail" class="market-detail">
           <div class="market-detail-heading">
-            <div><h3>{{ detail.name }}</h3><span>{{ detail.slug }} · {{ detail.owner_name }}</span></div>
+            <div><h3>{{ detail.name }}</h3><span>技能标识：{{ detail.slug }} · 由 {{ detail.owner_name }} 发布</span></div>
             <a-tag>{{ marketScopeLabel(detail) }}</a-tag>
           </div>
           <p>{{ detail.description }}</p>
@@ -194,6 +198,7 @@
           </div>
           <a-alert v-if="ownPersonalSkillFor(detail) && !detail.installed_version" type="info" show-icon message="你的个人技能已可在 Agent 中使用，无需再次安装。" />
           <a-alert v-if="detail.shared_available_slug && !detail.installed_version && !ownPersonalSkillFor(detail)" type="info" show-icon message="共享版本已可直接使用；安装市场版可使用当前审核版本。" />
+          <a-alert v-if="detail.installed_version" type="info" show-icon message="市场版本由发布者维护。你可以在有编辑权限的 Agent 中选择是否使用，也可以卸载自己的安装。" />
           <a-alert v-if="detail.upgrade_available" type="info" show-icon message="新版本已发布。升级需由你手动确认。" />
           <div v-if="dependencyLabels.length" class="market-dependencies">
             <strong>依赖</strong><a-tag v-for="dependency in dependencyLabels" :key="dependency">{{ dependency }}</a-tag>
@@ -208,8 +213,9 @@
             </div>
           </div>
           <div class="market-detail-actions">
-            <a-button v-if="detail.installed_version || ownPersonalSkillFor(detail)" @click="router.push('/agent-manage')">在 Agent 中使用</a-button>
-            <a-button type="primary" :loading="busySlug === detail.slug" :disabled="detail.installed_version && !detail.upgrade_available" @click="act(detail)">{{ detail.upgrade_available ? '升级到最新版本' : detail.installed_version ? '已安装' : ownPersonalSkillFor(detail) ? '查看个人技能' : detail.shared_available_slug ? '安装市场版' : '安装 Skill' }}</a-button>
+            <a-button v-if="detail.installed_version || ownPersonalSkillFor(detail)" @click="router.push('/agent-manage')">在 Agent 中配置</a-button>
+            <a-button v-if="detail.installed_version" danger :loading="busySlug === detail.slug" @click="confirmUninstall(detail)">卸载</a-button>
+            <a-button v-if="!detail.installed_version || detail.upgrade_available" type="primary" :loading="busySlug === detail.slug" @click="act(detail)">{{ detail.upgrade_available ? '升级到最新版本' : ownPersonalSkillFor(detail) ? '查看个人技能' : detail.shared_available_slug ? '安装市场版' : '安装 Skill' }}</a-button>
           </div>
         </div>
       </a-spin>
@@ -257,7 +263,7 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import { Blocks, BookOpen, ChartNoAxesColumn, ChevronRight, ClipboardList, Download, Heart, PanelRightClose, PanelRightOpen, Sparkles, Store } from '@lucide/vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import SkillCardList from '@/components/extensions/SkillCardList.vue'
@@ -270,6 +276,8 @@ import {
   getMarketSkillFile,
   getMarketSkillTree,
   installMarketSkill,
+  listMarketInstalls,
+  uninstallMarketSkill,
   listMarketRequests,
   listMarketRankings,
   listMarketSkills,
@@ -401,6 +409,18 @@ const sourceLabel = (item) => item.kind === 'market'
   ? `市场 · ${marketScopeLabel(item)}`
   : item.source_type === 'builtin' ? '系统内置' : '共享技能'
 const requestStatusLabel = (status) => ({ pending: '待审核', approved: '已发布', rejected: '已驳回' })[status] || status
+/** 个人空间同时说明原件、市场安装及过期授权。 */
+const personalItemStatus = (item) => {
+  if (item.kind === 'market') {
+    return item.visible === false
+      ? `市场已安装 · 当前不可用 · v${item.installed_version}`
+      : `市场已安装 · v${item.installed_version}`
+  }
+  if (!item.market_installed_version) return '个人技能'
+  return item.market_visible === false
+    ? `个人技能 · 市场安装已失效 v${item.market_installed_version}`
+    : `个人技能 · 市场已安装 v${item.market_installed_version}`
+}
 const requestScopeLabel = (request) => request.read_scope?.access_level === 'global'
   ? '全公司可见'
   : `${departmentNames.value[request.owner_department_id] || `部门 ${request.owner_department_id || '未分配'}`}及超级管理员可见`
@@ -477,16 +497,8 @@ async function fetchLegacy() {
 async function fetchInstalled() {
   const requestId = ++installedRequestSequence
   installedLoading.value = true
-  const items = []
-  let offset = 0
   try {
-    while (true) {
-      const page = (await listMarketSkills({ installedOnly: true, offset, limit: pageSize }))?.data || []
-      if (requestId !== installedRequestSequence) return
-      items.push(...page)
-      if (page.length < pageSize) break
-      offset += pageSize
-    }
+    const items = (await listMarketInstalls())?.data || []
     if (requestId === installedRequestSequence) installedCards.value = items
   } finally {
     if (requestId === installedRequestSequence) installedLoading.value = false
@@ -609,6 +621,36 @@ async function act(item) {
   } finally {
     busySlug.value = ''
   }
+}
+
+/** 仅卸载当前用户的市场安装，个人原件和发布版本均保留。 */
+function confirmUninstall(item) {
+  if (!item?.installed_version || busySlug.value) return
+  Modal.confirm({
+    title: `卸载 ${item.name}？`,
+    content: '只移除你安装的市场版本；市场发布和其他人的安装不受影响。固定选用此版本的 Agent 需要重新配置，正在使用该技能的任务可能受影响。',
+    okText: '卸载',
+    okType: 'danger',
+    cancelText: '取消',
+    async onOk() {
+      busySlug.value = item.slug
+      try {
+        await uninstallMarketSkill(item.slug)
+        installedCards.value = installedCards.value.filter((card) => card.slug !== item.slug)
+        cards.value = cards.value.map((card) => card.slug === item.slug ? { ...card, installed_version: null, upgrade_available: false } : card)
+        detailOpen.value = false
+        detail.value = null
+        if (rankingsOpen.value) fetchRankings()
+        await refresh()
+        message.success('市场技能已卸载')
+      } catch (failure) {
+        message.error(errorText(failure))
+        throw failure
+      } finally {
+        busySlug.value = ''
+      }
+    }
+  })
 }
 
 async function like(item) {
@@ -807,8 +849,9 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .personal-pending { display: inline-grid; place-items: center; min-width: 16px; height: 16px; margin-left: 4px; padding: 0 3px; border-radius: 8px; background: var(--color-warning-100); color: var(--color-warning-700); font-size: 11px; }
 .personal-search { margin-bottom: 13px; }
 .personal-list { display: grid; gap: 8px; }
-.personal-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 11px; text-align: left; border: 1px solid var(--gray-150); border-radius: 9px; color: var(--color-text); background: var(--color-bg-container); cursor: pointer; }
+.personal-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 11px; border: 1px solid var(--gray-150); border-radius: 9px; color: var(--color-text); background: var(--color-bg-container); }
 .personal-item:hover { border-color: var(--main-400); }
+.personal-item-main { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; padding: 0; border: 0; text-align: left; color: inherit; background: none; cursor: pointer; }
 .personal-item-icon { display: grid; flex: none; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--main-600); background: var(--main-50); }
 .personal-item-copy { display: grid; gap: 2px; min-width: 0; flex: 1; }
 .personal-item-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
@@ -816,7 +859,7 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .personal-item-chevron { flex: none; color: var(--color-text-tertiary); }
 .personal-empty { padding: 32px 12px; text-align: center; color: var(--color-text-secondary); font-size: 13px; }
 .personal-manage { margin-top: 14px; }
-.market-filters button:focus-visible, .market-categories button:focus-visible, .personal-tabs button:focus-visible, .personal-item:focus-visible, .market-card-title:focus-visible { outline: 2px solid var(--main-500); outline-offset: 2px; }
+.market-filters button:focus-visible, .market-categories button:focus-visible, .personal-tabs button:focus-visible, .personal-item-main:focus-visible, .market-card-title:focus-visible { outline: 2px solid var(--main-500); outline-offset: 2px; }
 .market-detail-heading h3 { margin: 0 0 3px; font-size: 22px; }
 .market-detail-heading span, .market-detail-meta { color: var(--color-text-secondary); font-size: 13px; }
 .market-detail > p { margin: 18px 0; line-height: 1.6; }

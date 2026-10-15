@@ -4,17 +4,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
+from server.utils.auth_middleware import get_admin_user, get_current_user, get_db, get_required_user
 from yuxi.agents.skills.market import (
     get_market_skill,
     install_market_skill,
     list_market_rankings,
     list_market_skills,
+    list_user_market_installs,
     market_skill_file,
     market_skill_tree,
     review_market_skill,
     submit_market_skill,
     toggle_market_like,
+    uninstall_market_skill,
 )
 from yuxi.agents.skills.sharing import list_skill_share_requests
 from yuxi.storage.postgres.models_business import User
@@ -41,6 +43,13 @@ def _raise_market_error(exc: ValueError) -> None:
     message = str(exc)
     status = 404 if "不存在" in message else 403 if "无权" in message or "仅超级管理员" in message else 400
     raise HTTPException(status_code=status, detail=message) from exc
+
+
+async def get_market_install_user(user: User | None = Depends(get_current_user)) -> User:
+    """本人安装清理只要求登录，不要求当前绑定部门。"""
+    if user is None:
+        raise HTTPException(status_code=401, detail="请登录后再访问")
+    return user
 
 
 @market_router.get("")
@@ -77,6 +86,14 @@ async def list_market_route(
 async def list_market_requests_route(user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
     """查看本人或授权范围内的市场审核申请。"""
     return {"success": True, "data": await list_skill_share_requests(db, operator=user, channel="market")}
+
+
+@market_router.get("/-/installs")
+async def list_user_market_installs_route(
+    user: User = Depends(get_market_install_user), db: AsyncSession = Depends(get_db)
+):
+    """查看本人安装版本的摘要与当前可见状态。"""
+    return {"success": True, "data": await list_user_market_installs(db, user=user)}
 
 
 @market_router.get("/-/rankings")
@@ -191,6 +208,14 @@ async def market_install_route(slug: str, user: User = Depends(get_required_user
         return {"success": True, "data": await install_market_skill(db, slug=slug, user=user)}
     except ValueError as exc:
         _raise_market_error(exc)
+
+
+@market_router.delete("/{slug}/install")
+async def market_uninstall_route(
+    slug: str, user: User = Depends(get_market_install_user), db: AsyncSession = Depends(get_db)
+):
+    """卸载本人安装的市场 Skill。"""
+    return {"success": True, "data": await uninstall_market_skill(db, slug=slug, user=user)}
 
 
 @market_router.post("/{slug}/upgrade")

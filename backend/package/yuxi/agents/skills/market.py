@@ -22,6 +22,7 @@ from yuxi.agents.skills.service import (
     lock_skill_slug_allocation,
     normalize_skill_category,
     parse_skill_dir_metadata,
+    refresh_user_skill_projection_async,
     resolve_skill_relative_path,
     set_skill_dir_category,
     user_can_access_skill,
@@ -243,6 +244,30 @@ async def list_market_skills(
     return cards
 
 
+async def list_user_market_installs(db: AsyncSession, *, user: User) -> list[dict]:
+    """列出本人已安装版本的安全摘要，包括现时可见状态。"""
+    items = await MarketSkillRepository(db).installed_releases_for_user(str(user.uid))
+    cards = []
+    for listing, release in items:
+        detail_available = bool(user.department_id) and listing.latest_release_id is not None
+        visible = detail_available and market_skill_visible(listing, user)
+        own_personal_slug = listing.personal_slug if listing.owner_uid == str(user.uid) else None
+        cards.append(
+            {
+                "slug": listing.slug,
+                "name": release.name if visible else listing.slug,
+                "description": release.description if visible else "",
+                "category": (release.category or "other") if visible else None,
+                "installed_version": release.version,
+                "owner_uid": listing.owner_uid if visible or own_personal_slug else None,
+                "personal_slug": listing.personal_slug if visible or own_personal_slug else None,
+                "own_personal_slug": own_personal_slug,
+                "visible": visible,
+            }
+        )
+    return cards
+
+
 async def list_market_rankings(
     db: AsyncSession,
     *,
@@ -380,6 +405,14 @@ async def install_market_skill(db: AsyncSession, *, slug: str, user: User, upgra
         current.updated_at = utc_now_naive()
     await db.commit()
     return await get_market_skill(db, slug=slug, user=user)
+
+
+async def uninstall_market_skill(db: AsyncSession, *, slug: str, user: User) -> dict:
+    """移除当前用户的市场安装指针，保留发布版本与其他用户安装。"""
+    removed = await MarketSkillRepository(db).uninstall_by_slug(str(user.uid), slug)
+    await db.commit()
+    await refresh_user_skill_projection_async(str(user.uid))
+    return {"slug": slug, "uninstalled": removed}
 
 
 async def toggle_market_like(db: AsyncSession, *, slug: str, user: User) -> dict:

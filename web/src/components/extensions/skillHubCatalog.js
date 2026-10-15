@@ -70,7 +70,10 @@ export function personalSkillItems(existingCards, marketCards, uid) {
     .filter((item) => item.installed_version && ownPersonalSkill(item, personal, uid))
     .map((item) => [item.own_personal_slug, item]))
   return [
-    ...personal.map((item) => ({ ...item, kind: 'personal', market_installed_version: ownInstalled.get(item.slug)?.installed_version || null })),
+    ...personal.map((item) => {
+      const installed = ownInstalled.get(item.slug)
+      return { ...item, kind: 'personal', market_install: installed || null, market_installed_version: installed?.installed_version || null, market_slug: installed?.slug || null, market_visible: installed?.visible !== false }
+    }),
     ...marketCards.filter((item) => item.installed_version && !ownInstalled.has(item.own_personal_slug)).map((item) => ({ ...item, kind: 'market' }))
   ]
 }

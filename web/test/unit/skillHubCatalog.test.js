@@ -80,6 +80,24 @@ test('个人空间折叠本人原件和已安装市场版本，保留他人市�
   )
   assert.deepEqual(items.map((item) => [item.kind, item.slug]), [['personal', 'mine'], ['market', 'market-installed']])
   assert.equal(items[0].market_installed_version, 1)
+  assert.equal(items[0].market_slug, 'mine-2')
+  assert.equal(items[0].market_install.slug, 'mine-2')
+  assert.equal(items[0].market_visible, true)
+})
+
+test('失去部门权限后仍保留自己的市场安装入口以便卸载', () => {
+  const items = personalSkillItems(
+    [{ slug: 'mine', source_scope: 'personal', owner_uid: 'alice' }],
+    [
+      { slug: 'mine-2', owner_uid: 'alice', own_personal_slug: 'mine', installed_version: 1, visible: false },
+      { slug: 'other-2', owner_uid: 'bob', installed_version: 2, visible: false }
+    ],
+    'alice'
+  )
+  assert.deepEqual(items.map((item) => [item.kind, item.slug]), [['personal', 'mine'], ['market', 'other-2']])
+  assert.equal(items[0].market_visible, false)
+  assert.equal(items[0].market_install.slug, 'mine-2')
+  assert.equal(items[1].visible, false)
 })
 
 test('作者个人原件删除后市场安装仍显示，其他作者同名原件不阻止安装', () => {

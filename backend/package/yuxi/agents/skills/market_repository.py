@@ -1,6 +1,6 @@
 """内部 Skill 市场的 PostgreSQL 查询。"""
 
-from sqlalchemy import func, or_, select, true, tuple_
+from sqlalchemy import delete, func, or_, select, true, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_business import (
@@ -196,9 +196,35 @@ class MarketSkillRepository:
         """读取用户安装指针。"""
         return await self.db.get(MarketSkillInstall, (uid, market_skill_id))
 
+    async def uninstall_by_slug(self, uid: str, slug: str) -> bool:
+        """仅删除当前用户对稳定市场条目的安装指针。"""
+        market_skill_id = select(MarketSkill.id).where(MarketSkill.slug == slug).scalar_subquery()
+        statement = (
+            delete(MarketSkillInstall)
+            .where(MarketSkillInstall.uid == uid, MarketSkillInstall.market_skill_id == market_skill_id)
+            .returning(MarketSkillInstall.market_skill_id)
+        )
+        return (await self.db.scalar(statement)) is not None
+
     async def installs_for_user(self, uid: str) -> list[MarketSkillInstall]:
         """列出用户所有安装。"""
         return list((await self.db.scalars(select(MarketSkillInstall).where(MarketSkillInstall.uid == uid))).all())
+
+    async def installed_releases_for_user(self, uid: str) -> list[tuple[MarketSkill, MarketSkillRelease]]:
+        """只读取本人安装对应的市场身份和不可变版本。"""
+        statement = (
+            select(MarketSkill, MarketSkillRelease)
+            .select_from(MarketSkillInstall)
+            .join(MarketSkill, MarketSkill.id == MarketSkillInstall.market_skill_id)
+            .join(
+                MarketSkillRelease,
+                (MarketSkillRelease.id == MarketSkillInstall.release_id)
+                & (MarketSkillRelease.market_skill_id == MarketSkill.id),
+            )
+            .where(MarketSkillInstall.uid == uid)
+            .order_by(MarketSkillInstall.updated_at.desc(), MarketSkill.id.desc())
+        )
+        return [(listing, release) for listing, release in (await self.db.execute(statement)).all()]
 
     async def metrics(self, market_skill_id: str) -> tuple[int, int]:
         """从唯一安装和点赞行计算排行指标。"""

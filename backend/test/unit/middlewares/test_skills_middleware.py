@@ -35,6 +35,7 @@ def _runtime_skill(
     mcps: list[str] | None = None,
 ) -> dict:
     return {
+        "slug": slug,
         "name": name or slug,
         "description": description,
         "path": f"/home/gem/skills/{slug}/SKILL.md",
@@ -42,6 +43,24 @@ def _runtime_skill(
         "mcps": mcps or [],
         "skills": [],
     }
+
+
+def test_market_skill_prompt_keeps_internal_slug_distinct_from_display_name():
+    middleware = SkillsMiddleware()
+    context = SimpleNamespace(
+        _skill_runtime_snapshot={
+            "runtime_skills": {
+                "local-pptx-2": _runtime_skill("local-pptx-2", name="local-pptx", description="本地生成 PPT")
+            }
+        }
+    )
+
+    metadata = middleware._collect_prompt_metadata(["local-pptx-2"], context)
+    prompt = middleware._build_skills_section(metadata)
+
+    assert "**local-pptx** (slug: `local-pptx-2`)" in prompt
+    assert "Read `/home/gem/skills/local-pptx-2/SKILL.md`" in prompt
+    assert "`@skill:<slug>` use the exact slug above" in prompt
 
 
 @pytest.mark.asyncio
@@ -85,6 +104,8 @@ async def test_skills_prompt_uses_effective_skills_at_request_level():
     assert result == "ok"
     assert "base" in prompt_text
     assert "Alpha" in prompt_text
+    assert "**Alpha** (slug: `alpha`)" in prompt_text
+    assert "`@skill:<slug>` use the exact slug above" in prompt_text
     assert "Configured Only" not in prompt_text
     assert context.system_prompt == "context base"
     assert not hasattr(context, "_skills_prompt_injected")
@@ -133,6 +154,8 @@ async def test_preloaded_skill_injects_full_instructions_once_and_hides_lazy_rea
 
     assert len(captured) == 2
     assert all(text.count("USE_ALPHA_TOOL") == 1 for text in captured)
+    assert all('preloaded_skill slug="alpha"' in text for text in captured)
+    assert all("`@skill:<slug>` identifies the exact slug" in text for text in captured)
     assert all("Read `/home/gem/skills/alpha/SKILL.md`" not in text for text in captured)
     assert all("Read `/home/gem/skills/beta/SKILL.md`" in text for text in captured)
 

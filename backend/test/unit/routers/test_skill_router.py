@@ -150,9 +150,10 @@ def test_list_skill_cards_route_scans_personal_source(monkeypatch):
 
 
 def test_personal_skill_confirm_and_delete_routes(monkeypatch):
-    async def fake_confirm(*, draft_id, slugs, operator):
+    async def fake_confirm(*, draft_id, slugs, categories, operator):
         assert draft_id == "draft-1"
         assert slugs == ["demo-v2"]
+        assert categories is None
         assert operator.uid == "user"
         return [{"slug": "demo", "requested_slug": "demo-v2", "success": True}]
 
