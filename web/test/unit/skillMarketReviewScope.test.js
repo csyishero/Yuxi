@@ -147,11 +147,9 @@ async function withReview({ role, departmentId = 3, existingScope = null, existi
     const scopeGroup = () => findAll(host, (item) => item.type === 'a-radio-group' && item.props.class === 'market-review-scope')[0]
     const reviewAlert = () => findAll(host, (item) => item.type === 'a-alert' && visibleText(item).includes('新版本'))[0]
 
-    const requestsTab = findAll(host, (item) => item.type === 'button' && visibleText(item).includes('我的审批'))[0]
-    assert.ok(requestsTab, '应能打开我的审批')
-    requestsTab.props.onClick()
-    await nextTick()
-    button('查看全部申请').props.onClick()
+    const reviewEntry = findAll(host, (item) => item.type === 'a-button' && visibleText(item).includes('市场审核'))[0]
+    assert.ok(reviewEntry, '个人首页应能打开市场审核')
+    reviewEntry.props.onClick()
     await setImmediate()
     await nextTick()
 

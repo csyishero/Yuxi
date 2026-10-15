@@ -1,142 +1,111 @@
 <template>
   <section class="skill-market">
-    <div class="skill-hub-layout" :class="{ 'personal-collapsed': !personalOpen }">
-      <main class="skill-hub-main">
-        <div class="market-heading">
-          <div class="market-heading-copy">
-            <div class="market-heading-icon"><Blocks :size="23" /></div>
-            <div>
-              <h2>技能目录</h2>
-              <p>找到适合任务的能力，在 Agent 中使用。</p>
+    <nav class="skill-view-tabs" role="tablist" aria-label="技能页面">
+      <button type="button" role="tab" :aria-selected="activeView === 'personal'" aria-controls="skill-personal-view" @click="selectView('personal')">我的技能</button>
+      <button type="button" role="tab" :aria-selected="activeView === 'market'" aria-controls="skill-market-view" @click="selectView('market')">技能市场</button>
+    </nav>
+
+    <section v-if="activeView === 'personal'" id="skill-personal-view" role="tabpanel" class="skill-view-content">
+      <a-alert v-if="personalError" type="error" :message="personalError" show-icon class="market-error"><template #action><a-button size="small" @click="refresh">重试</a-button></template></a-alert>
+      <template v-if="managementOpen">
+        <div class="skill-page-heading">
+          <div class="skill-page-title"><div class="skill-page-icon"><Blocks :size="25" /></div><div><h2>技能治理</h2><p>管理共享技能、人员技能与批量操作。</p></div></div>
+          <a-button @click="managementOpen = false">返回我的技能</a-button>
+        </div>
+        <SkillCardList governance-only :market-installs="installedCards" @open-market="openManagementMarket" @uninstall-market="confirmUninstall" @updated="refreshHome" />
+      </template>
+      <template v-else>
+        <div class="skill-page-heading">
+          <div class="skill-page-title"><div class="skill-page-icon"><BookOpen :size="25" /></div><div><h2>我的技能</h2><p>创建、安装和可直接使用的技能，都在这里管理。</p></div></div>
+          <div class="skill-page-actions">
+            <a-button @click="selectView('market')">去市场找技能</a-button>
+            <a-button v-if="userStore.isAdmin" @click="openRequests">市场审核<span v-if="pendingRequestCount"> ({{ pendingRequestCount }})</span></a-button>
+            <a-button v-if="userStore.isAdmin || hasManageableSharedSkills" @click="managementOpen = true">技能治理</a-button>
+            <SkillCardList toolbar-only :market-installs="installedCards" @updated="refreshHome" />
+          </div>
+        </div>
+        <div v-if="!personalError && !legacyLoading && !installedLoading" class="skill-overview" aria-label="我的技能概况">
+          <div><strong>{{ ownedCount }}</strong><span>我创建的</span></div>
+          <div><strong>{{ installedCount }}</strong><span>市场已安装</span></div>
+          <div><strong>{{ availableSharedCount }}</strong><span>团队与系统可用</span></div>
+          <div v-if="pendingRequestCount"><strong>{{ pendingRequestCount }}</strong><span>市场待审核</span></div>
+        </div>
+        <div class="skill-list-heading">
+          <div><h3>{{ releaseView ? '发布记录' : '技能列表' }}</h3><p>{{ releaseView ? '选择本人技能查看共享与市场的申请、范围和版本。' : '直接查看、发布和管理技能。' }}</p></div>
+          <a-button type="link" @click="releaseView = !releaseView">{{ releaseView ? '返回技能列表' : '查看发布记录' }}</a-button>
+        </div>
+        <template v-if="releaseView">
+          <div v-if="!ownedSkills.length && !legacyLoading && !personalError" class="personal-empty">还没有可发布的个人技能。</div>
+          <div v-else-if="ownedSkills.length" class="skill-list">
+            <div v-for="item in ownedSkills" :key="item.slug" class="skill-row release-row">
+              <div class="skill-row-name"><span class="skill-row-icon"><Sparkles :size="18" /></span><span><strong>{{ item.name }}</strong><small>{{ item.slug }}</small></span></div>
+              <div class="skill-row-origin">我创建的</div>
+              <div class="skill-row-status">个人原件</div>
+              <div class="skill-row-actions"><a-button @click="openPublish(item)">查看发布与审核</a-button></div>
             </div>
           </div>
-          <div class="market-heading-actions">
-            <a-button @click="managementOpen = true">管理与上传</a-button>
-            <a-button class="personal-toggle" :aria-expanded="personalOpen" aria-controls="skill-personal-space" @click="personalOpen = !personalOpen">
-              <PanelRightClose v-if="personalOpen" :size="16" />
-              <PanelRightOpen v-else :size="16" />
-              {{ personalOpen ? '收起个人空间' : '展开个人空间' }}
-            </a-button>
-          </div>
-        </div>
-
-        <div class="market-toolbar">
-          <a-input-search
-            v-model:value="query"
-            placeholder="搜索技能名称或用途"
-            allow-clear
-            class="market-search"
-            @search="refresh"
-            @pressEnter="refresh"
-          />
-          <div class="market-toolbar-actions">
-            <label class="market-source-filter">
-              <span>来源</span>
-              <a-select :value="sourceFilter" aria-label="技能来源" :options="sourceFilters" @change="selectSourceFilter" />
-            </label>
-            <a-button class="market-rankings-button" @click="openRankings"><ChartNoAxesColumn :size="16" /> 市场热门榜</a-button>
-          </div>
-        </div>
-
-        <nav class="market-categories" aria-label="技能方向筛选">
-          <button type="button" :class="{ active: selectedCategory === 'all' }" :aria-current="selectedCategory === 'all' ? 'page' : undefined" @click="selectCategory('all')">全部方向</button>
-          <button v-for="category in skillCategories" :key="category.value" type="button" :class="{ active: selectedCategory === category.value }" :aria-current="selectedCategory === category.value ? 'page' : undefined" @click="selectCategory(category.value)">{{ category.label }}</button>
-        </nav>
-
-        <a-alert v-if="error" type="error" :message="error" show-icon class="market-error">
-          <template #action><a-button size="small" @click="refresh">重试</a-button></template>
-        </a-alert>
-        <a-spin :spinning="loading || legacyLoading">
-          <div v-if="!visibleCards.length && !loading && !legacyLoading" class="market-empty">
-            <Store :size="28" />
-            <strong>{{ catalogEmptyState.title }}</strong>
-            <span>{{ catalogEmptyState.hint }}</span>
-          </div>
-          <div v-else class="market-grid">
-            <article v-for="item in visibleCards" :key="`${item.kind}:${item.source_type || ''}:${item.owner_uid || ''}:${item.slug}`" class="market-card">
-              <div class="market-card-top">
-                <div class="market-icon"><Sparkles v-if="item.kind === 'market'" :size="20" /><BookOpen v-else :size="20" /></div>
-                <div class="market-card-labels"><span class="market-category-label">{{ skillCategoryLabel(item.category) }}</span><span class="market-scope">{{ sourceLabel(item) }}</span></div>
-              </div>
-              <button type="button" class="market-card-title" @click="openCard(item)">{{ item.name }}</button>
-              <p>{{ item.description || '暂无描述' }}</p>
-              <div class="market-card-author">
-                {{ item.kind === 'market' ? `由 ${item.owner_name} 发布 · v${item.latest_version}` : item.source_type === 'builtin' ? '系统内置 · 可直接使用' : '已共享 · 可直接使用' }}
-              </div>
-              <div v-if="item.kind === 'market' && item.shared_available_slug && !item.installed_version && !ownPersonalSkillFor(item)" class="market-shared-note">共享版本已可用</div>
-              <div class="market-card-bottom">
-                <template v-if="item.kind === 'market'">
-                  <button
-                    type="button"
-                    class="market-like"
-                    :class="{ liked: item.liked }"
-                    :aria-label="item.liked ? '取消点赞' : '点赞'"
-                    :disabled="busySlug === item.slug"
-                    @click="like(item)"
-                  ><Heart :size="16" :fill="item.liked ? 'currentColor' : 'none'" /> {{ item.likes_count }}</button>
-                  <span v-if="ownPersonalSkillFor(item) && !item.installed_version" class="market-available">个人技能已可用</span>
-                  <span v-else class="market-install-count"><Download :size="15" /> {{ item.install_count }} 人安装</span>
-                  <a-button size="small" :loading="busySlug === item.slug" @click="act(item)">
-                    {{ item.upgrade_available ? '升级' : item.installed_version ? '查看' : ownPersonalSkillFor(item) ? '查看个人技能' : item.shared_available_slug ? '安装市场版' : '安装' }}
-                  </a-button>
-                </template>
-                <template v-else>
-                  <span class="market-available">{{ isDepartmentManagedSkill(item) ? '本部门可管理' : '已可用' }}</span>
-                  <a-button size="small" @click="openCard(item)">{{ canManageSkillRecord(item) ? '管理技能' : '查看技能' }}</a-button>
-                </template>
-              </div>
-            </article>
-          </div>
-          <div v-if="hasMore && !loading && ['all', 'market'].includes(sourceFilter)" class="market-more"><a-button :loading="loadingMore" @click="loadMore">加载更多</a-button></div>
-        </a-spin>
-      </main>
-
-      <aside v-show="personalOpen" id="skill-personal-space" class="personal-space" aria-label="个人空间">
-        <div class="personal-space-heading"><h3>个人空间</h3><span v-if="personalTab === 'skills'">{{ filteredPersonalItems.length }} 项技能</span></div>
-        <div class="personal-tabs" role="tablist" aria-label="个人空间视图">
-          <button type="button" role="tab" :aria-selected="personalTab === 'skills'" :class="{ active: personalTab === 'skills' }" @click="personalTab = 'skills'">我的技能</button>
-          <button type="button" role="tab" :aria-selected="personalTab === 'requests'" :class="{ active: personalTab === 'requests' }" @click="personalTab = 'requests'; fetchRequests()">我的审批<span v-if="pendingRequestCount" class="personal-pending">{{ pendingRequestCount }}</span></button>
-        </div>
-        <template v-if="personalTab === 'skills'">
-          <a-input v-model:value="personalQuery" allow-clear placeholder="搜索技能" class="personal-search" />
-          <nav class="personal-source-filters" aria-label="个人空间技能来源">
-            <button v-for="filter in personalSourceFilters" :key="filter.key" type="button" :class="{ active: personalSource === filter.key }" :aria-current="personalSource === filter.key ? 'page' : undefined" @click="personalSource = filter.key">{{ filter.label }}<span>{{ searchedPersonalSpaceGroups[filter.key].length }}</span></button>
-          </nav>
-          <a-spin :spinning="legacyLoading || installedLoading">
-            <div v-if="!filteredPersonalItems.length && !legacyLoading && !installedLoading" class="personal-empty">{{ personalQuery ? '没有找到匹配的技能。' : personalSource === 'all' ? '暂无技能。可先上传或从市场安装。' : personalSource === 'private' ? '暂无私人技能。可先上传或从市场安装。' : '此分类暂无技能。' }}</div>
-            <div v-else class="personal-list">
-              <div v-for="item in filteredPersonalItems" :key="`${item.kind}:${item.slug}`" class="personal-item">
-                <button type="button" class="personal-item-main" :disabled="item.kind === 'market' && item.visible === false" @click="openPersonalItem(item)">
-                  <span class="personal-item-icon"><BookOpen :size="17" /></span>
-                  <span class="personal-item-copy"><strong>{{ item.name }}</strong><small>{{ personalItemStatus(item) }}<template v-if="item.kind !== 'market' || item.visible !== false"> · {{ skillCategoryLabel(item.category) }}</template></small></span>
-                  <ChevronRight v-if="!item.market_installed_version && item.visible !== false" :size="15" class="personal-item-chevron" />
-                </button>
-                <a-button v-if="item.market_installed_version" size="small" :danger="item.market_visible === false" @click="item.market_visible === false ? confirmUninstall(item.market_install) : openDetail(item.market_slug)">{{ item.market_visible === false ? '卸载旧安装' : '管理安装' }}</a-button>
-                <a-button v-else-if="item.kind === 'market' && item.visible === false" size="small" danger @click="confirmUninstall(item)">卸载</a-button>
-              </div>
-            </div>
-          </a-spin>
-          <a-button block class="personal-manage" @click="managementOpen = true">管理与上传</a-button>
         </template>
         <template v-else>
-          <a-spin :spinning="requestsLoading">
-            <div v-if="!requests.length && !requestsLoading" class="personal-empty">还没有发布申请。</div>
-            <div v-else class="personal-list">
-              <button v-for="request in requests.slice(0, 12)" :key="request.id" type="button" class="personal-item" @click="openRequests">
-                <span class="personal-item-icon"><ClipboardList :size="17" /></span>
-                <span class="personal-item-copy"><strong>{{ request.name }}</strong><small>{{ request.owner_uid }} · {{ requestStatusLabel(request.status) }}</small></span>
-                <ChevronRight :size="15" class="personal-item-chevron" />
-              </button>
+          <div class="skill-list-toolbar">
+            <nav class="personal-source-filters" aria-label="我的技能来源">
+              <button v-for="filter in personalSourceFilters" :key="filter.key" type="button" :class="{ active: personalSource === filter.key }" :aria-current="personalSource === filter.key ? 'page' : undefined" @click="personalSource = filter.key">{{ filter.label }}<span>{{ searchedPersonalSpaceGroups[filter.key].length }}</span></button>
+            </nav>
+            <a-input v-model:value="personalQuery" allow-clear aria-label="搜索我的技能" placeholder="搜索我的技能" class="personal-search" />
+          </div>
+          <a-spin :spinning="legacyLoading || installedLoading">
+            <div v-if="!filteredPersonalItems.length && !legacyLoading && !installedLoading && !personalError" class="personal-empty">{{ personalQuery ? '没有找到匹配的技能。' : '这里还没有技能。可以上传或从市场安装。' }}</div>
+            <div v-else-if="filteredPersonalItems.length" class="skill-list">
+              <div class="skill-list-header"><span>技能</span><span>来源</span><span>状态</span><span>操作</span></div>
+              <div v-for="item in filteredPersonalItems" :key="`${item.kind}:${item.slug}`" class="skill-row">
+                <div class="skill-row-name"><span class="skill-row-icon"><Sparkles v-if="item.kind === 'personal'" :size="18" /><BookOpen v-else :size="18" /></span><span><button type="button" :disabled="item.kind === 'market' && item.visible === false" @click="openPersonalItem(item)">{{ item.name }}</button><small>{{ item.description || item.slug }}</small></span></div>
+                <div class="skill-row-origin">{{ personalItemOrigin(item) }}<small>{{ skillCategoryLabel(item.category) }}</small></div>
+                <div class="skill-row-status" :class="{ 'is-unavailable': item.visible === false || item.market_visible === false }">{{ personalItemStatus(item) }}</div>
+                <div class="skill-row-actions">
+                  <template v-if="item.kind === 'personal'"><a-button size="small" @click="openPersonalItem(item)">查看</a-button><a-button size="small" @click="openPublish(item)">发布技能</a-button><a-button v-if="item.market_installed_version" size="small" :danger="item.market_visible === false" @click="item.market_visible === false ? confirmUninstall(item.market_install) : openDetail(item.market_slug)">{{ item.market_visible === false ? '卸载旧安装' : '管理安装' }}</a-button></template>
+                  <template v-else-if="item.kind === 'market'"><a-button v-if="item.visible !== false" size="small" @click="openPersonalItem(item)">查看</a-button><a-button v-if="item.visible !== false" size="small" @click="router.push('/agent-manage')">配置 Agent</a-button><a-button size="small" danger @click="confirmUninstall(item)">{{ item.visible === false ? '卸载旧安装' : '卸载' }}</a-button></template>
+                  <a-button v-else size="small" @click="openPersonalItem(item)">{{ canManageSkillRecord(item) ? '管理技能' : '查看' }}</a-button>
+                </div>
+              </div>
             </div>
           </a-spin>
-          <a-button block class="personal-manage" @click="openRequests">查看全部申请</a-button>
+          <p class="skill-list-hint">共享与系统技能可直接在 Agent 中使用；市场安装可在 Agent 中配置。</p>
         </template>
-      </aside>
-    </div>
+      </template>
+    </section>
 
-    <a-drawer v-model:open="managementOpen" title="技能管理与上传" width="min(1080px, 96vw)" class="skill-management-drawer">
-      <SkillCardList v-if="managementOpen" :market-installs="installedCards" @open-market="openManagementMarket" @uninstall-market="confirmUninstall" @updated="fetchLegacy" />
-    </a-drawer>
+    <section v-else id="skill-market-view" role="tabpanel" class="skill-view-content">
+      <div class="skill-page-heading">
+        <div class="skill-page-title"><div class="skill-page-icon"><Sparkles :size="25" /></div><div><h2>技能市场</h2><p>发现已发布的技能，查看适用范围并安装到自己的空间。</p></div></div>
+        <a-button class="market-rankings-button" @click="openRankings"><ChartNoAxesColumn :size="16" /> 热门榜</a-button>
+      </div>
+      <div class="market-toolbar"><a-input-search v-model:value="query" placeholder="搜索技能名称或用途" allow-clear class="market-search" @search="refresh" @pressEnter="refresh" /><span v-if="!marketError && !loading" class="market-result-count">已显示 {{ visibleCards.length }} 项</span></div>
+      <nav class="market-categories" aria-label="技能方向筛选">
+        <button type="button" :class="{ active: selectedCategory === 'all' }" :aria-current="selectedCategory === 'all' ? 'page' : undefined" @click="selectCategory('all')">全部方向</button>
+        <button v-for="category in skillCategories" :key="category.value" type="button" :class="{ active: selectedCategory === category.value }" :aria-current="selectedCategory === category.value ? 'page' : undefined" @click="selectCategory(category.value)">{{ category.label }}</button>
+      </nav>
+      <a-alert v-if="marketError" type="error" :message="marketError" show-icon class="market-error"><template #action><a-button size="small" @click="refresh">重试</a-button></template></a-alert>
+      <a-spin :spinning="loading">
+        <div v-if="!visibleCards.length && !loading && !marketError" class="market-empty"><Store :size="28" /><strong>{{ catalogEmptyState.title }}</strong><span>{{ catalogEmptyState.hint }}</span></div>
+        <div v-else-if="visibleCards.length" class="market-grid">
+          <article v-for="item in visibleCards" :key="item.slug" class="market-card">
+            <div class="market-card-top"><div class="market-icon"><Sparkles :size="20" /></div><div class="market-card-labels"><span class="market-category-label">{{ skillCategoryLabel(item.category) }}</span><span class="market-scope">{{ sourceLabel(item) }}</span></div></div>
+            <button type="button" class="market-card-title" @click="openCard(item)">{{ item.name }}</button>
+            <p>{{ item.description || '暂无描述' }}</p>
+            <div class="market-card-author">由 {{ item.owner_name }} 发布 · v{{ item.latest_version }}</div>
+            <div v-if="item.shared_available_slug && !item.installed_version && !ownPersonalSkillFor(item)" class="market-shared-note">共享版本已可用</div>
+            <div class="market-card-bottom">
+              <button type="button" class="market-like" :class="{ liked: item.liked }" :aria-label="item.liked ? '取消点赞' : '点赞'" :disabled="busySlug === item.slug" @click="like(item)"><Heart :size="16" :fill="item.liked ? 'currentColor' : 'none'" /> {{ item.likes_count }}</button>
+              <span v-if="ownPersonalSkillFor(item) && !item.installed_version" class="market-available">个人技能已可用</span><span v-else class="market-install-count"><Download :size="15" /> {{ item.install_count }} 人安装</span>
+              <a-button size="small" :loading="busySlug === item.slug" @click="act(item)">{{ item.upgrade_available ? '升级' : item.installed_version ? '查看' : ownPersonalSkillFor(item) ? '查看个人技能' : item.shared_available_slug ? '安装市场版' : '安装' }}</a-button>
+            </div>
+          </article>
+        </div>
+        <div v-if="hasMore && !loading && !marketError" class="market-more"><a-button :loading="loadingMore" @click="loadMore">加载更多</a-button></div>
+      </a-spin>
+      <p class="skill-list-hint">市场只展示当前账号有权查看的已上架技能。</p>
+    </section>
+
+    <PersonalSkillPublish v-if="publishOpen" v-model:open="publishOpen" :skill="publishSkill" @published="refreshHome" />
 
     <a-drawer v-model:open="rankingsOpen" title="市场热门榜" width="min(520px, 96vw)" class="skill-rankings-drawer">
       <div class="ranking-controls">
@@ -243,13 +212,14 @@
 
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
-import { Blocks, BookOpen, ChartNoAxesColumn, ChevronRight, ClipboardList, Download, Heart, PanelRightClose, PanelRightOpen, Sparkles, Store } from '@lucide/vue'
+import { Blocks, BookOpen, ChartNoAxesColumn, Download, Heart, Sparkles, Store } from '@lucide/vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
+import PersonalSkillPublish from '@/components/extensions/PersonalSkillPublish.vue'
 import SkillCardList from '@/components/extensions/SkillCardList.vue'
-import { canManageSkillRecord, isDepartmentManagedSkill } from '@/components/extensions/skillManagementAccess'
-import { combineSkillCards, filterSkillCards, ownPersonalSkill, personalSpaceSkillGroups, searchPersonalSpaceSkillGroups, skillDetailRoute } from '@/components/extensions/skillHubCatalog'
+import { canManageSkillRecord } from '@/components/extensions/skillManagementAccess'
+import { combineSkillCards, filterSkillCards, marketInstallManagementItems, ownPersonalSkill, personalSpaceSkillGroups, searchPersonalSpaceSkillGroups, skillDetailRoute } from '@/components/extensions/skillHubCatalog'
 import { skillCategories, skillCategoryLabel } from '@/components/extensions/skillCategories'
 import { useUserStore } from '@/stores/user'
 import { departmentApi } from '@/apis/department_api'
@@ -272,28 +242,23 @@ import {
   upgradeMarketSkill
 } from '@/apis/skill_api'
 
+const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 const rankingMetricOptions = [
   { label: '安装最多', value: 'installs' },
   { label: '点赞最多', value: 'likes' }
 ]
-const sourceFilters = [
-  { value: 'all', label: '全部来源' },
-  { value: 'market', label: '市场发布' },
-  { value: 'shared', label: '团队共享' },
-  { value: 'builtin', label: '系统内置' }
-]
 const personalSourceFilters = [
   { key: 'all', label: '全部' },
-  { key: 'private', label: '私人' },
-  { key: 'shared', label: '共享' },
-  { key: 'system', label: '系统' }
+  { key: 'created', label: '我创建的' },
+  { key: 'installed', label: '市场已安装' },
+  { key: 'shared', label: '团队共享' },
+  { key: 'system', label: '系统内置' }
 ]
 const query = ref('')
-const sourceFilter = ref('all')
 const selectedCategory = ref('all')
-const personalOpen = ref(true)
+const activeView = ref(route.query.view === 'market' || route.query.tab === 'market' ? 'market' : 'personal')
 const rankingsOpen = ref(false)
 const rankingMetric = ref('installs')
 const rankingScope = ref('company')
@@ -339,33 +304,54 @@ const pageSize = 100
 let requestSequence = 0
 let legacyRequestSequence = 0
 let installedRequestSequence = 0
-const error = ref('')
+const personalError = ref('')
+const marketError = ref('')
 const busySlug = ref('')
 const managementOpen = ref(false)
-const personalTab = ref('skills')
+const releaseView = ref(false)
+const publishOpen = ref(false)
+const publishSkill = ref(null)
 const personalSource = ref('all')
 const personalQuery = ref('')
 const combinedCards = computed(() => combineSkillCards(cards.value, legacyCards.value))
-const visibleCards = computed(() => filterSkillCards(combinedCards.value, query.value, sourceFilter.value, selectedCategory.value))
+const visibleCards = computed(() => filterSkillCards(combinedCards.value, query.value, 'market', selectedCategory.value))
 const catalogEmptyState = computed(() => {
-  if (query.value.trim()) return {
-    title: '没有找到匹配的技能',
-    hint: sourceFilter.value === 'all' ? '换个关键词试试。' : '换个关键词，或切回全部来源。'
-  }
-  if (sourceFilter.value !== 'all') {
-    const sourceName = sourceFilters.find((item) => item.value === sourceFilter.value)?.label || '该来源'
-    return {
-      title: `${selectedCategory.value === 'all' ? '暂无' : '该方向暂无'}${sourceName}技能`,
-      hint: '切回全部来源查看其他技能。'
-    }
-  }
+  if (query.value.trim()) return { title: '没有找到匹配的技能', hint: '换个关键词试试。' }
   return selectedCategory.value === 'all'
-    ? { title: '这里还没有技能', hint: '可以上传个人技能，或请同事发布到市场。' }
-    : { title: '这个方向还没有技能', hint: '切换方向或上传新技能。' }
+    ? { title: '市场里还没有技能', hint: '可以先创建个人技能，再申请发布到市场。' }
+    : { title: '这个方向还没有技能', hint: '切换方向查看其他技能。' }
 })
-const personalSpaceGroups = computed(() => personalSpaceSkillGroups(legacyCards.value, installedCards.value, userStore.uid))
-const searchedPersonalSpaceGroups = computed(() => searchPersonalSpaceSkillGroups(personalSpaceGroups.value, personalQuery.value))
+/** 先按作者身份折叠安装，再隐藏失去可见性的市场详情。 */
+function safePersonalItem(item) {
+  if (item.kind === 'personal' && item.market_install?.visible === false) {
+    return { ...item, market_install: marketInstallManagementItems([item.market_install])[0] }
+  }
+  if (item.kind === 'market' && item.visible === false) {
+    return { ...marketInstallManagementItems([item])[0], kind: 'market' }
+  }
+  return item
+}
+const personalSpaceGroups = computed(() => {
+  const groups = personalSpaceSkillGroups(legacyCards.value, installedCards.value, userStore.uid)
+  return Object.fromEntries(Object.entries(groups).map(([source, items]) => [source, items.map(safePersonalItem)]))
+})
+const personalSourceGroups = computed(() => {
+  const privateItems = personalSpaceGroups.value.private
+  return {
+    all: personalSpaceGroups.value.all,
+    created: privateItems.filter((item) => item.kind === 'personal'),
+    installed: privateItems.filter((item) => item.kind === 'market' || item.market_installed_version),
+    shared: personalSpaceGroups.value.shared,
+    system: personalSpaceGroups.value.system
+  }
+})
+const searchedPersonalSpaceGroups = computed(() => searchPersonalSpaceSkillGroups(personalSourceGroups.value, personalQuery.value))
 const filteredPersonalItems = computed(() => searchedPersonalSpaceGroups.value[personalSource.value])
+const ownedSkills = computed(() => personalSourceGroups.value.created)
+const ownedCount = computed(() => ownedSkills.value.length)
+const installedCount = computed(() => personalSourceGroups.value.installed.length)
+const availableSharedCount = computed(() => personalSpaceGroups.value.shared.length + personalSpaceGroups.value.system.length)
+const hasManageableSharedSkills = computed(() => legacyCards.value.some((item) => item.source_scope !== 'personal' && canManageSkillRecord(item)))
 const pendingRequestCount = computed(() => requests.value.filter((item) => item.status === 'pending').length)
 const detailOpen = ref(false)
 const detailLoading = ref(false)
@@ -426,7 +412,9 @@ const marketScopeLabel = (item) => {
 const sourceLabel = (item) => item.kind === 'market'
   ? `市场 · ${marketScopeLabel(item)}`
   : item.source_type === 'builtin' ? '系统内置' : '共享技能'
-const requestStatusLabel = (status) => ({ pending: '待审核', approved: '已发布', rejected: '已驳回' })[status] || status
+const personalItemOrigin = (item) => item.kind === 'personal'
+  ? '我创建的'
+  : item.kind === 'market' ? '市场已安装' : item.source_type === 'builtin' ? '系统内置' : '团队共享'
 /** 个人空间同时说明原件、市场安装及过期授权。 */
 const personalItemStatus = (item) => {
   if (item.kind === 'existing') return item.source_type === 'builtin' ? '系统内置' : '共享技能'
@@ -456,6 +444,22 @@ const ownPersonalSkillFor = (item) => ownPersonalSkill(item, legacyCards.value, 
 /** 详情响应补上当前已授权共享副本的可用状态。 */
 const marketCardWithSharedStatus = (item) => combineSkillCards([item], legacyCards.value)[0]
 
+/** 页面切换写入路由，详情返回时默认恢复个人清单。 */
+function selectView(view) {
+  activeView.value = view
+  managementOpen.value = false
+  releaseView.value = false
+  const nextQuery = { ...route.query, tab: 'skills' }
+  if (view === 'market') nextQuery.view = 'market'
+  else delete nextQuery.view
+  router.replace({ path: route.path, query: nextQuery })
+}
+
+function openPublish(item) {
+  publishSkill.value = item
+  publishOpen.value = true
+}
+
 function openCard(item) {
   if (item.kind === 'market') return openDetail(item.slug)
   router.push(skillDetailRoute(item))
@@ -469,10 +473,6 @@ function openPersonalItem(item) {
 function openManagementMarket(slug) {
   managementOpen.value = false
   openDetail(slug)
-}
-
-function selectSourceFilter(key) {
-  sourceFilter.value = key
 }
 
 /** 切换方向并重新加载该方向的市场分页。 */
@@ -529,7 +529,7 @@ async function fetchLegacy() {
     const items = (await listSkillCards({ refreshPersonal: true }))?.data || []
     if (requestId === legacyRequestSequence) legacyCards.value = items
   } catch (failure) {
-    if (requestId === legacyRequestSequence) error.value = errorText(failure)
+    if (requestId === legacyRequestSequence) personalError.value = errorText(failure)
   } finally {
     if (requestId === legacyRequestSequence) legacyLoading.value = false
   }
@@ -579,20 +579,25 @@ async function refresh() {
   const requestId = ++requestSequence
   loading.value = true
   loadingMore.value = false
-  error.value = ''
+  personalError.value = ''
+  marketError.value = ''
   const legacyRefresh = fetchLegacy()
-  const installedRefresh = fetchInstalled().catch((failure) => { if (requestId === requestSequence) error.value = errorText(failure) })
+  const installedRefresh = fetchInstalled().catch((failure) => { if (requestId === requestSequence) personalError.value = errorText(failure) })
   try {
     const items = (await listMarketSkills({ query: query.value, category: selectedCategory.value, limit: pageSize }))?.data || []
     if (requestId !== requestSequence) return
     cards.value = items
     hasMore.value = items.length === pageSize
   } catch (failure) {
-    if (requestId === requestSequence) error.value = errorText(failure)
+    if (requestId === requestSequence) marketError.value = errorText(failure)
   } finally {
     if (requestId === requestSequence) loading.value = false
     await Promise.all([legacyRefresh, installedRefresh])
   }
+}
+
+async function refreshHome() {
+  await Promise.all([refresh(), fetchRequests()])
 }
 
 async function loadMore() {
@@ -777,7 +782,7 @@ async function review() {
     const outsideDepartment = reviewApproved.value && scope === 'department' && !userStore.isSuperAdmin && publishedDepartmentId != null && Number(userStore.departmentId) !== Number(publishedDepartmentId)
     if (reviewApproved.value && !outsideDepartment) {
       query.value = ''
-      sourceFilter.value = 'market'
+      selectView('market')
     }
     await Promise.all([openRequests(), refresh()])
     if (outsideDepartment) message.info(`已发布到${departmentNames.value[publishedDepartmentId] || `部门 ${publishedDepartmentId}`}；当前账号不在该部门，市场目录不会展示此技能`)
@@ -790,29 +795,65 @@ async function review() {
 }
 
 watch(managementOpen, (open) => { if (!open) refresh() })
+watch(() => route.query.view, (view, previousView) => {
+  activeView.value = view === 'market' ? 'market' : 'personal'
+  if (view !== previousView) {
+    managementOpen.value = false
+    releaseView.value = false
+  }
+})
 onMounted(() => { refresh(); fetchRequests(); fetchDepartmentNames() })
-defineExpose({ loading: computed(() => loading.value || legacyLoading.value || installedLoading.value) })
+defineExpose({ loading: computed(() => activeView.value === 'market' ? loading.value : legacyLoading.value || installedLoading.value) })
 </script>
 
 <style scoped lang="less">
 .skill-market { min-height: 100%; color: var(--color-text); }
-.skill-hub-layout { display: grid; grid-template-columns: minmax(0, 1fr) 318px; min-height: 100%; }
-.skill-hub-layout.personal-collapsed { grid-template-columns: minmax(0, 1fr); }
-.skill-hub-main { min-width: 0; padding: 28px var(--page-padding) 48px; }
-.market-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 25px; }
-.market-heading-copy { display: flex; align-items: center; gap: 13px; min-width: 0; }
-.market-heading-icon { display: grid; flex: none; place-items: center; width: 46px; height: 46px; border-radius: 13px; background: var(--main-50); color: var(--main-600); }
-.market-heading h2 { margin: 0 0 3px; font-size: 24px; font-weight: 650; }
-.market-heading p { margin: 0; color: var(--color-text-secondary); font-size: 13px; }
-.market-heading-actions, .market-toolbar, .market-toolbar-actions { display: flex; align-items: center; gap: 10px; }
-.market-heading-actions { flex: none; }
-.personal-toggle { display: inline-flex; align-items: center; gap: 7px; }
-.market-toolbar { flex-wrap: wrap; justify-content: space-between; margin-bottom: 20px; }
-.market-search { width: min(370px, 100%); flex: 1 1 230px; }
-.market-toolbar-actions { flex-wrap: wrap; }
-.market-source-filter { display: inline-flex; align-items: center; gap: 8px; color: var(--color-text-secondary); font-size: 13px; }
-.market-source-filter :deep(.ant-select) { min-width: 136px; }
+.skill-view-tabs { display: flex; gap: 30px; margin: 0 var(--page-padding); border-bottom: 1px solid var(--gray-150); }
+.skill-view-tabs button { margin-bottom: -1px; padding: 19px 3px 14px; border: 0; border-bottom: 3px solid transparent; background: none; color: var(--color-text-secondary); cursor: pointer; font-size: 17px; }
+.skill-view-tabs button[aria-selected="true"] { border-bottom-color: var(--main-500); color: var(--main-600); font-weight: 700; }
+.skill-view-tabs button:hover { color: var(--main-600); }
+.skill-view-content { max-width: 1440px; margin: 0 auto; padding: 31px var(--page-padding) 60px; }
+.skill-page-heading, .skill-page-title, .skill-page-actions, .market-toolbar { display: flex; align-items: center; gap: 14px; }
+.skill-page-heading { justify-content: space-between; flex-wrap: wrap; margin-bottom: 25px; }
+.skill-page-title { min-width: 0; }
+.skill-page-icon { display: grid; flex: none; place-items: center; width: 54px; height: 54px; border-radius: 16px; background: var(--main-50); color: var(--main-600); }
+.skill-page-title h2 { margin: 0 0 5px; font-size: 29px; line-height: 1.2; font-weight: 700; }
+.skill-page-title p { margin: 0; color: var(--color-text-secondary); font-size: 13px; }
+.skill-page-actions { justify-content: flex-end; flex-wrap: wrap; }
+.market-toolbar { justify-content: space-between; flex-wrap: wrap; margin-bottom: 20px; }
+.market-search { width: min(390px, 100%); flex: 1 1 230px; }
+.market-result-count { color: var(--color-text-tertiary); font-size: 12px; }
 .market-rankings-button { display: inline-flex; align-items: center; gap: 7px; }
+.skill-overview { display: flex; flex-wrap: wrap; gap: 0; margin-bottom: 25px; border-block: 1px solid var(--gray-150); }
+.skill-overview > div { display: flex; align-items: baseline; gap: 7px; padding: 17px 25px 17px 0; margin-right: 25px; color: var(--color-text-secondary); font-size: 13px; }
+.skill-overview > div:not(:last-child) { border-right: 1px solid var(--gray-150); }
+.skill-overview strong { color: var(--color-text); font-size: 23px; line-height: 1; }
+.skill-list-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
+.skill-list-heading h3 { margin: 0 0 3px; font-size: 19px; }
+.skill-list-heading p { margin: 0; color: var(--color-text-secondary); font-size: 12px; }
+.skill-list-toolbar { display: flex; justify-content: space-between; align-items: flex-end; gap: 15px; flex-wrap: wrap; margin-bottom: 15px; }
+.personal-source-filters { display: flex; gap: 16px; overflow-x: auto; max-width: 100%; border-bottom: 1px solid var(--gray-150); }
+.personal-source-filters button { display: inline-flex; flex: none; align-items: center; gap: 5px; padding: 9px 2px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--color-text-secondary); cursor: pointer; font-size: 13px; }
+.personal-source-filters button.active { border-bottom-color: var(--main-500); color: var(--main-600); font-weight: 650; }
+.personal-source-filters button span { color: var(--color-text-tertiary); font-size: 11px; }
+.personal-search { width: min(300px, 100%); }
+.skill-list { overflow: hidden; border: 1px solid var(--gray-150); border-radius: 12px; background: var(--color-bg-container); }
+.skill-list-header, .skill-row { display: grid; grid-template-columns: minmax(190px, 2fr) minmax(110px, 1fr) minmax(130px, 1fr) auto; align-items: center; column-gap: 14px; }
+.skill-list-header { padding: 12px 20px; background: var(--gray-0); color: var(--color-text-tertiary); font-size: 12px; }
+.skill-list-header span:last-child { text-align: right; }
+.skill-row { min-height: 76px; padding: 13px 20px; border-top: 1px solid var(--gray-150); }
+.skill-row:first-child { border-top: 0; }
+.skill-row-name { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.skill-row-name > span:last-child { min-width: 0; }
+.skill-row-name button { display: block; overflow: hidden; max-width: 100%; padding: 0; border: 0; background: none; color: var(--color-text); text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; font-size: 14px; font-weight: 650; }
+.skill-row-name button:hover { color: var(--main-600); }
+.skill-row-name strong { font-size: 14px; }
+.skill-row-name small, .skill-row-origin small { display: block; overflow: hidden; max-width: 100%; margin-top: 3px; color: var(--color-text-tertiary); text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.skill-row-icon { display: grid; flex: none; place-items: center; width: 39px; height: 39px; border-radius: 10px; background: var(--main-50); color: var(--main-600); }
+.skill-row-origin, .skill-row-status { color: var(--color-text-secondary); font-size: 12px; }
+.skill-row-status.is-unavailable { color: var(--color-warning-700); }
+.skill-row-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.skill-list-hint { margin: 13px 0 0; color: var(--color-text-tertiary); font-size: 12px; }
 .ranking-controls { margin-bottom: 10px; }
 .ranking-metric-tabs { display: flex; gap: 16px; border-bottom: 1px solid var(--gray-150); }
 .ranking-metric-tabs button { padding: 7px 2px 10px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--color-text-secondary); cursor: pointer; font-size: 14px; }
@@ -856,31 +897,8 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .market-empty { display: grid; justify-items: center; gap: 8px; padding: 80px 16px; color: var(--color-text-secondary); }
 .market-empty strong { color: var(--color-text); }
 .market-error { margin-bottom: 16px; }
-.personal-space { min-width: 0; padding: 29px 18px 28px; border-left: 1px solid var(--gray-150); background: var(--gray-0); }
-.personal-space-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 18px; }
-.personal-space-heading h3 { margin: 0; font-size: 17px; font-weight: 650; }
-.personal-space-heading span { color: var(--color-text-tertiary); font-size: 12px; }
-.personal-tabs { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; margin-bottom: 18px; }
-.personal-tabs button { min-height: 35px; border: 1px solid var(--gray-150); border-radius: 7px; color: var(--color-text-secondary); background: var(--color-bg-container); cursor: pointer; }
-.personal-tabs button.active { border-color: var(--main-500); color: var(--color-bg-container); background: var(--main-500); }
-.personal-pending { display: inline-grid; place-items: center; min-width: 16px; height: 16px; margin-left: 4px; padding: 0 3px; border-radius: 8px; background: var(--color-warning-100); color: var(--color-warning-700); font-size: 11px; }
-.personal-search { margin-bottom: 13px; }
-.personal-source-filters { display: flex; gap: 3px; overflow-x: auto; margin: -1px 0 14px; border-bottom: 1px solid var(--gray-150); scrollbar-width: thin; }
-.personal-source-filters button { display: inline-flex; flex: none; align-items: center; gap: 3px; padding: 7px 5px 8px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--color-text-secondary); cursor: pointer; font-size: 12px; }
-.personal-source-filters button.active { border-bottom-color: var(--main-500); color: var(--main-600); font-weight: 600; }
-.personal-source-filters button span { font-size: 11px; color: var(--color-text-tertiary); }
-.personal-list { display: grid; gap: 8px; }
-.personal-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 11px; border: 1px solid var(--gray-150); border-radius: 9px; color: var(--color-text); background: var(--color-bg-container); }
-.personal-item:hover { border-color: var(--main-400); }
-.personal-item-main { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; padding: 0; border: 0; text-align: left; color: inherit; background: none; cursor: pointer; }
-.personal-item-icon { display: grid; flex: none; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--main-600); background: var(--main-50); }
-.personal-item-copy { display: grid; gap: 2px; min-width: 0; flex: 1; }
-.personal-item-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
-.personal-item-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-tertiary); font-size: 11px; }
-.personal-item-chevron { flex: none; color: var(--color-text-tertiary); }
 .personal-empty { padding: 32px 12px; text-align: center; color: var(--color-text-secondary); font-size: 13px; }
-.personal-manage { margin-top: 14px; }
-.market-categories button:focus-visible, .personal-tabs button:focus-visible, .personal-item-main:focus-visible, .market-card-title:focus-visible { outline: 2px solid var(--main-500); outline-offset: 2px; }
+.market-categories button:focus-visible, .skill-view-tabs button:focus-visible, .personal-source-filters button:focus-visible, .skill-row-name button:focus-visible, .market-card-title:focus-visible { outline: 2px solid var(--main-500); outline-offset: 2px; }
 .market-detail-heading h3 { margin: 0 0 3px; font-size: 22px; }
 .market-detail-heading span, .market-detail-meta { color: var(--color-text-secondary); font-size: 13px; }
 .market-detail > p { margin: 18px 0; line-height: 1.6; }
@@ -898,7 +916,7 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .market-request-actions { justify-content: flex-end; margin-top: 10px; }
 .market-request-review-reason { color: var(--color-warning-900); font-size: 12px; }
 .market-review-scope { display: block; margin: 18px 0; }
-@media (max-width: 1100px) { .skill-hub-layout { grid-template-columns: minmax(0, 1fr); } .personal-space { border-left: 0; border-top: 1px solid var(--gray-150); } }
-@media (max-width: 680px) { .market-heading { align-items: start; flex-direction: column; } .market-heading-actions { width: 100%; flex-wrap: wrap; } .market-heading-actions :deep(.ant-btn) { flex: 1; } .market-search, .market-toolbar-actions { width: 100%; } .market-toolbar-actions { justify-content: space-between; } .market-files { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); } .market-files-list { max-height: 120px; border-right: 0; border-bottom: 1px solid var(--gray-150); } .market-card-bottom { flex-wrap: wrap; } }
+@media (max-width: 900px) { .skill-list-header, .skill-row { grid-template-columns: minmax(180px, 1.5fr) minmax(100px, 1fr) minmax(130px, 1fr); } .skill-list-header span:last-child { display: none; } .skill-row-actions { grid-column: 1 / -1; justify-content: flex-start; padding-left: 51px; } }
+@media (max-width: 680px) { .skill-view-tabs { margin-inline: 18px; } .skill-view-content { padding: 24px 18px 50px; } .skill-page-heading { align-items: stretch; flex-direction: column; } .skill-page-actions { justify-content: flex-start; } .skill-overview > div { padding-right: 14px; margin-right: 14px; } .skill-list-heading { align-items: flex-start; flex-direction: column; } .skill-list-toolbar { align-items: stretch; flex-direction: column-reverse; } .personal-search, .market-search { width: 100%; } .skill-list-header { display: none; } .skill-row { grid-template-columns: minmax(0, 1fr); row-gap: 5px; padding: 14px; } .skill-row-name, .skill-row-origin, .skill-row-status, .skill-row-actions { grid-column: 1; } .skill-row-origin, .skill-row-status, .skill-row-actions { padding-left: 51px; } .skill-row-actions { grid-row: auto; flex-direction: row; justify-content: flex-start; margin-top: 5px; } .market-files { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); } .market-files-list { max-height: 120px; border-right: 0; border-bottom: 1px solid var(--gray-150); } .market-card-bottom { flex-wrap: wrap; } }
 @media (max-width: 480px) { .ranking-audience { align-items: stretch; flex-direction: column; gap: 6px; } .ranking-audience :deep(.ant-select) { width: 100%; } .ranking-list li { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; } .ranking-position { grid-column: 1; grid-row: 1; } .ranking-copy { grid-column: 2 / 4; grid-row: 1; } .ranking-count { grid-column: 2; grid-row: 2; } .ranking-list li :deep(.ant-btn) { grid-column: 3; grid-row: 2; } }
 </style>

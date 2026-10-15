@@ -330,7 +330,7 @@ const showAgreementConsent = computed(() => {
 const isFirstRun = ref(false)
 const loading = ref(false)
 const errorMessage = ref('')
-const agreementAccepted = ref(false)
+const agreementAccepted = ref(true)
 const serverStatus = ref('loading')
 const serverError = ref('')
 const healthChecking = ref(false)

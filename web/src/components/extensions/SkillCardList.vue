@@ -1,9 +1,27 @@
 <template>
-  <div class="skill-cards-page extension-page-root">
+  <div class="skill-cards-page extension-page-root" :class="{ 'toolbar-only': toolbarOnly }">
+    <div v-if="toolbarOnly" class="skill-home-tools">
+      <a-button v-if="userStore.isAdmin" @click="openShareRequests" :disabled="loading">
+        共享申请<span v-if="pendingShareRequestCount"> ({{ pendingShareRequestCount }})</span>
+      </a-button>
+      <a-upload
+        accept=".zip,.md"
+        :show-upload-list="false"
+        :custom-request="handleImportUpload"
+        :before-upload="beforeSkillUpload"
+        :disabled="importing"
+      >
+        <a-button type="primary" :loading="importing" class="lucide-icon-btn">
+          <Upload :size="14" />
+          <span>上传技能</span>
+        </a-button>
+      </a-upload>
+    </div>
+    <template v-else>
     <PageShoulder search-placeholder="搜索技能..." v-model:search="searchQuery">
       <template #actions>
         <template v-if="!isBatchDeleteMode">
-          <a-button v-if="userStore.isAdmin" @click="openShareRequests" :disabled="loading">
+          <a-button v-if="userStore.isAdmin && !governanceOnly" @click="openShareRequests" :disabled="loading">
             共享申请<span v-if="pendingShareRequestCount"> ({{ pendingShareRequestCount }})</span>
           </a-button>
           <a-button
@@ -14,6 +32,7 @@
             <span>批量管理</span>
           </a-button>
           <a-upload
+            v-if="!governanceOnly"
             accept=".zip,.md"
             :show-upload-list="false"
             :custom-request="handleImportUpload"
@@ -82,13 +101,13 @@
           <WandSparkles :size="22" />
         </div>
         <div class="skill-empty-title">
-          {{ searchQuery ? '没有匹配的 Skill' : '还没有添加 Skill' }}
+          {{ searchQuery ? '没有匹配的 Skill' : governanceOnly ? '没有需要治理的 Skill' : '还没有添加 Skill' }}
         </div>
         <div class="skill-empty-desc">
           {{
             searchQuery
               ? '换个关键词试试，或清空搜索条件。'
-              : '可以上传本地 Skill 文件。'
+              : governanceOnly ? '共享或管理其他成员的技能后，可在这里查看。' : '可以上传本地 Skill 文件。'
           }}
         </div>
       </div>
@@ -162,6 +181,7 @@
           <a-button :loading="catalogLoading" @click="fetchCatalog()">加载更多人员的 Skill</a-button>
         </div>
       </template>
+    </template>
     </template>
 
     <a-modal
@@ -694,7 +714,11 @@ const RETIRED_BUILTIN_SKILL_SLUGS = new Set(['image-gen', 'mysql-reporter'])
 
 const router = useRouter()
 const userStore = useUserStore()
-const props = defineProps({ marketInstalls: { type: Array, default: () => [] } })
+const props = defineProps({
+  marketInstalls: { type: Array, default: () => [] },
+  toolbarOnly: { type: Boolean, default: false },
+  governanceOnly: { type: Boolean, default: false }
+})
 const emit = defineEmits(['open-market', 'uninstall-market', 'updated'])
 
 const loading = ref(false)
@@ -814,6 +838,7 @@ const filteredMarketInstalls = computed(() => marketInstallManagementItems(props
 const catalogPersonalSkills = computed(() =>
   catalogCards.value
     .map((skill) => personalCatalogSkillForViewer(skill, userStore.uid))
+    .filter((skill) => !props.governanceOnly || skill.owner_uid !== userStore.uid)
     .filter(matchesSearch)
 )
 const getReadScope = (skill) =>
@@ -861,7 +886,9 @@ const skillGroups = computed(() => [
   },
   {
     key: 'personal',
-    title: userStore.isSuperAdmin
+    title: props.governanceOnly
+      ? '其他成员的个人 Skill'
+      : userStore.isSuperAdmin
       ? '全员个人 Skill'
       : userStore.isAdmin
         ? '本部门个人 Skill'
@@ -871,12 +898,12 @@ const skillGroups = computed(() => [
       ? []
       : userStore.isAdmin
         ? catalogPersonalSkills.value
-        : filteredInstalledSkills.value.filter((skill) => skill.sourceScope === 'personal')
+        : props.governanceOnly ? [] : filteredInstalledSkills.value.filter((skill) => skill.sourceScope === 'personal')
   },
   {
     key: 'market-installed',
     title: '我的市场安装',
-    skills: isBatchDeleteMode.value ? [] : filteredMarketInstalls.value
+    skills: isBatchDeleteMode.value || props.governanceOnly ? [] : filteredMarketInstalls.value
   }
 ])
 const visibleSkillGroups = computed(() =>
@@ -1544,7 +1571,7 @@ const closeInstallFlow = () => {
 const handleInstallFlowCompleted = async ({ success, failed }) => {
   if (failed === 0) message.success(`已添加 ${success} 个 Skill`)
   else message.warning(`安装完成：成功 ${success} 个，失败 ${failed} 个`)
-  await fetchSkills()
+  if (!props.toolbarOnly) await fetchSkills()
   if (success) emit('updated')
 }
 
@@ -1711,9 +1738,11 @@ watch(activeTab, () => {
 })
 
 onMounted(() => {
-  fetchSkills()
-  loadDepartments()
-  fetchShareRequests().catch(() => message.error('加载共享申请状态失败'))
+  if (!props.toolbarOnly) {
+    fetchSkills()
+    loadDepartments()
+  }
+  if (userStore.isAdmin && !props.governanceOnly) fetchShareRequests().catch(() => message.error('加载共享申请状态失败'))
   loadHistory()
 })
 
@@ -1730,6 +1759,8 @@ defineExpose({
 </style>
 
 <style lang="less" scoped>
+.skill-cards-page.toolbar-only { display: block; height: auto; min-height: 0; background: transparent; }
+.skill-home-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .skill-catalog-filters {
   display: flex;
   align-items: center;

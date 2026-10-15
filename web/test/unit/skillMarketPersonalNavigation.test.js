@@ -117,6 +117,11 @@ test('点击市场卡的查看个人技能进入个人详情', async () => {
     await setImmediate()
     await nextTick()
 
+    const marketTab = findAll(host, (item) => item.type === 'button' && item.props.role === 'tab' && visibleText(item).trim() === '技能市场')[0]
+    assert.ok(marketTab)
+    marketTab.props.onClick()
+    await nextTick()
+
     const action = findAll(host, (item) => item.type === 'slot' && visibleText(item).trim() === '查看个人技能')[0]
     assert.ok(action, '市场卡应显示“查看个人技能”操作')
     action.props.onClick()

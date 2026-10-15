@@ -38,6 +38,7 @@ import SkillMarket from '@/components/extensions/SkillMarket.vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import DataBaseView from '@/views/DataBaseView.vue'
 import { useUserStore } from '@/stores/user'
+import { nextExtensionTabQuery } from './extensionTabQuery.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -72,12 +73,7 @@ const normalizeTab = (tab) => {
 }
 
 const replaceTabQuery = (tab) => {
-  const query = { ...route.query }
-  if (tab === defaultTabKey.value) {
-    delete query.tab
-  } else {
-    query.tab = tab
-  }
+  const query = nextExtensionTabQuery(route.query, tab, defaultTabKey.value)
   router.replace({ query })
 }
 
