@@ -11,12 +11,13 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from server.routers.skill_router import skills, user_skills
 from server.utils.auth_middleware import get_db, get_required_user
 from yuxi.agents.skills import sharing
+from yuxi.agents.skills import service as skill_service
 from yuxi.permissions import ResourcePermission, resolve_skill_permission
 from yuxi.storage.postgres.models_business import (
     Base,
@@ -69,6 +70,7 @@ async def test_skill_share_http_uses_snapshot_and_department_review(monkeypatch,
     monkeypatch.setattr(sharing, "personal_skills_root", lambda _uid: personal_root)
     monkeypatch.setattr(sharing, "get_skill_data_dir", lambda: tmp_path)
     monkeypatch.setattr(sharing, "get_skills_root_dir", lambda: shared_root)
+    monkeypatch.setattr(skill_service, "get_skill_projection_dir", lambda: tmp_path / "projections")
 
     async def no_dependencies(**_kwargs):
         """本例仅验证申请和发布，不加载独立 MCP 服务。"""
@@ -222,6 +224,82 @@ async def test_skill_share_http_uses_snapshot_and_department_review(monkeypatch,
             )
             assert immutable_dependencies.status_code == 400, immutable_dependencies.text
 
+            current = User(
+                uid="credit-admin-peer", username="credit-admin-peer", password_hash="x", role="admin", department_id=1
+            )
+            cards = await client.get("/api/system/skills")
+            assert cards.status_code == 200, cards.text
+            peer_card = next(card for card in cards.json()["data"] if card["slug"] == "credit-check")
+            assert peer_card["can_manage"] is True
+            assert peer_card["department_managed"] is True
+            disabled = await client.put("/api/system/skills/credit-check/enabled", json={"enabled": False})
+            assert disabled.status_code == 200, disabled.text
+            assert disabled.json()["data"]["enabled"] is False
+            disabled_cards = await client.get("/api/system/skills")
+            assert any(
+                card["slug"] == "credit-check" and card["can_manage"] and not card["enabled"]
+                for card in disabled_cards.json()["data"]
+            )
+            own_department_scope = {
+                "version": 2,
+                "read_scope": {"access_level": "department", "department_ids": [1]},
+                "manage_scope": None,
+            }
+            self_delegated_scope = {
+                **own_department_scope,
+                "manage_scope": {"access_level": "user", "user_uids": ["credit-admin-peer"]},
+            }
+            self_delegation = await client.put(
+                "/api/system/skills/credit-check/share-config", json={"share_config": self_delegated_scope}
+            )
+            assert self_delegation.status_code == 404, self_delegation.text
+            widened_after_self_delegation = await client.put(
+                "/api/system/skills/credit-check/share-config",
+                json={
+                    "share_config": {
+                        **self_delegated_scope,
+                        "read_scope": {"access_level": "global"},
+                    }
+                },
+            )
+            assert widened_after_self_delegation.status_code == 404, widened_after_self_delegation.text
+            async with sessions() as db:
+                saved = await db.scalar(select(Skill).where(Skill.slug == "credit-check"))
+                assert saved.share_config["read_scope"]["department_ids"] == [1]
+                assert saved.share_config["manage_scope"] is None
+                assert saved.share_config["owner_department_id"] == 1
+            forged_origin = await client.put(
+                "/api/system/skills/credit-check/share-config",
+                json={"share_config": {**own_department_scope, "owner_department_id": 2}},
+            )
+            assert forged_origin.status_code == 400, forged_origin.text
+            for denied_scope in (
+                {"access_level": "global"},
+                {"access_level": "department", "department_ids": [2]},
+                {"access_level": "department", "department_ids": [1, 2]},
+                {"access_level": "user", "user_uids": ["target-credit"]},
+            ):
+                response = await client.put(
+                    "/api/system/skills/credit-check/share-config",
+                    json={"share_config": {"version": 2, "read_scope": denied_scope, "manage_scope": None}},
+                )
+                assert response.status_code == 404, response.text
+            cross_department_edit = await client.put(
+                "/api/system/skills/credit-check/share-config",
+                json={
+                    "share_config": {
+                        **own_department_scope,
+                        "edit_scope": {"access_level": "user", "user_uids": ["target-risk"]},
+                    }
+                },
+            )
+            assert cross_department_edit.status_code == 404, cross_department_edit.text
+            enabled = await client.put("/api/system/skills/credit-check/enabled", json={"enabled": True})
+            assert enabled.status_code == 200, enabled.text
+            current = User(uid="other-admin", username="other-admin", password_hash="x", role="admin", department_id=2)
+            forbidden_toggle = await client.put("/api/system/skills/credit-check/enabled", json={"enabled": False})
+            assert forbidden_toggle.status_code == 404, forbidden_toggle.text
+
             current = User(uid="super-admin", username="super-admin", password_hash="x", role="superadmin")
             widened_scope = await client.put(
                 "/api/system/skills/credit-check/share-config",
@@ -298,6 +376,130 @@ async def test_skill_share_http_uses_snapshot_and_department_review(monkeypatch,
             assert resolve_skill_permission(target, published) == ResourcePermission.READ
             person_release = await db.get(Skill, 2)
             assert person_release.share_config["read_scope"] == user_scope
+    finally:
+        await engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_engine.dispose()
+
+
+async def test_uploaded_skill_keeps_publisher_department_when_scope_narrows(monkeypatch, tmp_path: Path):
+    """先全公司发布再收窄时，同部门管理员才获得继承管理权。"""
+    schema = f"pytest_skill_origin_{uuid.uuid4().hex[:12]}"
+    admin_engine = create_async_engine(os.environ["POSTGRES_URL"])
+    async with admin_engine.begin() as connection:
+        await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    engine = create_async_engine(os.environ["POSTGRES_URL"], connect_args={"server_settings": {"search_path": schema}})
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    shared_root = tmp_path / "shared"
+    shared_root.mkdir()
+    monkeypatch.setattr(skill_service, "get_skills_root_dir", lambda: shared_root)
+    monkeypatch.setattr(skill_service, "get_skill_drafts_root_dir", lambda: tmp_path / "drafts")
+    monkeypatch.setattr(skill_service, "get_skill_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(skill_service, "get_skill_projection_dir", lambda: tmp_path / "projections")
+    current = User(uid="publisher", username="publisher", password_hash="x", role="admin", department_id=1)
+    app = FastAPI()
+    app.include_router(user_skills, prefix="/api")
+    app.include_router(skills, prefix="/api")
+
+    async def provide_user():
+        return current
+
+    async def provide_db():
+        async with sessions() as db:
+            yield db
+
+    app.dependency_overrides[get_required_user] = provide_user
+    app.dependency_overrides[get_db] = provide_db
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda conn: Base.metadata.create_all(
+                    conn,
+                    tables=[
+                        Department.__table__,
+                        User.__table__,
+                        Skill.__table__,
+                        MarketSkill.__table__,
+                        MarketSkillRelease.__table__,
+                        MarketSkillInstall.__table__,
+                        MarketSkillLike.__table__,
+                    ],
+                )
+            )
+            await connection.execute(text("INSERT INTO departments (id, name) VALUES (1, 'Credit'), (2, 'Risk')"))
+        async with sessions() as db:
+            db.add_all(
+                [
+                    current,
+                    User(uid="peer", username="peer", password_hash="x", role="admin", department_id=1),
+                    User(uid="outsider", username="outsider", password_hash="x", role="admin", department_id=2),
+                ]
+            )
+            await db.commit()
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as archive:
+            archive.writestr(
+                "scope-shift/SKILL.md",
+                "---\nname: scope-shift\ndescription: scope shift skill\n---\n# Scope shift\n",
+            )
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            prepared = await client.post(
+                "/api/skills/import/prepare",
+                files={"file": ("scope-shift.zip", zip_buffer.getvalue(), "application/zip")},
+            )
+            assert prepared.status_code == 200, prepared.text
+            draft_id = prepared.json()["data"]["draft_id"]
+            confirmed = await client.post(
+                f"/api/skills/install-drafts/{draft_id}/confirm",
+                json={
+                    "share_config": {
+                        "version": 2,
+                        "read_scope": {"access_level": "global"},
+                        "manage_scope": None,
+                        "owner_department_id": 2,
+                    }
+                },
+            )
+            assert confirmed.status_code == 200, confirmed.text
+            assert confirmed.json()["data"][0]["success"] is True
+            async with sessions() as db:
+                published = await db.scalar(select(Skill).where(Skill.slug == "scope-shift"))
+                assert published.share_config["owner_department_id"] == 1
+                assert published.share_config["read_scope"]["access_level"] == "global"
+
+            current = User(uid="peer", username="peer", password_hash="x", role="admin", department_id=1)
+            before = await client.get("/api/system/skills")
+            assert before.status_code == 200, before.text
+            before_card = next(card for card in before.json()["data"] if card["slug"] == "scope-shift")
+            assert before_card["can_manage"] is False
+            assert before_card["department_managed"] is False
+
+            current = User(uid="publisher", username="publisher", password_hash="x", role="admin", department_id=1)
+            narrowed = await client.put(
+                "/api/system/skills/scope-shift/share-config",
+                json={
+                    "share_config": {
+                        "version": 2,
+                        "read_scope": {"access_level": "department", "department_ids": [1]},
+                        "manage_scope": None,
+                    }
+                },
+            )
+            assert narrowed.status_code == 200, narrowed.text
+
+            current = User(uid="peer", username="peer", password_hash="x", role="admin", department_id=1)
+            after = await client.get("/api/system/skills")
+            assert after.status_code == 200, after.text
+            after_card = next(card for card in after.json()["data"] if card["slug"] == "scope-shift")
+            assert after_card["can_manage"] is True
+            assert after_card["department_managed"] is True
+            disabled = await client.put("/api/system/skills/scope-shift/enabled", json={"enabled": False})
+            assert disabled.status_code == 200, disabled.text
+            current = User(uid="outsider", username="outsider", password_hash="x", role="admin", department_id=2)
+            denied = await client.put("/api/system/skills/scope-shift/enabled", json={"enabled": True})
+            assert denied.status_code == 404, denied.text
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:

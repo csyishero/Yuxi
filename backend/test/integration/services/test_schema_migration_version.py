@@ -6,6 +6,7 @@ import asyncio
 import os
 import uuid
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -17,11 +18,19 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.agents.mcp import service as mcp_service
 from yuxi.agents.toolkits import service as tool_service
-from yuxi.permissions import ResourcePermissionDenied, normalize_permission_config
+from yuxi import storage_migration
+from yuxi.permissions import (
+    ResourcePermission,
+    ResourcePermissionDenied,
+    normalize_permission_config,
+    resolve_skill_permission,
+)
 from yuxi.storage.postgres.manager import BUSINESS_SCHEMA_VERSION, KNOWLEDGE_SCHEMA_VERSION, PostgresManager
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import Department, MCPServer, User
+from yuxi.storage.postgres.models_business import Department, MCPServer, Skill, SkillShareRequest, User
 from yuxi.storage.postgres.models_knowledge import KnowledgeBase
+from yuxi.storage_migrations.v071_workdirs import V071WorkdirMigrationPlan
+from yuxi.utils.datetime_utils import utc_now_naive
 
 from server.routers.mcp_router import mcp
 from server.utils.auth_middleware import get_db, get_required_user
@@ -286,7 +295,7 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
             "ix_scheduled_agent_runs_job_created",
             "ix_scheduled_agent_runs_dispatching",
         }.issubset(scheduled_indexes)
-        assert BUSINESS_SCHEMA_VERSION == 12
+        assert BUSINESS_SCHEMA_VERSION == 13
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 
@@ -345,8 +354,188 @@ async def test_skill_share_request_table_migrates_from_previous_business_schema(
             )
         assert nullable == "YES"
         assert "uq_skill_share_requests_pending" in indexes
-        assert BUSINESS_SCHEMA_VERSION == 12
+        assert BUSINESS_SCHEMA_VERSION == 13
         assert (await manager.get_schema_versions())["business"] == 8
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
+async def test_skill_owner_department_backfill_requires_unique_proven_approval() -> None:
+    """存量共享技能只从唯一且内容、审核人、时间吻合的申请获得部门归属。"""
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_skill_owner_department")
+    try:
+        await manager.create_business_tables()
+        sessions = async_sessionmaker(scoped_engine, expire_on_commit=False)
+        now = utc_now_naive()
+        async with sessions() as db:
+            for slug in (
+                "approved",
+                "reused",
+                "wrong-reviewer",
+                "wrong-name",
+                "duplicated",
+                "orphan",
+                "legacy-upload",
+            ):
+                db.add(
+                    Skill(
+                        slug=slug,
+                        name=slug,
+                        description=f"{slug} description",
+                        source_type="upload" if slug == "legacy-upload" else "personal_share",
+                        tool_dependencies=[],
+                        mcp_dependencies=[],
+                        skill_dependencies=[],
+                        dir_path=f"shared/{slug}",
+                        content_hash="published-hash",
+                        share_config={
+                            "version": 2,
+                            "read_scope": {"access_level": "department", "department_ids": [3]},
+                            "manage_scope": None,
+                        },
+                        enabled=True,
+                        created_by="reviewer",
+                        created_at=now,
+                    )
+                )
+            for request_id, slug, created_at, reviewed_at in (
+                ("approved", "approved", now - timedelta(minutes=1), now + timedelta(minutes=1)),
+                ("reused", "reused", now + timedelta(minutes=1), now + timedelta(minutes=2)),
+                ("wrong-reviewer", "wrong-reviewer", now - timedelta(minutes=1), now + timedelta(minutes=1)),
+                ("wrong-name", "wrong-name", now - timedelta(minutes=1), now + timedelta(minutes=1)),
+                ("dup-1", "duplicated", now - timedelta(minutes=1), now + timedelta(minutes=1)),
+                ("dup-2", "duplicated", now - timedelta(minutes=1), now + timedelta(minutes=1)),
+                ("upload", "legacy-upload", now - timedelta(minutes=1), now + timedelta(minutes=1)),
+            ):
+                db.add(
+                    SkillShareRequest(
+                        id=request_id,
+                        owner_uid="owner",
+                        owner_department_id=3,
+                        personal_slug=slug,
+                        name="other-skill" if slug == "wrong-name" else slug,
+                        description=f"{slug} description",
+                        content_hash="snapshot-hash",
+                        status="approved",
+                        channel="shared",
+                        reviewer_uid="other-reviewer" if slug == "wrong-reviewer" else "reviewer",
+                        published_slug=slug,
+                        department_ids=[3],
+                        created_at=created_at,
+                        reviewed_at=reviewed_at,
+                    )
+                )
+            await db.commit()
+
+        await manager.backfill_skill_owner_department_provenance()
+        await manager.backfill_skill_owner_department_provenance()
+        async with sessions() as db:
+            items = {item.slug: item for item in (await db.scalars(select(Skill))).all()}
+            admin = SimpleNamespace(uid="peer-admin", role="admin", department_id=3)
+            assert items["approved"].share_config["owner_department_id"] == 3
+            assert resolve_skill_permission(admin, items["approved"]) == ResourcePermission.MANAGE
+            for slug in ("reused", "wrong-reviewer", "wrong-name", "duplicated", "orphan", "legacy-upload"):
+                assert "owner_department_id" not in items[slug].share_config
+                assert resolve_skill_permission(admin, items[slug]) == ResourcePermission.READ
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
+async def test_business_v12_migrator_backfills_skill_owner_and_records_v13_idempotently(monkeypatch, tmp_path) -> None:
+    """真实迁移入口先回填存量 Skill，再发布业务版本 13，重复运行不重写。"""
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_skill_v12_migration")
+    try:
+        manager.AsyncSession = async_sessionmaker(scoped_engine, expire_on_commit=False)
+        await manager.create_business_tables()
+        await manager.create_schema_version_table()
+        await manager.record_schema_version("business", 12)
+        await manager.record_schema_version("knowledge", KNOWLEDGE_SCHEMA_VERSION)
+        now = utc_now_naive()
+        async with manager.AsyncSession() as db:
+            db.add(
+                Skill(
+                    slug="department-approved",
+                    name="department-approved",
+                    description="Department approved skill",
+                    source_type="personal_share",
+                    tool_dependencies=[],
+                    mcp_dependencies=[],
+                    skill_dependencies=[],
+                    dir_path="shared/department-approved",
+                    content_hash="published-hash",
+                    share_config={
+                        "version": 2,
+                        "read_scope": {"access_level": "department", "department_ids": [3]},
+                        "manage_scope": None,
+                    },
+                    created_by="reviewer",
+                    created_at=now,
+                )
+            )
+            db.add(
+                SkillShareRequest(
+                    id="approved-request",
+                    owner_uid="owner",
+                    owner_department_id=3,
+                    personal_slug="department-approved",
+                    name="department-approved",
+                    description="Department approved skill",
+                    content_hash="snapshot-hash",
+                    status="approved",
+                    channel="shared",
+                    reviewer_uid="reviewer",
+                    published_slug="department-approved",
+                    department_ids=[3],
+                    created_at=now - timedelta(minutes=1),
+                    reviewed_at=now + timedelta(minutes=1),
+                )
+            )
+            await db.commit()
+
+        async def no_effect(*_args, **_kwargs):
+            """隔离非 Schema 的运行时收敛。"""
+
+        async def read_empty_plan(_db):
+            """声明当前隔离库没有历史工作目录。"""
+            return V071WorkdirMigrationPlan(False, (), ())
+
+        monkeypatch.setattr(storage_migration, "pg_manager", manager)
+        monkeypatch.setattr(storage_migration, "read_v071_workdir_plan", read_empty_plan)
+        monkeypatch.setattr(storage_migration, "_legacy_skill_roots_exist", lambda: False)
+        monkeypatch.setattr(storage_migration, "_legacy_system_config_exists", lambda: False)
+        monkeypatch.setattr(storage_migration, "runtime_storage_requires_quiescence", lambda: False)
+        monkeypatch.setattr(storage_migration, "_converge_database_state", no_effect)
+        monkeypatch.setattr(storage_migration, "migrate_shared_skills", no_effect)
+        monkeypatch.setattr(storage_migration, "mark_v071_skills_migrated", lambda: None)
+        monkeypatch.setattr(storage_migration, "migrate_runtime_storage_identity", lambda: None)
+        monkeypatch.setattr(storage_migration, "get_legacy_storage_dir", lambda: tmp_path)
+        monkeypatch.setattr(manager, "close", no_effect)
+
+        await storage_migration.main()
+        async with scoped_engine.connect() as connection:
+            first_version = (
+                await connection.execute(
+                    text("SELECT version, applied_at FROM yuxi_schema_migrations WHERE domain = 'business'")
+                )
+            ).one()
+            first_config = await connection.scalar(
+                text("SELECT share_config FROM skills WHERE slug = 'department-approved'")
+            )
+        assert first_version.version == BUSINESS_SCHEMA_VERSION
+        assert first_config["owner_department_id"] == 3
+
+        await storage_migration.main()
+        async with scoped_engine.connect() as connection:
+            second_version = (
+                await connection.execute(
+                    text("SELECT version, applied_at FROM yuxi_schema_migrations WHERE domain = 'business'")
+                )
+            ).one()
+            second_config = await connection.scalar(
+                text("SELECT share_config FROM skills WHERE slug = 'department-approved'")
+            )
+        assert second_version == first_version
+        assert second_config == first_config
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 

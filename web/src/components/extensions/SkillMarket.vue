@@ -6,7 +6,7 @@
           <div class="market-heading-copy">
             <div class="market-heading-icon"><Blocks :size="23" /></div>
             <div>
-              <h2>技能</h2>
+              <h2>技能目录</h2>
               <p>找到适合任务的能力，在 Agent 中使用。</p>
             </div>
           </div>
@@ -30,28 +30,19 @@
             @search="refresh"
             @pressEnter="refresh"
           />
+          <div class="market-toolbar-actions">
+            <label class="market-source-filter">
+              <span>来源</span>
+              <a-select :value="sourceFilter" aria-label="技能来源" :options="sourceFilters" @change="selectSourceFilter" />
+            </label>
+            <a-button class="market-rankings-button" @click="openRankings"><ChartNoAxesColumn :size="16" /> 市场热门榜</a-button>
+          </div>
         </div>
-
-        <nav class="market-filters" aria-label="技能来源筛选">
-          <button
-            v-for="filter in sourceFilters"
-            :key="filter.key"
-            type="button"
-            :class="{ active: sourceFilter === filter.key }"
-            :aria-current="sourceFilter === filter.key ? 'page' : undefined"
-            @click="selectSourceFilter(filter.key)"
-          >{{ filter.label }}</button>
-        </nav>
 
         <nav class="market-categories" aria-label="技能方向筛选">
           <button type="button" :class="{ active: selectedCategory === 'all' }" :aria-current="selectedCategory === 'all' ? 'page' : undefined" @click="selectCategory('all')">全部方向</button>
           <button v-for="category in skillCategories" :key="category.value" type="button" :class="{ active: selectedCategory === category.value }" :aria-current="selectedCategory === category.value ? 'page' : undefined" @click="selectCategory(category.value)">{{ category.label }}</button>
         </nav>
-
-        <div v-if="sourceFilter === 'market'" class="market-subtools">
-          <span>市场技能按发布时间展示</span>
-          <a-button @click="openRankings"><ChartNoAxesColumn :size="16" /> 查看排行榜</a-button>
-        </div>
 
         <a-alert v-if="error" type="error" :message="error" show-icon class="market-error">
           <template #action><a-button size="small" @click="refresh">重试</a-button></template>
@@ -59,8 +50,8 @@
         <a-spin :spinning="loading || legacyLoading">
           <div v-if="!visibleCards.length && !loading && !legacyLoading" class="market-empty">
             <Store :size="28" />
-            <strong>{{ query ? '没有找到匹配的技能' : selectedCategory !== 'all' ? '这个方向还没有技能' : '这里还没有技能' }}</strong>
-            <span>{{ query ? '换个关键词试试。' : selectedCategory !== 'all' ? '切换方向或上传新技能。' : '可以上传个人技能，或请同事发布到市场。' }}</span>
+            <strong>{{ catalogEmptyState.title }}</strong>
+            <span>{{ catalogEmptyState.hint }}</span>
           </div>
           <div v-else class="market-grid">
             <article v-for="item in visibleCards" :key="`${item.kind}:${item.source_type || ''}:${item.owner_uid || ''}:${item.slug}`" class="market-card">
@@ -91,26 +82,29 @@
                   </a-button>
                 </template>
                 <template v-else>
-                  <span class="market-available">已可用</span>
-                  <a-button size="small" @click="openCard(item)">查看技能</a-button>
+                  <span class="market-available">{{ isDepartmentManagedSkill(item) ? '本部门可管理' : '已可用' }}</span>
+                  <a-button size="small" @click="openCard(item)">{{ canManageSkillRecord(item) ? '管理技能' : '查看技能' }}</a-button>
                 </template>
               </div>
             </article>
           </div>
-          <div v-if="hasMore && !loading && ['all', 'market', 'installed'].includes(sourceFilter)" class="market-more"><a-button :loading="loadingMore" @click="loadMore">加载更多</a-button></div>
+          <div v-if="hasMore && !loading && ['all', 'market'].includes(sourceFilter)" class="market-more"><a-button :loading="loadingMore" @click="loadMore">加载更多</a-button></div>
         </a-spin>
       </main>
 
       <aside v-show="personalOpen" id="skill-personal-space" class="personal-space" aria-label="个人空间">
-        <div class="personal-space-heading"><h3>个人空间</h3><span>{{ personalItems.length }} 项技能</span></div>
+        <div class="personal-space-heading"><h3>个人空间</h3><span v-if="personalTab === 'skills'">{{ filteredPersonalItems.length }} 项技能</span></div>
         <div class="personal-tabs" role="tablist" aria-label="个人空间视图">
           <button type="button" role="tab" :aria-selected="personalTab === 'skills'" :class="{ active: personalTab === 'skills' }" @click="personalTab = 'skills'">我的技能</button>
           <button type="button" role="tab" :aria-selected="personalTab === 'requests'" :class="{ active: personalTab === 'requests' }" @click="personalTab = 'requests'; fetchRequests()">我的审批<span v-if="pendingRequestCount" class="personal-pending">{{ pendingRequestCount }}</span></button>
         </div>
         <template v-if="personalTab === 'skills'">
-          <a-input v-model:value="personalQuery" allow-clear placeholder="搜索我的技能" class="personal-search" />
+          <a-input v-model:value="personalQuery" allow-clear placeholder="搜索技能" class="personal-search" />
+          <nav class="personal-source-filters" aria-label="个人空间技能来源">
+            <button v-for="filter in personalSourceFilters" :key="filter.key" type="button" :class="{ active: personalSource === filter.key }" :aria-current="personalSource === filter.key ? 'page' : undefined" @click="personalSource = filter.key">{{ filter.label }}<span>{{ searchedPersonalSpaceGroups[filter.key].length }}</span></button>
+          </nav>
           <a-spin :spinning="legacyLoading || installedLoading">
-            <div v-if="!filteredPersonalItems.length && !legacyLoading && !installedLoading" class="personal-empty">暂无个人技能。可先上传，再申请发布。</div>
+            <div v-if="!filteredPersonalItems.length && !legacyLoading && !installedLoading" class="personal-empty">{{ personalQuery ? '没有找到匹配的技能。' : personalSource === 'all' ? '暂无技能。可先上传或从市场安装。' : personalSource === 'private' ? '暂无私人技能。可先上传或从市场安装。' : '此分类暂无技能。' }}</div>
             <div v-else class="personal-list">
               <div v-for="item in filteredPersonalItems" :key="`${item.kind}:${item.slug}`" class="personal-item">
                 <button type="button" class="personal-item-main" :disabled="item.kind === 'market' && item.visible === false" @click="openPersonalItem(item)">
@@ -123,7 +117,7 @@
               </div>
             </div>
           </a-spin>
-          <a-button block class="personal-manage" @click="managementOpen = true">管理个人技能</a-button>
+          <a-button block class="personal-manage" @click="managementOpen = true">管理与上传</a-button>
         </template>
         <template v-else>
           <a-spin :spinning="requestsLoading">
@@ -142,34 +136,28 @@
     </div>
 
     <a-drawer v-model:open="managementOpen" title="技能管理与上传" width="min(1080px, 96vw)" class="skill-management-drawer">
-      <SkillCardList v-if="managementOpen" />
+      <SkillCardList v-if="managementOpen" :market-installs="installedCards" @open-market="openManagementMarket" @uninstall-market="confirmUninstall" @updated="fetchLegacy" />
     </a-drawer>
 
-    <a-drawer v-model:open="rankingsOpen" title="市场排行榜" width="min(520px, 96vw)" class="skill-rankings-drawer">
+    <a-drawer v-model:open="rankingsOpen" title="市场热门榜" width="min(520px, 96vw)" class="skill-rankings-drawer">
       <div class="ranking-controls">
-        <a-segmented v-model:value="rankingMetric" :options="rankingMetricOptions" @change="fetchRankings" />
-        <a-segmented v-model:value="rankingScope" :options="rankingScopeOptions" @change="fetchRankings" />
-        <a-select
-          v-if="rankingScope === 'department' && userStore.isSuperAdmin"
-          v-model:value="rankingDepartmentId"
-          class="ranking-department-select"
-          placeholder="选择部门"
-          aria-label="排行统计部门"
-          :options="rankingDepartmentOptions"
-          :loading="departmentLoading"
-          :disabled="departmentLoading || !rankingDepartmentOptions.length"
-          @change="fetchRankings"
-        />
+        <div class="ranking-metric-tabs" role="group" aria-label="榜单类型">
+          <button v-for="option in rankingMetricOptions" :key="option.value" type="button" :class="{ active: rankingMetric === option.value }" :aria-pressed="rankingMetric === option.value" @click="selectRankingMetric(option.value)">{{ option.label }}</button>
+        </div>
+        <div class="ranking-audience">
+          <span>统计成员</span>
+          <a-select :value="rankingAudience" aria-label="榜单统计成员" :options="rankingAudienceOptions" :loading="departmentLoading && userStore.isSuperAdmin" @change="selectRankingAudience" />
+        </div>
       </div>
       <a-alert v-if="userStore.isSuperAdmin && departmentError" type="error" :message="`部门列表加载失败：${departmentError}`" show-icon class="market-error">
         <template #action><a-button size="small" @click="fetchDepartmentNames">重试</a-button></template>
       </a-alert>
-      <p class="ranking-hint">{{ rankingScopeHint }}，仅展示你可查看的市场技能。</p>
+      <p class="ranking-hint">{{ rankingScopeHint }}的{{ rankingMetric === 'installs' ? '安装人数' : '点赞人数' }}排序，仅展示你可查看的市场技能。</p>
       <a-alert v-if="rankingError" type="error" :message="rankingError" show-icon class="market-error">
         <template #action><a-button size="small" @click="fetchRankings">重试</a-button></template>
       </a-alert>
       <a-spin :spinning="rankingsLoading">
-        <div v-if="!rankings.length && !rankingsLoading && !rankingError" class="personal-empty">暂无上榜技能</div>
+        <div v-if="!rankings.length && !rankingsLoading && !rankingError" class="personal-empty">暂无{{ rankingMetric === 'installs' ? '安装' : '点赞' }}记录</div>
         <ol v-else-if="rankings.length" class="ranking-list">
           <li v-for="(item, index) in rankings" :key="item.slug">
             <span class="ranking-position">{{ index + 1 }}</span>
@@ -267,7 +255,8 @@ import { message, Modal } from 'ant-design-vue'
 import { Blocks, BookOpen, ChartNoAxesColumn, ChevronRight, ClipboardList, Download, Heart, PanelRightClose, PanelRightOpen, Sparkles, Store } from '@lucide/vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import SkillCardList from '@/components/extensions/SkillCardList.vue'
-import { combineSkillCards, filterSkillCards, ownPersonalSkill, personalSkillItems } from '@/components/extensions/skillHubCatalog'
+import { canManageSkillRecord, isDepartmentManagedSkill } from '@/components/extensions/skillManagementAccess'
+import { combineSkillCards, filterSkillCards, ownPersonalSkill, personalSpaceSkillGroups, searchPersonalSpaceSkillGroups } from '@/components/extensions/skillHubCatalog'
 import { skillCategories, skillCategory, skillCategoryLabel } from '@/components/extensions/skillCategories'
 import { useUserStore } from '@/stores/user'
 import { departmentApi } from '@/apis/department_api'
@@ -294,15 +283,20 @@ import {
 const router = useRouter()
 const userStore = useUserStore()
 const rankingMetricOptions = [
-  { label: '安装榜', value: 'installs' },
-  { label: '点赞榜', value: 'likes' }
+  { label: '安装最多', value: 'installs' },
+  { label: '点赞最多', value: 'likes' }
 ]
 const sourceFilters = [
+  { value: 'all', label: '全部来源' },
+  { value: 'market', label: '市场发布' },
+  { value: 'shared', label: '团队共享' },
+  { value: 'builtin', label: '系统内置' }
+]
+const personalSourceFilters = [
   { key: 'all', label: '全部' },
-  { key: 'market', label: '市场' },
+  { key: 'private', label: '私人' },
   { key: 'shared', label: '共享' },
-  { key: 'builtin', label: '系统' },
-  { key: 'installed', label: '已安装' }
+  { key: 'system', label: '系统' }
 ]
 const query = ref('')
 const sourceFilter = ref('all')
@@ -316,15 +310,26 @@ const departmentNames = ref({})
 const departmentLoading = ref(false)
 const departmentError = ref('')
 const rankingDepartmentOptions = computed(() => Object.entries(departmentNames.value).map(([id, name]) => ({ value: Number(id), label: name })))
-const rankingScopeOptions = computed(() => [
+const rankingAudience = computed({
+  get: () => rankingScope.value === 'company'
+    ? 'company'
+    : userStore.isSuperAdmin ? `department:${rankingDepartmentId.value}` : 'department',
+  set: (value) => {
+    rankingScope.value = value === 'company' ? 'company' : 'department'
+    if (userStore.isSuperAdmin && value !== 'company') rankingDepartmentId.value = Number(value.split(':')[1])
+  }
+})
+const rankingAudienceOptions = computed(() => [
   { label: '全公司', value: 'company' },
-  { label: userStore.isSuperAdmin ? '单部门' : '本部门', value: 'department', disabled: !userStore.departmentId && !rankingDepartmentOptions.value.length }
+  ...(userStore.isSuperAdmin
+    ? rankingDepartmentOptions.value.map(({ value, label }) => ({ label, value: `department:${value}` }))
+    : userStore.departmentId ? [{ label: '本部门', value: 'department' }] : [])
 ])
 const rankingScopeHint = computed(() => {
-  if (rankingScope.value === 'company') return '按全公司当前成员统计'
+  if (rankingScope.value === 'company') return '按全公司当前成员'
   const departmentId = userStore.isSuperAdmin ? rankingDepartmentId.value : userStore.departmentId
   const departmentName = departmentNames.value[departmentId] || (Number(departmentId) === Number(userStore.departmentId) ? userStore.departmentName : '') || `部门 ${departmentId}`
-  return `按${departmentName}当前成员统计`
+  return `按${departmentName}当前成员`
 })
 const rankings = ref([])
 const rankingsLoading = ref(false)
@@ -340,19 +345,35 @@ const loadingMore = ref(false)
 const hasMore = ref(false)
 const pageSize = 100
 let requestSequence = 0
+let legacyRequestSequence = 0
 let installedRequestSequence = 0
 const error = ref('')
 const busySlug = ref('')
 const managementOpen = ref(false)
 const personalTab = ref('skills')
+const personalSource = ref('all')
 const personalQuery = ref('')
 const combinedCards = computed(() => combineSkillCards(cards.value, legacyCards.value))
 const visibleCards = computed(() => filterSkillCards(combinedCards.value, query.value, sourceFilter.value, selectedCategory.value))
-const personalItems = computed(() => personalSkillItems(legacyCards.value, installedCards.value, userStore.uid))
-const filteredPersonalItems = computed(() => {
-  const search = personalQuery.value.trim().toLowerCase()
-  return personalItems.value.filter((item) => !search || `${item.name} ${item.slug}`.toLowerCase().includes(search))
+const catalogEmptyState = computed(() => {
+  if (query.value.trim()) return {
+    title: '没有找到匹配的技能',
+    hint: sourceFilter.value === 'all' ? '换个关键词试试。' : '换个关键词，或切回全部来源。'
+  }
+  if (sourceFilter.value !== 'all') {
+    const sourceName = sourceFilters.find((item) => item.value === sourceFilter.value)?.label || '该来源'
+    return {
+      title: `${selectedCategory.value === 'all' ? '暂无' : '该方向暂无'}${sourceName}技能`,
+      hint: '切回全部来源查看其他技能。'
+    }
+  }
+  return selectedCategory.value === 'all'
+    ? { title: '这里还没有技能', hint: '可以上传个人技能，或请同事发布到市场。' }
+    : { title: '这个方向还没有技能', hint: '切换方向或上传新技能。' }
 })
+const personalSpaceGroups = computed(() => personalSpaceSkillGroups(legacyCards.value, installedCards.value, userStore.uid))
+const searchedPersonalSpaceGroups = computed(() => searchPersonalSpaceSkillGroups(personalSpaceGroups.value, personalQuery.value))
+const filteredPersonalItems = computed(() => searchedPersonalSpaceGroups.value[personalSource.value])
 const pendingRequestCount = computed(() => requests.value.filter((item) => item.status === 'pending').length)
 const detailOpen = ref(false)
 const detailLoading = ref(false)
@@ -411,6 +432,7 @@ const sourceLabel = (item) => item.kind === 'market'
 const requestStatusLabel = (status) => ({ pending: '待审核', approved: '已发布', rejected: '已驳回' })[status] || status
 /** 个人空间同时说明原件、市场安装及过期授权。 */
 const personalItemStatus = (item) => {
+  if (item.kind === 'existing') return item.source_type === 'builtin' ? '系统内置' : '共享技能'
   if (item.kind === 'market') {
     return item.visible === false
       ? `市场已安装 · 当前不可用 · v${item.installed_version}`
@@ -436,13 +458,17 @@ function openCard(item) {
 
 function openPersonalItem(item) {
   if (item.kind === 'market') return openDetail(item.slug)
-  router.push({ path: `/extensions/skill/${encodeURIComponent(item.slug)}`, query: { scope: 'personal' } })
+  if (item.kind === 'personal') return router.push({ path: `/extensions/skill/${encodeURIComponent(item.slug)}`, query: { scope: 'personal' } })
+  router.push(`/extensions/skill/${encodeURIComponent(item.slug)}`)
+}
+
+function openManagementMarket(slug) {
+  managementOpen.value = false
+  openDetail(slug)
 }
 
 function selectSourceFilter(key) {
-  const previous = sourceFilter.value
   sourceFilter.value = key
-  if (key === 'installed' || previous === 'installed') refresh()
 }
 
 /** 切换方向并重新加载该方向的市场分页。 */
@@ -460,6 +486,20 @@ function selectSubmitSkill(slug) {
 function openRankings() {
   rankingsOpen.value = true
   if (userStore.isSuperAdmin && !rankingDepartmentOptions.value.length) fetchDepartmentNames()
+  fetchRankings()
+}
+
+/** 仅在榜单指标变化时重新读取对应排名。 */
+function selectRankingMetric(metric) {
+  if (rankingMetric.value === metric) return
+  rankingMetric.value = metric
+  fetchRankings()
+}
+
+/** 选择公司或部门后使用同一个榜单接口刷新。 */
+function selectRankingAudience(audience) {
+  if (rankingAudience.value === audience) return
+  rankingAudience.value = audience
   fetchRankings()
 }
 
@@ -484,13 +524,15 @@ async function fetchRankings() {
 }
 
 async function fetchLegacy() {
+  const requestId = ++legacyRequestSequence
   legacyLoading.value = true
   try {
-    legacyCards.value = (await listSkillCards({ refreshPersonal: true }))?.data || []
+    const items = (await listSkillCards({ refreshPersonal: true }))?.data || []
+    if (requestId === legacyRequestSequence) legacyCards.value = items
   } catch (failure) {
-    error.value = errorText(failure)
+    if (requestId === legacyRequestSequence) error.value = errorText(failure)
   } finally {
-    legacyLoading.value = false
+    if (requestId === legacyRequestSequence) legacyLoading.value = false
   }
 }
 
@@ -542,7 +584,7 @@ async function refresh() {
   const legacyRefresh = fetchLegacy()
   const installedRefresh = fetchInstalled().catch((failure) => { if (requestId === requestSequence) error.value = errorText(failure) })
   try {
-    const items = (await listMarketSkills({ query: query.value, category: selectedCategory.value, installedOnly: sourceFilter.value === 'installed', limit: pageSize }))?.data || []
+    const items = (await listMarketSkills({ query: query.value, category: selectedCategory.value, limit: pageSize }))?.data || []
     if (requestId !== requestSequence) return
     cards.value = items
     hasMore.value = items.length === pageSize
@@ -559,7 +601,7 @@ async function loadMore() {
   const requestId = requestSequence
   loadingMore.value = true
   try {
-    const items = (await listMarketSkills({ query: query.value, category: selectedCategory.value, installedOnly: sourceFilter.value === 'installed', offset: cards.value.length, limit: pageSize }))?.data || []
+    const items = (await listMarketSkills({ query: query.value, category: selectedCategory.value, offset: cards.value.length, limit: pageSize }))?.data || []
     if (requestId !== requestSequence) return
     cards.value = [...cards.value, ...items]
     hasMore.value = items.length === pageSize
@@ -767,7 +809,7 @@ async function review() {
     }
     await Promise.all([openRequests(), refresh()])
     if (outsideDepartment) message.info('已发布到申请提交时所属部门；当前账号不在该部门，市场目录不会展示此技能')
-    else message.success(reviewApproved.value ? '已发布到市场，可在市场分类查看' : '已拒绝申请')
+    else message.success(reviewApproved.value ? '已发布到市场，可在技能目录查看' : '已拒绝申请')
   } catch (failure) {
     message.error(errorText(failure))
   } finally {
@@ -790,15 +832,23 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .market-heading-icon { display: grid; flex: none; place-items: center; width: 46px; height: 46px; border-radius: 13px; background: var(--main-50); color: var(--main-600); }
 .market-heading h2 { margin: 0 0 3px; font-size: 24px; font-weight: 650; }
 .market-heading p { margin: 0; color: var(--color-text-secondary); font-size: 13px; }
-.market-heading-actions, .market-toolbar { display: flex; align-items: center; gap: 10px; }
+.market-heading-actions, .market-toolbar, .market-toolbar-actions { display: flex; align-items: center; gap: 10px; }
 .market-heading-actions { flex: none; }
 .personal-toggle { display: inline-flex; align-items: center; gap: 7px; }
-.market-toolbar { flex-wrap: wrap; justify-content: space-between; margin-bottom: 18px; }
-.market-search { width: min(370px, 100%); }
-.market-subtools { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: -7px 0 16px; color: var(--color-text-secondary); font-size: 13px; }
-.market-subtools :deep(.ant-btn) { display: inline-flex; align-items: center; gap: 7px; }
-.ranking-controls { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
-.ranking-department-select { min-width: 160px; flex: 1; }
+.market-toolbar { flex-wrap: wrap; justify-content: space-between; margin-bottom: 20px; }
+.market-search { width: min(370px, 100%); flex: 1 1 230px; }
+.market-toolbar-actions { flex-wrap: wrap; }
+.market-source-filter { display: inline-flex; align-items: center; gap: 8px; color: var(--color-text-secondary); font-size: 13px; }
+.market-source-filter :deep(.ant-select) { min-width: 136px; }
+.market-rankings-button { display: inline-flex; align-items: center; gap: 7px; }
+.ranking-controls { margin-bottom: 10px; }
+.ranking-metric-tabs { display: flex; gap: 16px; border-bottom: 1px solid var(--gray-150); }
+.ranking-metric-tabs button { padding: 7px 2px 10px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--color-text-secondary); cursor: pointer; font-size: 14px; }
+.ranking-metric-tabs button:hover, .ranking-metric-tabs button.active { color: var(--main-600); }
+.ranking-metric-tabs button.active { border-bottom-color: var(--main-500); font-weight: 600; }
+.ranking-metric-tabs button:focus-visible { outline: 2px solid var(--main-500); outline-offset: -2px; }
+.ranking-audience { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; color: var(--color-text-secondary); font-size: 13px; }
+.ranking-audience :deep(.ant-select) { min-width: 180px; }
 .ranking-hint { margin-bottom: 18px; color: var(--color-text-secondary); font-size: 12px; }
 .ranking-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .ranking-list li { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 11px; border: 1px solid var(--gray-150); border-radius: 9px; }
@@ -807,12 +857,7 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .ranking-copy strong, .ranking-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ranking-copy small { color: var(--color-text-tertiary); font-size: 11px; }
 .ranking-count { flex: none; color: var(--color-text-secondary); font-size: 12px; }
-.market-filters { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--gray-150); margin-bottom: 22px; }
-.market-filters button { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 10px 14px 11px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--color-text-secondary); cursor: pointer; font-size: 13px; }
-.market-filters button.active { color: var(--main-600); border-bottom-color: var(--main-500); font-weight: 600; }
-.market-filters button:hover { color: var(--main-600); }
-.market-filters button span { color: var(--color-text-tertiary); font-size: 12px; }
-.market-categories { display: flex; gap: 8px; overflow-x: auto; padding: 0 0 14px; margin: -8px 0 17px; scrollbar-width: thin; }
+.market-categories { display: flex; gap: 8px; overflow-x: auto; padding: 0 0 14px; margin: 0 0 17px; scrollbar-width: thin; }
 .market-categories button { flex: none; padding: 5px 11px; border: 1px solid var(--gray-150); border-radius: 999px; background: var(--color-bg-container); color: var(--color-text-secondary); cursor: pointer; font-size: 12px; }
 .market-categories button:hover { border-color: var(--main-400); color: var(--main-600); }
 .market-categories button.active { border-color: var(--main-500); background: var(--main-50); color: var(--main-600); font-weight: 600; }
@@ -848,6 +893,10 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .personal-tabs button.active { border-color: var(--main-500); color: var(--color-bg-container); background: var(--main-500); }
 .personal-pending { display: inline-grid; place-items: center; min-width: 16px; height: 16px; margin-left: 4px; padding: 0 3px; border-radius: 8px; background: var(--color-warning-100); color: var(--color-warning-700); font-size: 11px; }
 .personal-search { margin-bottom: 13px; }
+.personal-source-filters { display: flex; gap: 3px; overflow-x: auto; margin: -1px 0 14px; border-bottom: 1px solid var(--gray-150); scrollbar-width: thin; }
+.personal-source-filters button { display: inline-flex; flex: none; align-items: center; gap: 3px; padding: 7px 5px 8px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--color-text-secondary); cursor: pointer; font-size: 12px; }
+.personal-source-filters button.active { border-bottom-color: var(--main-500); color: var(--main-600); font-weight: 600; }
+.personal-source-filters button span { font-size: 11px; color: var(--color-text-tertiary); }
 .personal-list { display: grid; gap: 8px; }
 .personal-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 11px; border: 1px solid var(--gray-150); border-radius: 9px; color: var(--color-text); background: var(--color-bg-container); }
 .personal-item:hover { border-color: var(--main-400); }
@@ -859,7 +908,7 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .personal-item-chevron { flex: none; color: var(--color-text-tertiary); }
 .personal-empty { padding: 32px 12px; text-align: center; color: var(--color-text-secondary); font-size: 13px; }
 .personal-manage { margin-top: 14px; }
-.market-filters button:focus-visible, .market-categories button:focus-visible, .personal-tabs button:focus-visible, .personal-item-main:focus-visible, .market-card-title:focus-visible { outline: 2px solid var(--main-500); outline-offset: 2px; }
+.market-categories button:focus-visible, .personal-tabs button:focus-visible, .personal-item-main:focus-visible, .market-card-title:focus-visible { outline: 2px solid var(--main-500); outline-offset: 2px; }
 .market-detail-heading h3 { margin: 0 0 3px; font-size: 22px; }
 .market-detail-heading span, .market-detail-meta { color: var(--color-text-secondary); font-size: 13px; }
 .market-detail > p { margin: 18px 0; line-height: 1.6; }
@@ -879,6 +928,6 @@ defineExpose({ loading: computed(() => loading.value || legacyLoading.value || i
 .market-request-actions { justify-content: flex-end; margin-top: 10px; }
 .market-review-scope { display: block; margin: 18px 0; }
 @media (max-width: 1100px) { .skill-hub-layout { grid-template-columns: minmax(0, 1fr); } .personal-space { border-left: 0; border-top: 1px solid var(--gray-150); } }
-@media (max-width: 680px) { .market-heading { align-items: start; flex-direction: column; } .market-heading-actions { width: 100%; flex-wrap: wrap; } .market-heading-actions :deep(.ant-btn) { flex: 1; } .market-files { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); } .market-files-list { max-height: 120px; border-right: 0; border-bottom: 1px solid var(--gray-150); } .market-card-bottom { flex-wrap: wrap; } }
-@media (max-width: 480px) { .ranking-list li { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; } .ranking-position { grid-column: 1; grid-row: 1; } .ranking-copy { grid-column: 2 / 4; grid-row: 1; } .ranking-count { grid-column: 2; grid-row: 2; } .ranking-list li :deep(.ant-btn) { grid-column: 3; grid-row: 2; } }
+@media (max-width: 680px) { .market-heading { align-items: start; flex-direction: column; } .market-heading-actions { width: 100%; flex-wrap: wrap; } .market-heading-actions :deep(.ant-btn) { flex: 1; } .market-search, .market-toolbar-actions { width: 100%; } .market-toolbar-actions { justify-content: space-between; } .market-files { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); } .market-files-list { max-height: 120px; border-right: 0; border-bottom: 1px solid var(--gray-150); } .market-card-bottom { flex-wrap: wrap; } }
+@media (max-width: 480px) { .ranking-audience { align-items: stretch; flex-direction: column; gap: 6px; } .ranking-audience :deep(.ant-select) { width: 100%; } .ranking-list li { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; } .ranking-position { grid-column: 1; grid-row: 1; } .ranking-copy { grid-column: 2 / 4; grid-row: 1; } .ranking-count { grid-column: 2; grid-row: 2; } .ranking-list li :deep(.ant-btn) { grid-column: 3; grid-row: 2; } }
 </style>

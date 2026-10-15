@@ -27,7 +27,7 @@ from yuxi.utils import logger
 from yuxi.utils.singleton import SingletonMeta
 
 AGENT_RUN_TERMINAL_STATUS_SQL = ", ".join(f"'{status}'" for status in AGENT_RUN_TERMINAL_STATUSES)
-BUSINESS_SCHEMA_VERSION = 12
+BUSINESS_SCHEMA_VERSION = 13
 KNOWLEDGE_SCHEMA_VERSION = 2
 SCHEMA_VERSION_TABLE = "yuxi_schema_migrations"
 AGENT_RUN_LEASE_SCHEMA_STATEMENTS = (
@@ -972,6 +972,44 @@ class PostgresManager(metaclass=SingletonMeta):
         async with self.async_engine.begin() as conn:
             await conn.execute(
                 text("ALTER TABLE skill_share_requests ADD COLUMN IF NOT EXISTS application_reason TEXT")
+            )
+
+    async def backfill_skill_owner_department_provenance(self) -> None:
+        """仅从唯一匹配的已批准共享申请回填 Skill 原归属部门。"""
+        self._check_initialized()
+        async with self.async_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    WITH approved_origin AS (
+                        SELECT request.*,
+                               COUNT(*) OVER (PARTITION BY request.published_slug) AS source_count
+                        FROM skill_share_requests AS request
+                        WHERE request.status = 'approved'
+                          AND request.channel = 'shared'
+                          AND request.published_slug IS NOT NULL
+                    )
+                    UPDATE skills AS skill
+                    SET share_config = jsonb_set(
+                        skill.share_config,
+                        '{owner_department_id}',
+                        to_jsonb(origin.owner_department_id),
+                        true
+                    )
+                    FROM approved_origin AS origin
+                    WHERE skill.slug = origin.published_slug
+                      AND origin.source_count = 1
+                      AND origin.owner_department_id IS NOT NULL
+                      AND origin.content_hash <> ''
+                      AND skill.source_type = 'personal_share'
+                      AND skill.content_hash IS NOT NULL
+                      AND skill.name = origin.name
+                      AND skill.description = origin.description
+                      AND skill.created_by = origin.reviewer_uid
+                      AND skill.created_at BETWEEN origin.created_at AND origin.reviewed_at
+                      AND skill.share_config->>'owner_department_id' IS NULL
+                    """
+                )
             )
 
     async def ensure_skill_market_schema(self) -> None:

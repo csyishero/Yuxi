@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 from yuxi.agents.skills import service as svc
 from yuxi.agents.toolkits import service as tool_service
+from yuxi.permissions import ResourcePermission, resolve_skill_permission
 from yuxi.storage.postgres.models_business import Skill, User
 
 
@@ -1242,15 +1243,92 @@ async def test_skill_upload_prepare_confirm_rewrites_conflicting_name(tmp_path: 
     results = await svc.confirm_skill_install_draft(
         _UnitOfWork(),
         draft_id=draft["draft_id"],
-        share_config=draft["default_share_config"],
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "department", "department_ids": [1]},
+            "manage_scope": None,
+        },
         operator=operator,
     )
 
     assert results[0]["slug"] == "demo-v2"
     assert results[0]["success"] is True
     assert FakeRepo.created_item.slug == "demo-v2"
+    assert FakeRepo.created_item.share_config["owner_department_id"] == 1
     skill_md = (tmp_path / "skill-sources/shared" / "demo-v2" / "SKILL.md").read_text(encoding="utf-8")
     assert "slug: demo-v2" in skill_md
+
+
+@pytest.mark.parametrize(
+    ("source_type", "read_scope", "forged_department_id", "initial_permission"),
+    [
+        ("upload", {"access_level": "department", "department_ids": [1]}, 2, ResourcePermission.MANAGE),
+        ("remote", {"access_level": "department", "department_ids": [1]}, 2, ResourcePermission.MANAGE),
+        ("upload", {"access_level": "department", "department_ids": [2]}, 2, ResourcePermission.NONE),
+        ("upload", {"access_level": "global"}, 2, ResourcePermission.READ),
+        ("remote", {"access_level": "global"}, 2, ResourcePermission.READ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_admin_shared_draft_origin_comes_from_operator_independent_of_read_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_type: str,
+    read_scope: dict,
+    forged_department_id: int,
+    initial_permission: ResourcePermission,
+):
+    """上传与远程草稿始终记录发布部门；收窄可见范围后才继承部门管理权。"""
+    draft_dir = tmp_path / "draft"
+    source_dir = draft_dir / "items" / "skill"
+    source_dir.mkdir(parents=True)
+    (source_dir / "SKILL.md").write_text(
+        "---\nname: provenance-test\ndescription: provenance test\n---\n# Provenance\n", encoding="utf-8"
+    )
+    draft_data = {
+        "created_by": "root",
+        "source_type": source_type,
+        "items": [{"slug": "provenance-test", "source_dir": "items/skill", "success": True}],
+    }
+    monkeypatch.setattr(svc, "_load_skill_draft", lambda _draft_id: (draft_dir, draft_data))
+
+    class FakeRepo:
+        created_item: Skill | None = None
+
+        def __init__(self, _db):
+            pass
+
+        async def exists_slug(self, _slug: str) -> bool:
+            return False
+
+        async def create(self, **kwargs) -> Skill:
+            self.__class__.created_item = Skill(**kwargs)
+            return self.__class__.created_item
+
+    monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
+    results = await svc.confirm_skill_install_draft(
+        _UnitOfWork(),
+        draft_id="draft",
+        share_config={
+            "version": 2,
+            "read_scope": read_scope,
+            "manage_scope": None,
+            "owner_department_id": forged_department_id,
+        },
+        operator=_user("root"),
+    )
+
+    assert results[0]["success"] is True
+    assert FakeRepo.created_item is not None
+    assert FakeRepo.created_item.share_config["owner_department_id"] == 1
+    peer_admin = _user("peer-admin")
+    assert resolve_skill_permission(peer_admin, FakeRepo.created_item) == initial_permission
+    FakeRepo.created_item.share_config["read_scope"] = {
+        "access_level": "department",
+        "department_ids": [1],
+        "user_uids": [],
+    }
+    assert resolve_skill_permission(peer_admin, FakeRepo.created_item) == ResourcePermission.MANAGE
 
 
 @pytest.mark.asyncio

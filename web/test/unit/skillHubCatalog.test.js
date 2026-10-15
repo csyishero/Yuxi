@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { combineSkillCards, filterSkillCards, ownPersonalSkill, personalSkillItems } from '../../src/components/extensions/skillHubCatalog.js'
+import { combineSkillCards, filterSkillCards, marketInstallManagementItems, ownPersonalSkill, personalSkillItems, personalSpaceSkillGroups, searchPersonalSpaceSkillGroups } from '../../src/components/extensions/skillHubCatalog.js'
 import { skillCategory, skillCategoryLabel } from '../../src/components/extensions/skillCategories.js'
 
 test('统一目录保留市场版本，个人和退役内置技能不重复出现', () => {
@@ -106,6 +106,58 @@ test('作者个人原件删除后市场安装仍显示，其他作者同名原�
   assert.equal(ownPersonalSkill({ ...market, owner_uid: 'bob' }, [{ slug: 'mine', source_scope: 'personal', owner_uid: 'alice' }], 'alice'), null)
   assert.deepEqual(personalSkillItems([], [market], 'alice').map((item) => [item.kind, item.slug]), [['market', 'mine-2']])
   assert.deepEqual(ownPersonalSkill(market, [{ slug: 'mine', source_scope: 'personal', owner_uid: 'alice' }], 'alice')?.slug, 'mine')
+})
+
+test('个人空间分类包含本人安装、共享和系统技能，全部视图折叠同源共享副本', () => {
+  const groups = personalSpaceSkillGroups(
+    [
+      { slug: 'mine', source_scope: 'personal', owner_uid: 'alice' },
+      { slug: 'brief-v2', source_scope: 'shared', source_type: 'personal_share', related_market_slug: 'brief-market' },
+      { slug: 'team', source_scope: 'shared', source_type: 'upload' },
+      { slug: 'knowledge-base', source_scope: 'builtin', source_type: 'builtin' },
+      { slug: 'other-personal', source_scope: 'personal', owner_uid: 'bob' },
+      { slug: 'disabled', source_scope: 'shared', enabled: false }
+    ],
+    [{ slug: 'brief-market', name: '简报', installed_version: 2, visible: true }],
+    'alice'
+  )
+  assert.deepEqual(groups.private.map((item) => item.slug), ['mine', 'brief-market'])
+  assert.deepEqual(groups.shared.map((item) => item.slug), ['brief-v2', 'team'])
+  assert.deepEqual(groups.system.map((item) => item.slug), ['knowledge-base'])
+  assert.deepEqual(groups.all.map((item) => item.slug), ['mine', 'brief-market', 'team', 'knowledge-base'])
+})
+
+test('个人空间搜索同步缩小所有来源分类的数量和列表', () => {
+  const groups = personalSpaceSkillGroups(
+    [
+      { slug: 'my-report', name: '周报助手', source_scope: 'personal', owner_uid: 'alice' },
+      { slug: 'team-report', name: '部门报告', source_scope: 'shared', source_type: 'upload' },
+      { slug: 'knowledge-base', name: '知识库', source_scope: 'builtin', source_type: 'builtin' }
+    ],
+    [{ slug: 'market-report', name: '报告市场版', installed_version: 1, visible: true }],
+    'alice'
+  )
+  const searched = searchPersonalSpaceSkillGroups(groups, '报告')
+  assert.deepEqual(searched.all.map((item) => item.slug), ['market-report', 'team-report'])
+  assert.deepEqual(searched.private.map((item) => item.slug), ['market-report'])
+  assert.deepEqual(searched.shared.map((item) => item.slug), ['team-report'])
+  assert.deepEqual(searched.system, [])
+  assert.deepEqual(searchPersonalSpaceSkillGroups(groups, '  KNOWLEDGE ').system.map((item) => item.slug), ['knowledge-base'])
+})
+
+test('旧市场安装仍可管理，但不冒充个人原件或公开详细信息', () => {
+  const cards = marketInstallManagementItems([
+    { slug: 'mine', installed_version: 1, visible: true, name: '简报' },
+    { slug: 'old', installed_version: 2, visible: false, name: '他人技能', description: '不应显示', owner_uid: 'bob', category: 'office_tools' },
+    { slug: 'not-installed', installed_version: null }
+  ])
+  assert.deepEqual(cards.map((item) => item.slug), ['mine', 'old'])
+  assert.ok(cards.every((item) => item.kind === 'market_install' && item.sourceScope === 'market_install'))
+  assert.equal(cards[1].visible, false)
+  assert.equal(cards[1].name, 'old')
+  assert.equal(cards[1].description, '')
+  assert.equal(cards[1].owner_uid, undefined)
+  assert.equal(cards[1].category, undefined)
 })
 
 test('目录按方向筛选，历史未分类技能归入其它', () => {

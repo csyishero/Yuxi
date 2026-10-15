@@ -58,7 +58,12 @@ from yuxi.agents.skills.sharing import (
     publish_personal_skill_directly,
     submit_skill_share_request,
 )
-from yuxi.permissions import resolve_skill_permission
+from yuxi.permissions import (
+    SKILL_PERMISSION_POLICY,
+    ResourcePermission,
+    resolve_resource_permission,
+    resolve_skill_permission,
+)
 from yuxi.services.mcp_reference_service import get_visible_mcp_reference_slugs, project_mcp_references
 from yuxi.agents.skills.remote_install import list_remote_skills, search_remote_skills
 from yuxi.storage.postgres.models_business import User
@@ -159,6 +164,13 @@ def _serialize_skill_for_user(item, user: User, visible_mcp_slugs: set[str] | No
     data["can_manage"] = user_can_manage_skill(user, item)
     data["effective_permission"] = resolve_skill_permission(user, item).value
     data["is_builtin"] = is_builtin_skill(item)
+    data["department_managed"] = (
+        user.role == "admin"
+        and item.source_type in {"upload", "remote", "personal_share"}
+        and getattr(item, "source_scope", "shared") == "shared"
+        and data["can_manage"]
+        and resolve_resource_permission(user, item, SKILL_PERMISSION_POLICY) != ResourcePermission.MANAGE
+    )
     return data
 
 

@@ -323,6 +323,8 @@ async def approve_skill_share_request(
         operator_uid=operator.uid,
     )
     await validate_personal_share_read_scope(db, read_scope=share_config["read_scope"], operator=operator)
+    if item.owner_department_id is not None:
+        share_config["owner_department_id"] = item.owner_department_id
 
     snapshot = await authorized_share_snapshot_path(db, request_id=request_id, operator=operator)
     parsed = await asyncio.to_thread(parse_skill_dir_metadata, snapshot)

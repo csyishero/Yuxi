@@ -130,7 +130,7 @@
             >
               <template #actions>
                 <button
-                  v-if="skill.sourceScope !== 'personal'"
+                  v-if="skill.sourceScope !== 'personal' && skill.kind !== 'market_install'"
                   type="button"
                   class="skill-enabled-action"
                   :class="{ enabled: skill.enabled !== false }"
@@ -144,6 +144,13 @@
                     <Minus :size="15" class="action-icon action-icon-minus" />
                   </template>
                 </button>
+              </template>
+              <template v-if="skill.kind === 'market_install'" #footer>
+                <div class="market-install-card-actions">
+                  <a-button v-if="skill.visible !== false" size="small" @click.stop="emit('open-market', skill.slug)">查看</a-button>
+                  <a-button v-if="skill.visible !== false" size="small" @click.stop="router.push('/agent-manage')">在 Agent 中配置</a-button>
+                  <a-button size="small" danger @click.stop="emit('uninstall-market', skill)">卸载</a-button>
+                </div>
               </template>
             </InfoCard>
           </div>
@@ -228,6 +235,13 @@
             :message="`共享申请：${shareRequestStatusLabel(previewShareRequest.status)}${previewShareRequest.published_slug ? ` · ${previewShareRequest.published_slug}` : ''}${previewShareRequest.review_note ? ` · ${previewShareRequest.review_note}` : ''}`"
             class="skill-share-warning"
           />
+          <a-alert
+            v-if="isDepartmentManagedSkill(previewSkill)"
+            type="info"
+            show-icon
+            message="你可以管理本部门共享 Skill 的启停和生命周期；可用范围保持本部门，已发布副本的内容与依赖只读。"
+            class="skill-share-warning"
+          />
           <p v-if="previewShareRequest?.application_reason" class="skill-share-application-summary">
             申请原因：{{ previewShareRequest.application_reason }}
           </p>
@@ -278,7 +292,7 @@
               class="lucide-icon-btn"
               @click="goToPreviewSkillManagement"
             >
-              <span>{{ previewSkill.sourceScope === 'personal' ? '管理个人 Skill' : '去管理' }}</span>
+              <span>{{ previewSkill.sourceScope === 'personal' ? '管理个人 Skill' : canManageSkill(previewSkill) ? '管理技能' : '查看技能' }}</span>
             </a-button>
           </div>
         </div>
@@ -710,6 +724,12 @@ import {
 } from '@lucide/vue'
 import { skillApi } from '@/apis/skill_api'
 import { skillCategoryLabel } from './skillCategories.js'
+import { marketInstallManagementItems } from './skillHubCatalog.js'
+import {
+  canManageSkillRecord,
+  isDepartmentManagedSkill,
+  personalCatalogSkillForViewer
+} from './skillManagementAccess.js'
 import ExtensionCardGrid from './ExtensionCardGrid.vue'
 import SkillInstallFlowModal from './SkillInstallFlowModal.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
@@ -728,6 +748,8 @@ const RETIRED_BUILTIN_SKILL_SLUGS = new Set(['image-gen', 'mysql-reporter'])
 
 const router = useRouter()
 const userStore = useUserStore()
+const props = defineProps({ marketInstalls: { type: Array, default: () => [] } })
+const emit = defineEmits(['open-market', 'uninstall-market', 'updated'])
 
 const loading = ref(false)
 const importing = ref(false)
@@ -848,9 +870,10 @@ const installedSkillCards = computed(() =>
 )
 
 const filteredInstalledSkills = computed(() => installedSkillCards.value.filter(matchesSearch))
+const filteredMarketInstalls = computed(() => marketInstallManagementItems(props.marketInstalls).filter(matchesSearch))
 const catalogPersonalSkills = computed(() =>
   catalogCards.value
-    .map((skill) => ({ ...skill, sourceType: 'personal', sourceScope: 'personal' }))
+    .map((skill) => personalCatalogSkillForViewer(skill, userStore.uid))
     .filter(matchesSearch)
 )
 const getReadScope = (skill) =>
@@ -909,6 +932,11 @@ const skillGroups = computed(() => [
       : userStore.isAdmin
         ? catalogPersonalSkills.value
         : filteredInstalledSkills.value.filter((skill) => skill.sourceScope === 'personal')
+  },
+  {
+    key: 'market-installed',
+    title: '我的市场安装',
+    skills: isBatchDeleteMode.value ? [] : filteredMarketInstalls.value
   }
 ])
 const visibleSkillGroups = computed(() =>
@@ -1060,6 +1088,7 @@ const confirmDirectPublish = async () => {
     )
     directPublishVisible.value = false
     message.success('共享 Skill 已发布，个人原件仍保留')
+    emit('updated')
   } catch (error) {
     message.error(error?.response?.data?.detail || '发布失败')
     return
@@ -1199,6 +1228,7 @@ const reviewShareRequest = async (request, action) => {
     if (action === 'approve') {
       await skillApi.approveSkillShareRequest(request.id, readScope, reviewNotes[request.id] || '')
       message.success('共享 Skill 已发布，个人原件仍保留')
+      emit('updated')
     } else {
       await skillApi.rejectSkillShareRequest(request.id, reviewNotes[request.id] || '')
       message.success('申请已驳回')
@@ -1329,6 +1359,11 @@ const getSkillShareLabel = (skill) => {
 }
 
 const skillCardTags = (skill) => {
+  if (skill.kind === 'market_install') return [
+    { name: skill.visible === false ? '市场安装 · 当前不可用' : '市场已安装', color: skill.visible === false ? 'orange' : 'blue' },
+    { name: `v${skill.installed_version}`, color: 'gray' },
+    ...(skill.visible === false ? [] : [{ name: skillCategoryLabel(skill.category), color: 'blue' }])
+  ]
   if (skill.sourceScope === 'personal') {
     const request = isOtherPersonalSkill(skill)
       ? null
@@ -1350,6 +1385,7 @@ const skillCardTags = (skill) => {
   }
   return [
     { name: getSkillShareLabel(skill), color: 'gray' },
+    ...(isDepartmentManagedSkill(skill) ? [{ name: '本部门可管理', color: 'green' }] : []),
     { name: skillCategoryLabel(skill.category), color: 'blue' },
     ...(skill.sourceType === 'personal_share' && skill.version
       ? [{ name: `v${skill.version}`, color: 'blue' }]
@@ -1362,7 +1398,7 @@ const isOtherPersonalSkill = (skill) =>
   skill?.sourceScope === 'personal' &&
   !!skill?.owner_uid &&
   skill.owner_uid !== userStore.uid
-const canManageSkill = (skill) => !!skill && !isOtherPersonalSkill(skill) && skill.can_manage !== false
+const canManageSkill = (skill) => !isOtherPersonalSkill(skill) && canManageSkillRecord(skill)
 const isSkillToggling = (slug) => togglingSkillSlugs.value.includes(slug)
 const navigateToDetail = (skill) => {
   router.push({
@@ -1406,6 +1442,12 @@ const goToPreviewSkillManagement = () => {
 }
 
 const handleCardClick = (skill) => {
+  if (skill.kind === 'market_install') {
+    if (isBatchDeleteMode.value) return
+    if (skill.visible === false) return message.info('当前市场安装已不可用，可在此卸载旧安装')
+    emit('open-market', skill.slug)
+    return
+  }
   if (isBatchDeleteMode.value) {
     handleToggleCardSelect(skill.slug)
   } else {
@@ -1447,6 +1489,7 @@ const handleToggleSkillEnabled = async (skill) => {
         : { ...previewSkill.value, enabled }
     }
     message.success(`Skill 已${enabled ? '启用' : '禁用'}`)
+    emit('updated')
   } catch (error) {
     message.error(error?.response?.data?.detail || error.message || '更新 Skill 启用状态失败')
   } finally {
@@ -1484,6 +1527,7 @@ const confirmDeletePreviewSkill = () => {
         closeSkillPreview()
         previewSkill.value = null
         await fetchSkills()
+        emit('updated')
       } catch (error) {
         message.error(error?.response?.data?.detail || error.message || '卸载 Skill 失败')
       } finally {
@@ -1548,6 +1592,7 @@ const handleBatchDelete = () => {
 
         exitBatchDeleteMode()
         await fetchSkills()
+        if (successList.length) emit('updated')
       } catch (error) {
         message.error(error?.response?.data?.detail || error.message || '批量删除失败')
       } finally {
@@ -1654,6 +1699,7 @@ const handleInstallFlowCompleted = async ({ success, failed }) => {
   if (failed === 0) message.success(`已添加 ${success} 个 Skill`)
   else message.warning(`安装完成：成功 ${success} 个，失败 ${failed} 个`)
   await fetchSkills()
+  if (success) emit('updated')
 }
 
 const handleImportUpload = async ({ file, onSuccess, onError }) => {
@@ -1863,6 +1909,12 @@ defineExpose({
 .skill-catalog-more {
   padding: 12px var(--page-padding);
   color: var(--color-text-secondary);
+}
+
+.market-install-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 @media (max-width: 600px) {

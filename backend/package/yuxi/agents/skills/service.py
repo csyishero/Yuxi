@@ -32,7 +32,13 @@ from yuxi.config import (
     get_skill_data_dir,
     get_skill_projection_dir,
 )
-from yuxi.permissions import ResourcePermission, normalize_permission_config, resolve_skill_permission
+from yuxi.permissions import (
+    SKILL_PERMISSION_POLICY,
+    ResourcePermission,
+    normalize_permission_config,
+    resolve_resource_permission,
+    resolve_skill_permission,
+)
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.mcp_reference_service import get_visible_mcp_reference_slugs, project_mcp_references
@@ -1803,6 +1809,9 @@ async def enable_personal_skills_for_agent_config(
 def _resolved_shared_skill(item: Skill, *, shadowed_by_personal: bool = False) -> ResolvedSkill:
     """将数据库 Skill 适配为统一的有效 Skill 描述。"""
     source_scope = "builtin" if is_builtin_skill(item) else "shared"
+    share_config = normalize_permission_config(item.share_config)
+    if item.share_config.get("owner_department_id") is not None:
+        share_config["owner_department_id"] = item.share_config["owner_department_id"]
     return ResolvedSkill(
         id=item.id,
         slug=item.slug,
@@ -1813,9 +1822,7 @@ def _resolved_shared_skill(item: Skill, *, shadowed_by_personal: bool = False) -
         source_dir=_resolve_skill_dir(item),
         enabled=bool(item.enabled),
         created_by=item.created_by,
-        share_config=normalize_permission_config(
-            item.share_config,
-        ),
+        share_config=share_config,
         tool_dependencies=normalize_string_list(item.tool_dependencies),
         mcp_dependencies=normalize_string_list(item.mcp_dependencies),
         skill_dependencies=normalize_string_list(item.skill_dependencies),
@@ -2137,6 +2144,8 @@ async def confirm_skill_install_draft(
         source_type=source_type,
         allowed_access_levels=set(get_allowed_skill_access_levels(operator)),
     )
+    if operator.role == "admin" and operator.department_id is not None and source_type in {"upload", "remote"}:
+        normalized_share_config["owner_department_id"] = operator.department_id
 
     repo = SkillRepository(db)
     skills_root = get_skills_root_dir()
@@ -2549,6 +2558,13 @@ async def update_skill_share_config(
 ) -> Skill:
     item = await get_manageable_skill_or_raise(db, operator, slug)
     _ensure_non_builtin(item)
+    if isinstance(share_config, dict) and "owner_department_id" in share_config:
+        raise ValueError("Skill 所属部门不可通过共享配置修改")
+    if (
+        operator.role == "admin"
+        and resolve_resource_permission(operator, item, SKILL_PERMISSION_POLICY) != ResourcePermission.MANAGE
+    ):
+        raise ValueError("仅凭部门管理权限无权修改 Skill 共享范围")
     normalized = normalize_skill_share_config(
         share_config,
         operator_uid=operator.uid,
@@ -2559,6 +2575,8 @@ async def update_skill_share_config(
         if normalized["manage_scope"] is not None:
             raise ValueError("已审核发布的 Skill 不允许额外分配管理权限")
         await validate_personal_share_read_scope(db, read_scope=normalized["read_scope"], operator=operator)
+    if item.share_config.get("owner_department_id") is not None:
+        normalized["owner_department_id"] = item.share_config["owner_department_id"]
     repo = SkillRepository(db)
     updated = await repo.update_share_config(item, share_config=normalized, updated_by=operator.uid)
     await apply_skill_projection_policy_change(db, slug)

@@ -77,3 +77,47 @@ export function personalSkillItems(existingCards, marketCards, uid) {
     ...marketCards.filter((item) => item.installed_version && !ownInstalled.has(item.own_personal_slug)).map((item) => ({ ...item, kind: 'market' }))
   ]
 }
+
+/** 个人空间按来源列出本人可使用的技能；全部视图只保留同源技能的一个入口。 */
+export function personalSpaceSkillGroups(existingCards, marketCards, uid) {
+  const privateItems = personalSkillItems(existingCards, marketCards, uid)
+  const publicItems = filterSkillCards(combineSkillCards([], existingCards), '', 'all')
+  const sharedItems = publicItems.filter((item) => item.source_type !== 'builtin')
+  const systemItems = publicItems.filter((item) => item.source_type === 'builtin')
+  const installedMarketSlugs = new Set(privateItems.flatMap((item) => {
+    if (item.kind === 'market') return item.visible === false ? [] : [item.slug]
+    return item.market_slug && item.market_visible !== false ? [item.market_slug] : []
+  }))
+  return {
+    all: [
+      ...privateItems,
+      ...publicItems.filter((item) => !installedMarketSlugs.has(item.related_market_slug || item.slug))
+    ],
+    private: privateItems,
+    shared: sharedItems,
+    system: systemItems
+  }
+}
+
+/** 对个人空间各来源使用同一搜索条件，让分类数量与列表一致。 */
+export function searchPersonalSpaceSkillGroups(groups, query) {
+  const search = query.trim().toLowerCase()
+  return Object.fromEntries(Object.entries(groups).map(([source, items]) => [
+    source,
+    items.filter((item) => !search || `${item.name || ''} ${item.slug}`.toLowerCase().includes(search))
+  ]))
+}
+
+/** 市场安装在管理页作为只读的本人安装记录，不伪装成可编辑个人原件。 */
+export function marketInstallManagementItems(marketCards) {
+  return marketCards
+    .filter((item) => item.installed_version)
+    .map((item) => ({
+      ...(item.visible === false
+        ? { slug: item.slug, name: item.slug, description: '', installed_version: item.installed_version, visible: false }
+        : item),
+      kind: 'market_install',
+      sourceType: 'market_install',
+      sourceScope: 'market_install'
+    }))
+}
