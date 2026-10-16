@@ -26,7 +26,8 @@ from yuxi.utils.upload_utils import read_upload_with_limit
 from yuxi.workspace.workdir import Workdir
 
 ATTACHMENT_ALLOWED_EXTENSIONS: tuple[str, ...] = ()
-MAX_ATTACHMENT_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
+MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024
+ATTACHMENT_TOO_LARGE_MESSAGE = f"附件过大，当前仅支持 {MAX_ATTACHMENT_SIZE_BYTES // (1024 * 1024)} MB 以内的文件"
 MAX_ATTACHMENT_MARKDOWN_CHARS = 32_000  # TODO: 转 MARKDOWN的时候，不应该裁剪
 TMP_ATTACHMENT_PREFIX = "tmp/chat_attachments"
 TMP_ATTACHMENT_PARSE_EXTENSIONS = (*PDF_FILE_EXTENSIONS, *IMAGE_FILE_EXTENSIONS)
@@ -281,7 +282,7 @@ async def upload_tmp_attachment_view(*, file: UploadFile, current_uid: str) -> d
         file_content = await read_upload_with_limit(
             file,
             max_size_bytes=MAX_ATTACHMENT_SIZE_BYTES,
-            too_large_message="附件过大，当前仅支持 5 MB 以内的文件",
+            too_large_message=ATTACHMENT_TOO_LARGE_MESSAGE,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -402,8 +403,7 @@ async def confirm_tmp_thread_attachments_view(
                 raise HTTPException(status_code=400, detail=f"读取临时附件失败: {exc}") from exc
 
             if len(file_content) > MAX_ATTACHMENT_SIZE_BYTES:
-                max_size_mb = MAX_ATTACHMENT_SIZE_BYTES // (1024 * 1024)
-                raise HTTPException(status_code=400, detail=f"附件过大，当前仅支持 {max_size_mb} MB 以内的文件")
+                raise HTTPException(status_code=400, detail=ATTACHMENT_TOO_LARGE_MESSAGE)
 
             parsed_markdown = None
             parsed_object_name = str(item.get("parsed_object_name") or "")

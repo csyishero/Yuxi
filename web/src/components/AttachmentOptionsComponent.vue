@@ -13,7 +13,7 @@
           class="config-dropdown-item"
           :class="{ disabled }"
           :disabled="disabled"
-          title="支持任意文件格式 ≤ 5 MB"
+          title="支持任意文件格式 ≤ 20 MB"
           @click="handleAttachmentClick"
         >
           <FileText :size="15" class="config-dropdown-item-icon" />

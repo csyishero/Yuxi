@@ -281,6 +281,37 @@ async def test_upload_tmp_attachment_writes_user_scoped_minio_object(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_upload_tmp_attachment_accepts_exactly_20_mib(monkeypatch):
+    fake_minio = FakeMinioClient()
+    monkeypatch.setattr(service, "get_minio_client", lambda: fake_minio)
+    content = b"x" * (20 * 1024 * 1024)
+
+    response = await service.upload_tmp_attachment_view(
+        file=FakeUpload("report.txt", content, "text/plain"),
+        current_uid="user-1",
+    )
+
+    assert response["file_size"] == 20 * 1024 * 1024
+    assert fake_minio.objects[("knowledgebases", response["object_name"])] == content
+
+
+@pytest.mark.asyncio
+async def test_upload_tmp_attachment_rejects_above_20_mib_without_storing(monkeypatch):
+    fake_minio = FakeMinioClient()
+    monkeypatch.setattr(service, "get_minio_client", lambda: fake_minio)
+
+    with pytest.raises(service.HTTPException) as exc_info:
+        await service.upload_tmp_attachment_view(
+            file=FakeUpload("report.txt", b"x" * (20 * 1024 * 1024 + 1), "text/plain"),
+            current_uid="user-1",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "附件过大，当前仅支持 20 MB 以内的文件"
+    assert fake_minio.objects == {}
+
+
+@pytest.mark.asyncio
 async def test_upload_tmp_attachment_cleans_only_expired_user_tmp_groups(monkeypatch):
     fake_minio = FakeMinioClient()
     now = datetime.now(UTC)
@@ -411,6 +442,63 @@ async def test_confirm_tmp_thread_attachments_writes_realtime_workdir(confirm_at
     assert fake_repo.workdir_backend.files[_scope_path(stored["original_path"])] == b"pdf-bytes"
     assert fake_repo.workdir_backend.files[_scope_path(stored["path"])] == b"# parsed"
     assert fake_minio.deleted_prefixes == [("knowledgebases", "tmp/chat_attachments/user-1/tmp-1/")]
+
+
+@pytest.mark.asyncio
+async def test_confirm_tmp_thread_attachment_accepts_exactly_20_mib(confirm_attachment_env):
+    fake_minio, fake_repo = confirm_attachment_env
+    original_object = "tmp/chat_attachments/user-1/tmp-1/original/report.txt"
+    content = b"x" * (20 * 1024 * 1024)
+    fake_minio.objects[("knowledgebases", original_object)] = content
+    db = FakeDB()
+
+    response = await service.confirm_tmp_thread_attachments_view(
+        thread_id="thread-1",
+        attachments=[{"object_name": original_object}],
+        db=db,
+        current_uid="user-1",
+    )
+
+    [attachment] = response["attachments"]
+    assert attachment["file_size"] == 20 * 1024 * 1024
+    assert fake_repo.workdir_backend.files[_scope_path(attachment["original_path"])] == content
+    assert db.commit_count == 1
+
+
+@pytest.mark.asyncio
+async def test_confirm_tmp_thread_attachment_rejects_above_20_mib_without_writing(confirm_attachment_env):
+    fake_minio, fake_repo = confirm_attachment_env
+    original_object = "tmp/chat_attachments/user-1/tmp-1/original/report.txt"
+    fake_minio.objects[("knowledgebases", original_object)] = b"x" * (20 * 1024 * 1024 + 1)
+    db = FakeDB()
+
+    with pytest.raises(service.HTTPException) as exc_info:
+        await service.confirm_tmp_thread_attachments_view(
+            thread_id="thread-1",
+            attachments=[{"object_name": original_object}],
+            db=db,
+            current_uid="user-1",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "附件过大，当前仅支持 20 MB 以内的文件"
+    assert db.commit_count == 0
+    assert fake_repo.attachments == []
+    assert fake_repo.workdir_backend.files == {}
+
+
+@pytest.mark.asyncio
+async def test_list_thread_attachments_reports_20_mib_limit(monkeypatch):
+    fake_repo = FakeConversationRepository(db=None)
+    monkeypatch.setattr(service, "ConversationRepository", lambda db: fake_repo)
+
+    response = await service.list_thread_attachments_view(
+        thread_id="thread-1",
+        db=FakeDB(),
+        current_uid="user-1",
+    )
+
+    assert response["limits"]["max_size_bytes"] == 20 * 1024 * 1024
 
 
 @pytest.mark.asyncio
