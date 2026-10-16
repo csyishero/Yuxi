@@ -167,7 +167,6 @@
               <template v-if="skill.kind === 'market_install'" #footer>
                 <div class="market-install-card-actions">
                   <a-button v-if="skill.visible !== false" size="small" @click.stop="emit('open-market', skill.slug)">查看</a-button>
-                  <a-button v-if="skill.visible !== false" size="small" @click.stop="router.push('/agent-manage')">在 Agent 中配置</a-button>
                   <a-button size="small" danger @click.stop="emit('uninstall-market', skill)">卸载</a-button>
                 </div>
               </template>

@@ -62,13 +62,13 @@
                 <div class="skill-row-status" :class="{ 'is-unavailable': item.visible === false || item.market_visible === false }">{{ personalItemStatus(item) }}</div>
                 <div class="skill-row-actions">
                   <template v-if="item.kind === 'personal'"><a-button size="small" @click="openPersonalItem(item)">查看</a-button><a-button size="small" @click="openPublish(item)">发布技能</a-button><a-button v-if="item.market_installed_version" size="small" :danger="item.market_visible === false" @click="item.market_visible === false ? confirmUninstall(item.market_install) : openDetail(item.market_slug)">{{ item.market_visible === false ? '卸载旧安装' : '管理安装' }}</a-button></template>
-                  <template v-else-if="item.kind === 'market'"><a-button v-if="item.visible !== false" size="small" @click="openPersonalItem(item)">查看</a-button><a-button v-if="item.visible !== false" size="small" @click="router.push('/agent-manage')">配置 Agent</a-button><a-button size="small" danger @click="confirmUninstall(item)">{{ item.visible === false ? '卸载旧安装' : '卸载' }}</a-button></template>
+                  <template v-else-if="item.kind === 'market'"><a-button v-if="item.visible !== false" size="small" @click="openPersonalItem(item)">查看</a-button><a-button size="small" danger @click="confirmUninstall(item)">{{ item.visible === false ? '卸载旧安装' : '卸载' }}</a-button></template>
                   <a-button v-else size="small" @click="openPersonalItem(item)">{{ canManageSkillRecord(item) ? '管理技能' : '查看' }}</a-button>
                 </div>
               </div>
             </div>
           </a-spin>
-          <p class="skill-list-hint">共享与系统技能可直接在 Agent 中使用；市场安装可在 Agent 中配置。</p>
+          <p class="skill-list-hint">共享、系统和已安装的市场技能，可在智能体中选择使用。</p>
         </template>
       </template>
     </section>
@@ -169,7 +169,6 @@
             </div>
           </div>
           <div class="market-detail-actions">
-            <a-button v-if="detail.installed_version || ownPersonalSkillFor(detail)" @click="router.push('/agent-manage')">在 Agent 中配置</a-button>
             <a-button v-if="detail.installed_version" danger :loading="busySlug === detail.slug" @click="confirmUninstall(detail)">卸载</a-button>
             <a-button v-if="!detail.installed_version || detail.upgrade_available" type="primary" :loading="busySlug === detail.slug" @click="act(detail)">{{ detail.upgrade_available ? '升级到最新版本' : ownPersonalSkillFor(detail) ? '查看个人技能' : detail.shared_available_slug ? '安装市场版' : '安装 Skill' }}</a-button>
           </div>

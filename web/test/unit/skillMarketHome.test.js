@@ -221,7 +221,7 @@ test('个人清单直接提供上传、发布及两种管理员审核入口', as
     assert.ok(findAll(home, (item) => item.type === 'a-button' && visibleText(item) === '发布技能').length, '本人原件应可发布')
     assert.ok(findAll(home, (item) => item.type === 'a-button' && visibleText(item).includes('共享申请')).length)
     assert.ok(findAll(home, (item) => item.type === 'a-button' && visibleText(item).includes('市场审核')).length)
-    assert.ok(findAll(home, (item) => item.type === 'a-button' && visibleText(item) === '配置 Agent').length)
+    assert.equal(findAll(home, (item) => item.type === 'a-button' && visibleText(item) === '配置 Agent').length, 0)
   })
 })
 
