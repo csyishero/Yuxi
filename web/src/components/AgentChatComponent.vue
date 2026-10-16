@@ -4053,7 +4053,20 @@ watch(currentChatId, (threadId, oldThreadId) => {
     width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   min-width: 0; /* Prevent flex item from overflowing */
 
-  scrollbar-width: none;
+  scrollbar-width: auto;
+  scrollbar-color: var(--gray-600) var(--gray-100);
+
+  &::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: var(--gray-600);
+
+    &:hover {
+      background: var(--gray-700);
+    }
+  }
 }
 
 .chat-content-container.has-file-panel .chat-main {
