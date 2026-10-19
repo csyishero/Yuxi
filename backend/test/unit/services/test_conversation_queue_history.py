@@ -144,6 +144,96 @@ async def test_queue_history_keeps_each_request_with_its_reply(session):
     ]
 
 
+async def test_thread_history_pages_keep_run_order_and_zero_message_runs(session):
+    started_at = datetime(2026, 7, 12, 9, 0, 0)
+    session.add(
+        Conversation(
+            id=1,
+            thread_id="thread-1",
+            project_id="project-thread-1",
+            uid="user-1",
+            agent_id="main",
+            status="active",
+        )
+    )
+    for index in range(3):
+        session.add(
+            AgentRun(
+                id=f"run-{index}",
+                conversation_thread_id="thread-1",
+                runtime_scope_id="thread-1",
+                agent_slug="renamed-agent" if index == 2 else "main",
+                uid="user-1",
+                request_id=f"request-{index}",
+                conversation_id=1,
+                input_payload={},
+                status="running" if index == 2 else "completed",
+                created_at=started_at + timedelta(minutes=index),
+            )
+        )
+    session.add_all(
+        [
+            Message(
+                id=1,
+                conversation_id=1,
+                role="user",
+                content="A",
+                run_id="run-0",
+                delivery_status="complete",
+                created_at=started_at,
+            ),
+            Message(
+                id=2,
+                conversation_id=1,
+                role="assistant",
+                content="A reply",
+                run_id="run-0",
+                delivery_status="complete",
+                created_at=started_at + timedelta(minutes=3),
+            ),
+            Message(
+                id=3,
+                conversation_id=1,
+                role="user",
+                content="C",
+                run_id="run-2",
+                delivery_status="complete",
+                created_at=started_at + timedelta(minutes=2),
+            ),
+            Message(
+                id=4,
+                conversation_id=1,
+                role="assistant",
+                content="C reply",
+                run_id="run-2",
+                delivery_status="complete",
+                created_at=started_at + timedelta(minutes=4),
+            ),
+        ]
+    )
+    await session.commit()
+
+    newest = await get_thread_history_view(thread_id="thread-1", current_uid="user-1", db=session, limit=2)
+    assert [item["content"] for item in newest["history"]] == ["C", "C reply"]
+    assert newest["page"]["has_more"] is True
+    assert newest["page"]["before_message_id"] == 3
+    assert newest["page"]["before_run_id"] == "run-1"
+    assert newest["page"]["run_page_ids"] == ["run-1", "run-2"]
+    assert newest["thread"]["thread_status"] == "loading"
+
+    older = await get_thread_history_view(
+        thread_id="thread-1",
+        current_uid="user-1",
+        db=session,
+        limit=2,
+        before_message_id=newest["page"]["before_message_id"],
+        before_run_id=newest["page"]["before_run_id"],
+    )
+    assert [item["content"] for item in older["history"]] == ["A", "A reply"]
+    assert older["page"]["has_more"] is False
+    assert [run["run_id"] for run in older["runs"]] == ["run-0", "run-2"]
+
+
 async def test_thread_history_returns_run_timing_separately_from_messages(session):
     started_at = datetime(2026, 7, 12, 9, 0, 0)
     run_started_at = started_at + timedelta(seconds=10)

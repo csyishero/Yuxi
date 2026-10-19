@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Literal
 
 from yuxi.storage.postgres.models_business import User
 from yuxi.services.task_service import tasker
@@ -10,11 +11,13 @@ tasks = APIRouter(prefix="/tasks", tags=["tasks"])
 @tasks.get("")
 async def list_tasks(
     status: str | None = Query(default=None),
+    status_group: Literal["all", "active", "success", "failed"] = Query(default="all"),
+    offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=100),
     current_user: User = Depends(get_admin_user),
 ):
     """List tasks, optionally filtered by status."""
-    return await tasker.list_tasks(status=status, limit=limit)
+    return await tasker.list_tasks(status=status, status_group=status_group, offset=offset, limit=limit)
 
 
 @tasks.get("/{task_id}")

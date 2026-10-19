@@ -334,8 +334,8 @@ async def test_unassigned_owner_request_is_only_reviewable_by_superadmin(monkeyp
                 db, slug="credit-check", application_reason="申请跨团队共享", operator=owner
             )
             assert request.owner_department_id is None
-            assert await sharing.list_skill_share_requests(db, operator=admin) == []
-            queue = await sharing.list_skill_share_requests(db, operator=superadmin)
+            assert (await sharing.list_skill_share_requests(db, operator=admin))["items"] == []
+            queue = (await sharing.list_skill_share_requests(db, operator=superadmin))["items"]
             assert queue[0]["owner_name"] == "Owner Name"
             assert queue[0]["application_reason"] == "申请跨团队共享"
             assert [item["id"] for item in queue] == [request.id]

@@ -1,6 +1,6 @@
 """内部 Skill 市场的 PostgreSQL 查询。"""
 
-from sqlalchemy import delete, func, or_, select, true, tuple_
+from sqlalchemy import and_, delete, func, or_, select, true, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_business import (
@@ -225,6 +225,45 @@ class MarketSkillRepository:
             .order_by(MarketSkillInstall.updated_at.desc(), MarketSkill.id.desc())
         )
         return [(listing, release) for listing, release in (await self.db.execute(statement)).all()]
+
+    async def page_installed_releases_for_user(
+        self, uid: str, *, user: User, offset: int, limit: int, search: str = ""
+    ) -> tuple[list[tuple[MarketSkill, MarketSkillRelease]], int]:
+        """只取本人当前页的安装版本，并计算精确总数。"""
+        joined = (
+            select(MarketSkillInstall.uid)
+            .select_from(MarketSkillInstall)
+            .join(MarketSkill, MarketSkill.id == MarketSkillInstall.market_skill_id)
+            .join(
+                MarketSkillRelease,
+                (MarketSkillRelease.id == MarketSkillInstall.release_id)
+                & (MarketSkillRelease.market_skill_id == MarketSkill.id),
+            )
+            .where(MarketSkillInstall.uid == uid)
+        )
+        if search.strip():
+            needle = search.strip()
+            visible_release = and_(
+                MarketSkill.latest_release_id.is_not(None),
+                self._visible_filter(user),
+                or_(
+                    MarketSkillRelease.name.icontains(needle, autoescape=True),
+                    MarketSkillRelease.description.icontains(needle, autoescape=True),
+                ),
+            )
+            if user.department_id is None:
+                joined = joined.where(MarketSkill.slug.icontains(needle, autoescape=True))
+            else:
+                joined = joined.where(or_(MarketSkill.slug.icontains(needle, autoescape=True), visible_release))
+        total = await self.db.scalar(joined.with_only_columns(func.count()))
+        statement = (
+            joined.with_only_columns(MarketSkill, MarketSkillRelease)
+            .order_by(MarketSkillInstall.updated_at.desc(), MarketSkill.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        rows = await self.db.execute(statement)
+        return [(listing, release) for listing, release in rows.all()], int(total or 0)
 
     async def metrics(self, market_skill_id: str) -> tuple[int, int]:
         """从唯一安装和点赞行计算排行指标。"""

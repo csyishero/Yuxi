@@ -2,7 +2,7 @@
   <section class="publication-records" aria-label="发布与审核记录">
     <a-spin :spinning="loading">
       <div v-if="error" class="publication-feedback" role="alert">
-        <span>{{ error }}</span><a-button size="small" @click="loadRecords">重试</a-button>
+        <span>{{ error }}</span><a-button size="small" @click="loadRecords(true)">重试</a-button>
       </div>
       <div v-else-if="!loading && !groups.length" class="publication-feedback">
         还没有发布申请记录。可从技能列表选择个人技能发起发布。
@@ -31,17 +31,21 @@
               <small v-else>未提交</small>
             </div>
           </div>
-          <div class="publication-row-end"><span>最近更新 {{ formatTime(group.lastActivityAt) }}</span><a-button size="small" @click="selectedSlug = group.slug">查看记录</a-button></div>
+          <div class="publication-row-end"><span>最近更新 {{ formatTime(group.lastActivityAt) }}</span><a-button size="small" @click="openGroup(group.slug)">查看记录</a-button></div>
         </article>
+        <div v-if="groups.length < total" class="publication-more">
+          <a-button :loading="moreLoading" @click="loadRecords(false)">加载更多技能（{{ groups.length }}/{{ total }}）</a-button>
+        </div>
       </div>
     </a-spin>
 
-    <a-drawer :open="Boolean(selectedGroup)" :title="selectedGroup ? `${selectedGroup.name} · 发布历程` : '发布历程'" width="min(720px, 96vw)" @close="selectedSlug = ''">
+    <a-drawer :open="Boolean(selectedGroup)" :title="selectedGroup ? `${selectedGroup.name} · 发布历程` : '发布历程'" width="min(720px, 96vw)" @close="closeGroup">
       <div v-if="selectedGroup" class="publication-history" aria-label="技能审核历程">
         <p v-if="selectedGroup.sourceAvailable === false" class="publication-archive-note">个人原件已删除；以下记录和提交快照仍可查看。</p>
         <section v-for="channel in historyChannels" :key="channel.key" class="publication-history-channel">
-          <div class="publication-history-heading"><h3>{{ channel.label }}</h3><span>{{ channel.requests.length }} 次提交</span></div>
-          <p v-if="!channel.requests.length" class="publication-history-empty">暂无申请</p>
+          <div class="publication-history-heading"><h3>{{ channel.label }}</h3><span>{{ channel.total }} 次提交</span></div>
+          <p v-if="channel.error" class="publication-feedback" role="alert">{{ channel.error }}<a-button size="small" @click="loadHistory(channel.key)">重试</a-button></p>
+          <p v-else-if="!channel.loading && !channel.requests.length" class="publication-history-empty">暂无申请</p>
           <article v-for="request in channel.requests" :key="request.id" :data-request-id="request.id" class="publication-event">
             <div class="publication-event-heading"><strong>{{ statusLabel(request.status) }}</strong><time>{{ formatTime(request.created_at) }}</time></div>
             <p v-if="request.application_reason">提交说明：{{ request.application_reason }}</p>
@@ -51,6 +55,7 @@
             <p v-if="channel.key === 'shared' && request.status === 'approved'">{{ sharedCopyStatusLabel(request.published_copy_status) }}</p>
             <a-button size="small" @click="openSnapshot(request)">查看提交快照</a-button>
           </article>
+          <a-button v-if="channel.requests.length < channel.total" :loading="channel.loading" @click="loadHistory(channel.key)">加载更多记录</a-button>
         </section>
       </div>
     </a-drawer>
@@ -73,7 +78,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { Sparkles } from '@lucide/vue'
-import { listMarketRequests, skillApi } from '@/apis/skill_api'
+import { listMarketRequests, listPersonalPublicationRecords, skillApi } from '@/apis/skill_api'
 import { useUserStore } from '@/stores/user'
 import { buildPublicationGroups } from './publicationHistory.js'
 import { sharedCopyStatusLabel } from './sharePublicationStatus.js'
@@ -82,9 +87,14 @@ const props = defineProps({ personalSkills: { type: Array, default: null } })
 const userStore = useUserStore()
 const sharedRequests = ref([])
 const marketRequests = ref([])
+const slugs = ref([])
+const activities = ref({})
+const total = ref(0)
 const loading = ref(true)
+const moreLoading = ref(false)
 const error = ref('')
 const selectedSlug = ref('')
+const histories = ref({ shared: { requests: [], total: 0, loading: false, error: '' }, market: { requests: [], total: 0, loading: false, error: '' } })
 const snapshotRequest = ref(null)
 const snapshotFiles = ref([])
 const snapshotPath = ref('SKILL.md')
@@ -92,34 +102,78 @@ const snapshotContent = ref('')
 const snapshotLoading = ref(false)
 const snapshotError = ref('')
 let snapshotSequence = 0
+let recordsSequence = 0
+let historySequence = 0
 
-const groups = computed(() => buildPublicationGroups({
+const groups = computed(() => {
+  const bySlug = new Map(buildPublicationGroups({
   sharedRequests: sharedRequests.value,
   marketRequests: marketRequests.value,
   personalSkills: props.personalSkills,
   ownerUid: userStore.uid
-}))
+  }).map((group) => [group.slug, group]))
+  return slugs.value.map((slug) => ({ ...bySlug.get(slug), lastActivityAt: activities.value[slug] }))
+})
 const selectedGroup = computed(() => groups.value.find((group) => group.slug === selectedSlug.value) || null)
 const historyChannels = computed(() => selectedGroup.value ? [
-  { key: 'shared', label: '直接共享', requests: selectedGroup.value.shared.requests },
-  { key: 'market', label: '上架市场', requests: selectedGroup.value.market.requests }
+  { key: 'shared', label: '直接共享', ...histories.value.shared },
+  { key: 'market', label: '上架市场', ...histories.value.market }
 ] : [])
 
-/** 读取本人两个渠道的持久申请记录。 */
-async function loadRecords() {
-  loading.value = true
+/** 按个人技能分组读取本人的发布摘要。 */
+async function loadRecords(reset = true) {
+  const sequence = ++recordsSequence
+  if (reset) loading.value = true
+  else moreLoading.value = true
   error.value = ''
   try {
-    const [shared, market] = await Promise.all([
-      skillApi.listSkillShareRequests({ mineOnly: true }),
-      listMarketRequests({ mineOnly: true })
-    ])
-    sharedRequests.value = shared?.data || []
-    marketRequests.value = market?.data || []
+    const result = (await listPersonalPublicationRecords({ offset: reset ? 0 : slugs.value.length }))?.data
+    if (sequence !== recordsSequence) return
+    slugs.value = reset ? result.slugs : [...slugs.value, ...result.slugs]
+    activities.value = reset ? result.activities : { ...activities.value, ...result.activities }
+    sharedRequests.value = reset ? result.shared_requests : [...sharedRequests.value, ...result.shared_requests]
+    marketRequests.value = reset ? result.market_requests : [...marketRequests.value, ...result.market_requests]
+    total.value = result.total
   } catch {
-    error.value = '发布记录读取失败，请重试。'
+    if (sequence === recordsSequence) error.value = '发布记录读取失败，请重试。'
   } finally {
-    loading.value = false
+    if (sequence === recordsSequence) {
+      loading.value = false
+      moreLoading.value = false
+    }
+  }
+}
+
+/** 仅打开所选技能的申请历史，旧版本按需加载。 */
+async function openGroup(slug) {
+  selectedSlug.value = slug
+  ++historySequence
+  histories.value = { shared: { requests: [], total: 0, loading: false, error: '' }, market: { requests: [], total: 0, loading: false, error: '' } }
+  await Promise.all([loadHistory('shared'), loadHistory('market')])
+}
+
+/** 关闭历史抽屉并忽略已发出的分页响应。 */
+function closeGroup() {
+  ++historySequence
+  selectedSlug.value = ''
+}
+
+/** 按渠道加载一页已授权的历史申请。 */
+async function loadHistory(channel) {
+  if (!selectedSlug.value || histories.value[channel].loading) return
+  const sequence = historySequence
+  const slug = selectedSlug.value
+  const current = histories.value[channel]
+  histories.value[channel] = { ...current, loading: true, error: '' }
+  try {
+    const options = { mineOnly: true, slug, offset: current.requests.length, limit: 20 }
+    const page = (channel === 'shared'
+      ? await skillApi.listSkillShareRequests(options)
+      : await listMarketRequests(options))?.data
+    if (sequence !== historySequence || slug !== selectedSlug.value) return
+    histories.value[channel] = { requests: [...current.requests, ...page.items], total: page.total, loading: false, error: '' }
+  } catch {
+    if (sequence === historySequence) histories.value[channel] = { ...current, loading: false, error: '申请记录读取失败。' }
   }
 }
 
@@ -239,6 +293,7 @@ onMounted(loadRecords)
 <style scoped>
 .publication-records { min-height: 120px; }
 .publication-list { display: grid; gap: 12px; }
+.publication-more { display: flex; justify-content: center; padding: 8px 0 16px; }
 .publication-row { display: grid; grid-template-columns: minmax(150px, 1.15fr) minmax(280px, 2fr) auto; align-items: center; gap: 18px; padding: 17px 20px; border: 1px solid var(--gray-150); border-radius: 12px; background: var(--gray-0); }
 .publication-identity, .publication-channel { min-width: 0; }
 .publication-name { display: flex; align-items: center; gap: 12px; min-width: 0; }

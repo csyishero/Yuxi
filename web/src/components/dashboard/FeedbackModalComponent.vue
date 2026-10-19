@@ -5,7 +5,7 @@
       <a-segmented
         v-model:value="feedbackFilter"
         :options="feedbackOptions"
-        @change="loadFeedbacks"
+        @change="handleFeedbackFilterChange"
       />
     </a-space>
 
@@ -115,6 +115,17 @@
         <a-empty description="暂无反馈数据" />
       </div>
     </div>
+    <div v-if="feedbackTotal > feedbackPageSize" class="feedback-pagination">
+      <a-pagination
+        :current="feedbackPage"
+        :page-size="feedbackPageSize"
+        :total="feedbackTotal"
+        :disabled="loadingFeedbacks"
+        :show-total="(total) => `共 ${total} 条反馈`"
+        size="small"
+        @change="handleFeedbackPageChange"
+      />
+    </div>
   </a-modal>
 </template>
 
@@ -149,6 +160,9 @@ const modalVisible = ref(false)
 
 // 反馈相关数据
 const feedbacks = ref([])
+const feedbackPage = ref(1)
+const feedbackTotal = ref(0)
+const feedbackPageSize = 20
 const loadingFeedbacks = ref(false)
 const feedbackFilter = ref('all')
 const feedbackOptions = [
@@ -163,7 +177,7 @@ const expandedStates = ref(new Map())
 // 显示模态框
 const show = () => {
   modalVisible.value = true
-  loadFeedbacks()
+  loadFeedbacks(1)
 }
 
 // 暴露方法给父组件
@@ -202,33 +216,44 @@ const toggleConversationExpand = (feedbackId) => {
 
 // 加载反馈列表
 let disposed = false
+let latestFeedbackRequest = 0
 onUnmounted(() => {
   disposed = true
+  latestFeedbackRequest += 1
 })
 
-const loadFeedbacks = async () => {
+const loadFeedbacks = async (page = 1) => {
+  const requestId = ++latestFeedbackRequest
   loadingFeedbacks.value = true
   try {
     const params = {
       scope: props.scope,
       rating: feedbackFilter.value === 'all' ? undefined : feedbackFilter.value,
-      agent_id: props.agentId || undefined
+      agent_id: props.agentId || undefined,
+      limit: feedbackPageSize,
+      offset: (page - 1) * feedbackPageSize
     }
 
     const response = await dashboardApi.getFeedbacks(params)
-    if (disposed) return
-    feedbacks.value = response
+    if (disposed || requestId !== latestFeedbackRequest) return
+    feedbacks.value = response.items
+    feedbackTotal.value = response.total
+    feedbackPage.value = page
     // 重置展开状态
     expandedStates.value.clear()
   } catch (error) {
-    if (disposed) return
+    if (disposed || requestId !== latestFeedbackRequest) return
     console.error('加载反馈列表失败:', error)
     message.error('加载反馈列表失败，请稍后重试')
     feedbacks.value = []
+    feedbackTotal.value = 0
   } finally {
-    if (!disposed) loadingFeedbacks.value = false
+    if (!disposed && requestId === latestFeedbackRequest) loadingFeedbacks.value = false
   }
 }
+
+const handleFeedbackFilterChange = () => loadFeedbacks(1)
+const handleFeedbackPageChange = (page) => loadFeedbacks(page)
 
 const getFeedbackDefaultAvatarSrc = (feedback) =>
   feedback.uid ? generatePixelAvatar(feedback.uid) : ''
@@ -236,12 +261,12 @@ const getFeedbackDefaultAvatarSrc = (feedback) =>
 // 格式化完整日期
 const formatFullDate = (dateString) => formatFullDateTime(dateString)
 
-// 监听 agentId 变化，重新加载数据
+// 监听筛选范围变化，重新从第一页加载数据
 watch(
-  () => props.agentId,
+  () => [props.agentId, props.scope],
   () => {
     if (modalVisible.value) {
-      loadFeedbacks()
+      loadFeedbacks(1)
     }
   }
 )
@@ -254,6 +279,12 @@ watch(
   justify-content: center;
   align-items: center;
   padding: 40px 0;
+}
+
+.feedback-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
 }
 
 // 卡片容器 - 自适应多列布局

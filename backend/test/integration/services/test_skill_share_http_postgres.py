@@ -681,6 +681,17 @@ async def test_direct_publish_requires_admin_to_own_personal_skill(monkeypatch, 
             own_history = (await client.get("/api/skills/share-requests?mine_only=true")).json()["data"]
             assert {item["id"] for item in own_history} == {record["id"], published_to_person.json()["data"]["id"]}
             assert {item["published_version"] for item in own_history} == {"1.0.0", "2.0.0"}
+            older = await client.get(
+                "/api/skills/share-requests",
+                params={"mine_only": True, "slug": "admin-skill", "limit": 1, "offset": 1},
+            )
+            assert older.status_code == 200, older.text
+            assert older.json()["data"]["total"] == 2
+            assert [item["published_version"] for item in older.json()["data"]["items"]] == ["1.0.0"]
+            records = await client.get("/api/skills/publication-records", params={"limit": 1})
+            assert records.status_code == 200, records.text
+            assert records.json()["data"]["total"] == 1
+            assert records.json()["data"]["slugs"] == ["admin-skill"]
 
             current = User(uid="super-admin", username="super-admin", password_hash="x", role="superadmin")
             unassigned_publish = await client.post(

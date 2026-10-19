@@ -898,6 +898,9 @@ async def list_skill_cards_for_user(
     *,
     audience_search: str | None = None,
     audience_department_id: int | None = None,
+    shared_items_override: list[Skill] | None = None,
+    personal_items_override: list[ResolvedSkill] | None = None,
+    audience_pre_filtered: bool = False,
 ) -> list[ResolvedSkill]:
     """返回管理页所需的共享与个人 Skill 卡片。"""
     if audience_search or audience_department_id is not None:
@@ -908,10 +911,22 @@ async def list_skill_cards_for_user(
                 raise ValueError("无权访问该部门")
             audience_department_id = user.department_id
 
-    shared_items, personal_items = await asyncio.gather(
-        list_visible_skills_for_management(db, user),
-        list_personal_skills(str(user.uid)),
-    )
+    if shared_items_override is None and personal_items_override is None:
+        shared_items, personal_items = await asyncio.gather(
+            list_visible_skills_for_management(db, user),
+            list_personal_skills(str(user.uid)),
+        )
+    else:
+        shared_items = (
+            shared_items_override
+            if shared_items_override is not None
+            else await list_visible_skills_for_management(db, user)
+        )
+        personal_items = (
+            personal_items_override
+            if personal_items_override is not None
+            else await list_personal_skills(str(user.uid))
+        )
     personal_slugs = {item.slug for item in personal_items}
     shared_slugs = {item.slug for item in shared_items}
 
@@ -931,7 +946,7 @@ async def list_skill_cards_for_user(
             else card
             for card in shared_cards
         ]
-    if audience_search or audience_department_id is not None:
+    if (audience_search or audience_department_id is not None) and not audience_pre_filtered:
         audience = await UserRepository(db).list_skill_catalog_audience(
             search=audience_search, department_id=audience_department_id
         )
@@ -988,6 +1003,124 @@ async def list_skill_cards_for_user(
     return [*personal_cards, *shared_cards]
 
 
+async def page_skill_cards_for_user(
+    db: AsyncSession,
+    user: User,
+    *,
+    source: str,
+    limit: int,
+    offset: int,
+    search: str = "",
+    audience_search: str | None = None,
+    audience_department_id: int | None = None,
+) -> tuple[list[ResolvedSkill], int | None, bool]:
+    """按个人或共享来源分页管理卡片，并保持原有卡片授权与标记。"""
+    needle = search.strip().casefold()
+    if audience_search or audience_department_id is not None:
+        if user.role not in ADMIN_ROLES:
+            raise ValueError("无权按人员筛选 Skill")
+        if user.role == "admin":
+            if user.department_id is None or audience_department_id not in {None, user.department_id}:
+                raise ValueError("无权访问该部门")
+            audience_department_id = user.department_id
+
+    if source == "shared":
+        shared, total = await page_visible_skills_for_management(
+            db,
+            user,
+            limit=limit,
+            offset=offset,
+            search=search,
+            audience_search=audience_search,
+            audience_department_id=audience_department_id,
+        )
+        matching_personal = []
+        for item in shared:
+            try:
+                matching_personal.append(await get_personal_skill(str(user.uid), item.slug))
+            except ValueError:
+                pass
+        cards = await list_skill_cards_for_user(
+            db,
+            user,
+            audience_search=audience_search,
+            audience_department_id=audience_department_id,
+            shared_items_override=shared,
+            personal_items_override=matching_personal,
+            audience_pre_filtered=True,
+        )
+        return [card for card in cards if card.source_scope != "personal"], total, offset + limit < total
+
+    if source == "personal":
+        selected, has_more = await list_personal_skills_page(str(user.uid), offset=offset, limit=limit, search=search)
+        shared = []
+        repo = SkillRepository(db)
+        for item in selected:
+            candidate = await repo.get_by_slug(item.slug)
+            if candidate and (user_can_manage_skill(user, candidate) or user_can_access_skill(user, candidate)):
+                shared.append(candidate)
+        cards = await list_skill_cards_for_user(
+            db, user, shared_items_override=shared, personal_items_override=selected
+        )
+        return [card for card in cards if card.source_scope == "personal"], None, has_more
+
+    # 合并视图先展示个人来源，再展示共享来源；共享查询仍在数据库中
+    # 完成授权和受众过滤，以免该视图在深页重新读取所有共享 Skill。
+    personal = await list_personal_skills(str(user.uid))
+    personal_by_slug = {item.slug: item for item in personal}
+    if needle:
+        personal = [item for item in personal if needle in f"{item.slug} {item.name} {item.description}".casefold()]
+    personal_total = len(personal)
+    selected_personal = personal[offset : offset + limit]
+    shared_limit = limit - len(selected_personal)
+    shared_offset = max(0, offset - personal_total)
+    shared, shared_total = await page_visible_skills_for_management(
+        db,
+        user,
+        limit=max(shared_limit, 1),
+        offset=shared_offset if shared_limit else 0,
+        search=search,
+        audience_search=audience_search,
+        audience_department_id=audience_department_id,
+    )
+    if not shared_limit:
+        shared = []
+
+    personal_overrides = {item.slug: item for item in selected_personal}
+    for item in shared:
+        if item.slug in personal_by_slug:
+            personal_overrides[item.slug] = personal_by_slug[item.slug]
+
+    shared_overrides = {item.slug: item for item in shared}
+    repo = SkillRepository(db)
+    for item in selected_personal:
+        if item.slug in shared_overrides:
+            continue
+        candidate = await repo.get_by_slug(item.slug)
+        if candidate and (user_can_manage_skill(user, candidate) or user_can_access_skill(user, candidate)):
+            shared_overrides[item.slug] = candidate
+
+    cards = await list_skill_cards_for_user(
+        db,
+        user,
+        audience_search=audience_search,
+        audience_department_id=audience_department_id,
+        shared_items_override=list(shared_overrides.values()),
+        personal_items_override=list(personal_overrides.values()),
+        audience_pre_filtered=True,
+    )
+    selected_personal_slugs = {item.slug for item in selected_personal}
+    selected_shared_slugs = {item.slug for item in shared}
+    selected_cards = [
+        card
+        for card in cards
+        if (card.source_scope == "personal" and card.slug in selected_personal_slugs)
+        or (card.source_scope != "personal" and card.slug in selected_shared_slugs)
+    ]
+    total = personal_total + shared_total
+    return selected_cards, total, offset + limit < total
+
+
 async def list_personal_skill_catalog(
     db: AsyncSession,
     *,
@@ -996,35 +1129,100 @@ async def list_personal_skill_catalog(
     owner_search: str | None = None,
     offset: int = 0,
     limit: int = 50,
+    card_page: bool = False,
+    search: str = "",
+    exclude_own: bool = False,
 ) -> dict[str, Any]:
-    """按管理员可访问的部门分页汇总有效用户的个人 Skill。"""
+    """按请求模式读取授权目录；旧调用继续按人员分页。"""
     if operator.role not in {"admin", "superadmin"}:
         raise ValueError("无权访问个人 Skill 目录")
     if operator.role == "admin":
         if operator.department_id is None or department_id not in {None, operator.department_id}:
             raise ValueError("无权访问该部门")
         department_id = operator.department_id
-    owners, total_owners = await UserRepository(db).list_page_with_department(
-        offset=offset,
-        limit=limit,
-        department_id=department_id,
-        search=owner_search,
-    )
+
+    def card(item: ResolvedSkill, owner: User, department_name: str | None) -> dict[str, Any]:
+        """给个人技能附上拥有者和部门信息。"""
+        return {
+            **item.to_dict(),
+            "owner_uid": owner.uid,
+            "owner_name": owner.username,
+            "owner_department_id": owner.department_id,
+            "owner_department_name": department_name,
+        }
+
+    repo = UserRepository(db)
+    if not card_page:
+        owners, total_owners = await repo.list_page_with_department(
+            offset=offset, limit=limit, department_id=department_id, search=owner_search
+        )
+        cards = []
+        for owner, department_name in owners:
+            if exclude_own and owner.uid == operator.uid:
+                continue
+            if get_personal_skills_root_dir(str(owner.uid)).exists():
+                cards.extend(card(item, owner, department_name) for item in await list_personal_skills(str(owner.uid)))
+        return {"items": cards, "next_offset": offset + limit if offset + limit < total_owners else None}
+
+    needle = search.strip().casefold()
+
+    def scan_owner(
+        uid: str, owner_name: str, department_name: str | None, skip: int, take: int
+    ) -> tuple[list[ResolvedSkill], int]:
+        """逐项校验目录，只保留当前卡片页及探测下一页所需的记录。"""
+        root = personal_skills_root(uid)
+        items: list[ResolvedSkill] = []
+        matched = 0
+        for entry in sorted(root.iterdir(), key=lambda path: path.name):
+            if entry.is_symlink() or not entry.is_dir() or not is_valid_skill_slug(entry.name):
+                continue
+            if skill_dir_contains_symlink(entry):
+                continue
+            try:
+                metadata = parse_skill_dir_metadata(entry)
+                if metadata["slug"] != entry.name:
+                    continue
+                searchable = (
+                    f"{metadata['slug']} {metadata['name']} {metadata['description']} "
+                    f"{owner_name} {uid} {department_name or ''}"
+                ).casefold()
+                if needle and needle not in searchable:
+                    continue
+                matched += 1
+                if matched <= skip:
+                    continue
+                items.append(_resolved_personal_skill(uid, root, metadata))
+                if len(items) >= take:
+                    break
+            except Exception as exc:
+                logger.warning(f"跳过无法解析的个人 Skill: uid={uid}, slug={entry.name}, error={exc}")
+        return items, matched
+
     cards: list[dict[str, Any]] = []
-    for owner, department_name in owners:
-        if not get_personal_skills_root_dir(str(owner.uid)).exists():
-            continue
-        for item in await list_personal_skills(str(owner.uid)):
-            cards.append(
-                {
-                    **item.to_dict(),
-                    "owner_uid": owner.uid,
-                    "owner_name": owner.username,
-                    "owner_department_id": owner.department_id,
-                    "owner_department_name": department_name,
-                }
+    remaining_skip = offset
+    owner_offset = 0
+    while len(cards) <= limit:
+        owners, total_owners = await repo.list_page_with_department(
+            offset=owner_offset, limit=50, department_id=department_id, search=owner_search
+        )
+        if not owners:
+            break
+        for owner, department_name in owners:
+            if exclude_own and owner.uid == operator.uid:
+                continue
+            if not get_personal_skills_root_dir(str(owner.uid)).exists():
+                continue
+            items, matched = await asyncio.to_thread(
+                scan_owner, str(owner.uid), owner.username, department_name, remaining_skip, limit + 1 - len(cards)
             )
-    return {"items": cards, "next_offset": offset + limit if offset + limit < total_owners else None}
+            remaining_skip = max(0, remaining_skip - matched)
+            cards.extend(card(item, owner, department_name) for item in items)
+            if len(cards) > limit:
+                break
+        owner_offset += len(owners)
+        if len(cards) > limit or owner_offset >= total_owners:
+            break
+    return {"items": cards[:limit], "next_offset": offset + limit if len(cards) > limit else None}
 
 
 async def get_manageable_personal_skill_owner(db: AsyncSession, *, operator: User, owner_uid: str) -> User:
@@ -1055,6 +1253,34 @@ async def list_visible_skills_for_management(db: AsyncSession, user: User) -> li
             visible.append(item)
             seen.add(item.slug)
     return visible
+
+
+async def page_visible_skills_for_management(
+    db: AsyncSession,
+    user: User,
+    *,
+    limit: int,
+    offset: int,
+    search: str = "",
+    audience_search: str | None = None,
+    audience_department_id: int | None = None,
+) -> tuple[list[Skill], int]:
+    """以数据库授权条件分页读取管理页可见的共享 Skill。"""
+    audience_filters = {}
+    if audience_search or audience_department_id is not None:
+        audience_filters = {
+            "audience_search": audience_search,
+            "audience_department_id": audience_department_id,
+        }
+    items, total = await SkillRepository(db).page_visible(
+        user, limit=limit, offset=offset, search=search, **audience_filters
+    )
+    visible = [
+        item
+        for item in items
+        if user_can_manage_skill(user, item) or (item.enabled and user_can_access_skill(user, item))
+    ]
+    return visible, total
 
 
 async def list_skills(db: AsyncSession) -> list[Skill]:
@@ -1556,6 +1782,60 @@ def resolve_personal_skill_dir(root: Path, slug: str) -> Path:
 async def list_personal_skills(uid: str) -> list[ResolvedSkill]:
     """直接扫描个人 Skill 持久目录。"""
     return await asyncio.to_thread(_scan_personal_skills, uid)
+
+
+async def list_personal_skills_page(
+    uid: str, *, offset: int, limit: int, search: str = ""
+) -> tuple[list[ResolvedSkill], bool]:
+    """仅解析达到当前页和下一项所需的个人 Skill 文件。"""
+
+    def scan_page() -> tuple[list[ResolvedSkill], bool]:
+        root = personal_skills_root(uid)
+        needle = search.strip().casefold()
+        matched = 0
+        items: list[ResolvedSkill] = []
+        for entry in sorted(root.iterdir(), key=lambda path: path.name):
+            if entry.is_symlink() or not entry.is_dir() or not is_valid_skill_slug(entry.name):
+                continue
+            if skill_dir_contains_symlink(entry):
+                continue
+            try:
+                metadata = parse_skill_dir_metadata(entry)
+                if metadata["slug"] != entry.name:
+                    continue
+                searchable = f"{metadata['slug']} {metadata['name']} {metadata['description']}".casefold()
+                if needle and needle not in searchable:
+                    continue
+                matched += 1
+                if matched <= offset:
+                    continue
+                items.append(_resolved_personal_skill(uid, root, metadata))
+                if len(items) > limit:
+                    break
+            except Exception as exc:
+                logger.warning(f"跳过无法解析的个人 Skill: uid={uid}, slug={entry.name}, error={exc}")
+        return items[:limit], len(items) > limit
+
+    return await asyncio.to_thread(scan_page)
+
+
+async def get_personal_skill(uid: str, slug: str) -> ResolvedSkill:
+    """只读取指定个人 Skill 目录的元数据。"""
+
+    def read_named() -> ResolvedSkill:
+        root = personal_skills_root(uid)
+        target = resolve_personal_skill_dir(root, slug)
+        if not target.is_dir() or skill_dir_contains_symlink(target):
+            raise ValueError("个人 Skill 不存在")
+        try:
+            metadata = parse_skill_dir_metadata(target)
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ValueError("个人 Skill 不存在") from exc
+        if metadata["slug"] != slug:
+            raise ValueError("个人 Skill 不存在")
+        return _resolved_personal_skill(uid, root, metadata)
+
+    return await asyncio.to_thread(read_named)
 
 
 async def install_personal_skill_dir(

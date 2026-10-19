@@ -240,7 +240,7 @@ function formatTime(value) {
   return Number.isNaN(time.getTime()) ? value : time.toLocaleString('zh-CN')
 }
 
-/** 读取两个发布渠道的持久申请记录。 */
+/** 仅读取当前技能在两个渠道的最新申请与最新发布。 */
 async function loadHistory() {
   if (!isOwnSkill.value) return
   const sequence = panelSequence
@@ -248,13 +248,16 @@ async function loadHistory() {
   historyReady.value = false
   historyError.value = ''
   try {
-    const [shared, market] = await Promise.all([
-      skillApi.listSkillShareRequests({ mineOnly: true }),
-      listMarketRequests({ mineOnly: true })
+    const query = { mineOnly: true, slug: props.skill.slug, limit: 1 }
+    const [shared, sharedApproved, market, marketApproved] = await Promise.all([
+      skillApi.listSkillShareRequests(query),
+      skillApi.listSkillShareRequests({ ...query, status: 'approved' }),
+      listMarketRequests(query),
+      listMarketRequests({ ...query, status: 'approved' })
     ])
     if (sequence !== panelSequence) return
-    sharedRequests.value = shared?.data || []
-    marketRequests.value = market?.data || []
+    sharedRequests.value = [shared?.data?.items?.[0], sharedApproved?.data?.items?.[0]].filter((item, index, rows) => item && rows.findIndex((row) => row?.id === item.id) === index)
+    marketRequests.value = [market?.data?.items?.[0], marketApproved?.data?.items?.[0]].filter((item, index, rows) => item && rows.findIndex((row) => row?.id === item.id) === index)
     historyReady.value = true
   } catch {
     if (sequence === panelSequence) historyError.value = '发布状态读取失败，请重试。'

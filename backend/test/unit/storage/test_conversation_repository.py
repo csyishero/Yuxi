@@ -215,6 +215,7 @@ async def test_model_audit_messages_are_hidden_from_history_and_message_count(co
 
     repo = ConversationRepository(conversation_session)
     messages = await repo.get_messages(conversation.id)
+    assert await repo.count_messages(conversation.id) == 1
     await repo._update_message_count(conversation.id)
 
     assert [message.content for message in messages] == ["visible"]
@@ -223,11 +224,40 @@ async def test_model_audit_messages_are_hidden_from_history_and_message_count(co
     previous_updated_at = conversation.updated_at
     await repo.publish_assistant_output(audit_message)
     published_messages = await repo.get_messages(conversation.id)
+    assert await repo.count_messages(conversation.id) == 2
 
     assert [message.content for message in published_messages] == ["visible", "hidden intermediate"]
     assert audit_message.message_type == "text"
     assert stats.message_count == 2
     assert conversation.updated_at > previous_updated_at
+
+
+@pytest.mark.asyncio
+async def test_get_messages_page_uses_message_id_to_break_timestamp_ties(conversation_session):
+    now = utc_now_naive()
+    conversation = Conversation(
+        thread_id="thread-tied-messages",
+        project_id="project-tied-messages",
+        uid="user-a",
+        agent_id="agent-a",
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    conversation_session.add(conversation)
+    await conversation_session.flush()
+    conversation_session.add_all(
+        [
+            Message(id=90, conversation_id=conversation.id, role="user", content="last", created_at=now),
+            Message(id=30, conversation_id=conversation.id, role="user", content="first", created_at=now),
+            Message(id=70, conversation_id=conversation.id, role="user", content="middle", created_at=now),
+        ]
+    )
+    await conversation_session.commit()
+
+    repo = ConversationRepository(conversation_session)
+    pages = [await repo.get_messages(conversation.id, limit=1, offset=index) for index in range(3)]
+    assert [page[0].id for page in pages] == [30, 70, 90]
 
 
 @pytest.mark.asyncio

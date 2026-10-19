@@ -18,6 +18,23 @@ def test_open_existing_returns_workdir_capability(tmp_path: Path, monkeypatch: p
     assert workdir.root_path == f"/{workdir_path}"
 
 
+def test_search_page_keeps_project_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workdir_path = "projects/11111111-1111-4111-8111-111111111111"
+    workspace_root = tmp_path / "workspace"
+    project = workspace_root / workdir_path
+    project.mkdir(parents=True)
+    (project / "report-a.txt").write_text("a", encoding="utf-8")
+    (project / "report-b.txt").write_text("b", encoding="utf-8")
+    (workspace_root / "report-secret.txt").write_text("secret", encoding="utf-8")
+    monkeypatch.setattr(workspace_filesystem_module, "user_workspace_dir", lambda _uid: workspace_root)
+
+    workdir = Workdir.open_existing("user-1", workdir_path)
+    page = workdir.search_page("report", offset=1, limit=1)
+
+    assert [item["path"] for item in page["entries"]] == ["/report-b.txt"]
+    assert page["has_more"] is False
+
+
 def test_open_existing_rejects_missing_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()

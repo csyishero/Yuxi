@@ -100,7 +100,9 @@ async function withReview({ role, departmentId = 3, existingScope = null, existi
           read_scope: { access_level: 'department', department_ids: [responseDepartmentId ?? existingDepartmentId ?? ownerDepartmentId] }
         } })
       }
-      if (path === '/api/skill-market/requests') return Response.json({ data: [request] })
+      if (path.startsWith('/api/skill-market/requests?')) {
+        return Response.json({ data: { items: [request], total: 1, limit: 20, offset: 0 } })
+      }
       if (path === '/api/departments') return Response.json({ departments: [{ id: 3, name: '设计部' }, { id: 4, name: '研发部' }] })
       return Response.json({ data: [] })
     }

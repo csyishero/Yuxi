@@ -90,10 +90,7 @@ async def test_superadmin_can_choose_existing_knowledge_base_department(monkeypa
     monkeypatch.setattr(knowledge_router, "DepartmentRepository", FakeDepartmentRepository)
     superadmin = SimpleNamespace(uid="root", role="superadmin", department_id=1)
 
-    assert (
-        await knowledge_router._resolve_database_owner_department_id(superadmin, 2, SimpleNamespace())
-        == 2
-    )
+    assert await knowledge_router._resolve_database_owner_department_id(superadmin, 2, SimpleNamespace()) == 2
 
 
 @pytest.mark.asyncio
@@ -128,9 +125,7 @@ def test_document_delete_routes_require_delete_document_capability(path, method)
         if getattr(route, "path", None) == path and method in getattr(route, "methods", set())
     )
 
-    assert require_knowledge_base_delete_document in {
-        dependency.call for dependency in route.dependant.dependencies
-    }
+    assert require_knowledge_base_delete_document in {dependency.call for dependency in route.dependant.dependencies}
 
 
 @pytest.mark.asyncio
@@ -217,9 +212,7 @@ async def test_query_parameter_routes_apply_knowledge_base_acl(monkeypatch):
     assert await require_knowledge_base_read("kb-1", readonly_admin) is readonly_admin
 
     with pytest.raises(HTTPException) as exc_info:
-        await require_knowledge_base_read(
-            "kb-1", SimpleNamespace(uid="admin-2", role="admin", department_id=2)
-        )
+        await require_knowledge_base_read("kb-1", SimpleNamespace(uid="admin-2", role="admin", department_id=2))
     assert exc_info.value.status_code == 403
 
 
@@ -299,16 +292,22 @@ async def test_delegated_manager_can_load_only_current_department_permission_opt
         def __init__(self, _db):
             pass
 
-        async def list_with_department(self, *, limit, department_id):
-            assert limit == 1000
+        async def list_page_with_department(self, *, offset, limit, department_id, search):
+            assert offset == 0
+            assert limit == 51
             assert department_id == 2
+            assert search is None
             user = SimpleNamespace(
                 uid="manager-1",
                 username="协管用户",
                 role="user",
                 department_id=2,
             )
-            return [(user, "开发部")]
+            return [(user, "开发部")], 1
+
+        async def list_by_uids(self, uids):
+            assert uids == ["manager-1"]
+            return [SimpleNamespace(uid="manager-1", username="协管用户", role="user", department_id=2, is_deleted=0)]
 
     monkeypatch.setattr(knowledge_router.knowledge_base, "get_database_info", fake_get_database_info)
     monkeypatch.setattr(knowledge_router, "DepartmentRepository", FakeDepartmentRepository)
@@ -317,9 +316,67 @@ async def test_delegated_manager_can_load_only_current_department_permission_opt
 
     result = await knowledge_router.get_database_permission_options(
         "kb-1",
+        offset=0,
+        limit=50,
+        search=None,
         current_user=manager,
         db=SimpleNamespace(),
     )
 
     assert result["departments"] == [{"id": 2, "name": "开发部"}]
     assert result["users"][0]["uid"] == "manager-1"
+    assert result["selected_users"][0]["uid"] == "manager-1"
+
+
+@pytest.mark.asyncio
+async def test_knowledge_permission_search_pages_within_managers_department(monkeypatch):
+    database = SimpleNamespace(
+        owner_department_id=1,
+        created_by="owner",
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "global"},
+            "manage_scope": {"access_level": "user", "user_uids": ["manager-1"]},
+        },
+    )
+
+    async def fake_get_database_info(_kb_id):
+        return database
+
+    class FakeDepartmentRepository:
+        def __init__(self, _db):
+            pass
+
+        async def get_by_id(self, department_id):
+            return SimpleNamespace(id=department_id, name="开发部")
+
+    class FakeUserRepository:
+        def __init__(self, _db):
+            pass
+
+        async def list_page_with_department(self, *, offset, limit, department_id, search):
+            assert (offset, limit, department_id, search) == (1000, 2, 2, "late")
+            return [
+                (SimpleNamespace(uid=f"late-{index}", username=f"late {index}", role="user", department_id=2), "开发部")
+                for index in (1001, 1002)
+            ], 1002
+
+        async def list_by_uids(self, _uids):
+            raise AssertionError("subsequent search pages should not refetch all selected users")
+
+    monkeypatch.setattr(knowledge_router.knowledge_base, "get_database_info", fake_get_database_info)
+    monkeypatch.setattr(knowledge_router, "DepartmentRepository", FakeDepartmentRepository)
+    monkeypatch.setattr(knowledge_router, "UserRepository", FakeUserRepository)
+
+    result = await knowledge_router.get_database_permission_options(
+        "kb-1",
+        offset=1000,
+        limit=1,
+        search="late",
+        current_user=SimpleNamespace(uid="manager-1", role="user", department_id=2),
+        db=object(),
+    )
+
+    assert [user["uid"] for user in result["users"]] == ["late-1001"]
+    assert result["has_more"] is True
+    assert result["selected_users"] == []

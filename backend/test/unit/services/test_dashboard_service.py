@@ -305,7 +305,23 @@ async def test_dashboard_service_basic_stats(dashboard_db):
     assert user_stats["daily_active_users"][0]["date"] < user_stats["daily_active_users"][-1]["date"]
 
     feedbacks = await service.get_feedbacks()
-    assert len(feedbacks) == 2
+    assert feedbacks["total"] == 2
+    assert len(feedbacks["items"]) == 2
+
+
+async def test_dashboard_feedback_pages_preserve_filtered_total(dashboard_db):
+    """反馈列表按筛选条件分页，页间没有重复或遗漏。"""
+    service = DashboardService(dashboard_db)
+
+    first = await service.get_feedbacks(limit=1, offset=0)
+    second = await service.get_feedbacks(limit=1, offset=1)
+    dislikes = await service.get_feedbacks(rating="dislike", limit=1, offset=0)
+
+    assert first["total"] == second["total"] == 2
+    assert len(first["items"]) == len(second["items"]) == 1
+    assert first["items"][0]["id"] != second["items"][0]["id"]
+    assert dislikes["total"] == 1
+    assert dislikes["items"][0]["rating"] == "dislike"
 
 
 async def test_agent_analytics_omits_removed_top_performers_contract(dashboard_db):
@@ -490,6 +506,45 @@ async def test_dashboard_service_conversation_detail(dashboard_db):
     assistant_msg = next(m for m in detail["messages"] if m["role"] == "assistant")
     assert "tool_calls" in assistant_msg
     assert assistant_msg["tool_calls"][0]["tool_name"] == "bash"
+
+
+async def test_dashboard_conversation_detail_loads_recent_messages_in_bounded_pages(dashboard_db):
+    """The audit drawer opens on the recent page and can fetch every older visible message."""
+    from sqlalchemy import select
+
+    conversation = (
+        await dashboard_db.execute(select(Conversation).where(Conversation.thread_id == "thread-101"))
+    ).scalar_one()
+    for index in range(55):
+        dashboard_db.add(
+            Message(
+                conversation_id=conversation.id,
+                role="assistant",
+                content=f"paged-{index:02d}",
+                created_at=utc_now_naive() + timedelta(seconds=index),
+            )
+        )
+    await dashboard_db.commit()
+
+    service = DashboardService(dashboard_db)
+    full = await service.get_conversation_detail("thread-101")
+    assert len(full["messages"]) == 57
+    assert full["messages_offset"] == 0
+    assert full["has_older_messages"] is False
+    recent = await service.get_conversation_detail("thread-101", limit=20)
+    assert recent["message_count"] == 57
+    assert recent["messages_offset"] == 37
+    assert len(recent["messages"]) == 20
+    assert recent["has_older_messages"] is True
+
+    older = await service.get_conversation_detail("thread-101", limit=20, offset=17)
+    first = await service.get_conversation_detail("thread-101", limit=17, offset=0)
+    assert len(older["messages"]) == 20
+    assert first["messages_offset"] == 0
+    assert first["has_older_messages"] is False
+    assert first["messages"][0]["content"] == "Hello"
+    ids = [item["id"] for page in (first, older, recent) for item in page["messages"]]
+    assert len(ids) == len(set(ids)) == 57
 
 
 async def test_conversation_tokens_use_runs_and_expose_missing_usage(dashboard_db):
@@ -706,7 +761,7 @@ async def test_current_scope_matches_usage_lists_and_preserves_inventory(dashboa
     assert stats["feedback_stats"] == {"total_feedbacks": 1, "satisfaction_rate": 100.0}
     assert stats["current_resources"] == (await history.get_basic_stats())["current_resources"]
     assert (await current.get_tool_call_stats())["total_calls"] == 1
-    assert len(await current.get_feedbacks()) == 1
+    assert (await current.get_feedbacks())["total"] == 1
     assert (await current.get_user_activity_stats())["total_users"] == 3
     assert (await history.get_user_activity_stats())["total_users"] == 4
     listing = await current.list_conversations(limit=20)
@@ -770,8 +825,8 @@ async def test_current_feedback_excludes_deleted_author_consistently(dashboard_d
         "total_feedbacks": 1,
         "satisfaction_rate": 100.0,
     }
-    assert len(await current.get_feedbacks()) == 1
+    assert (await current.get_feedbacks())["total"] == 1
     rates = (await current.get_agent_analytics())["agent_satisfaction_rates"]
     helper = next(item for item in rates if item["agent_id"] == "agent-helper")
     assert helper["total_feedbacks"] == 1 and helper["satisfaction_rate"] == 100.0
-    assert len(await DashboardService(dashboard_db).get_feedbacks()) == 3
+    assert (await DashboardService(dashboard_db).get_feedbacks())["total"] == 3

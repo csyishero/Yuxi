@@ -383,7 +383,7 @@ const handleCreateProjectChat = async (projectId) => {
   chatThreadsStore.setCurrentThreadId(null)
 }
 
-const searchWorkspace = (query) => searchWorkspaceFiles(query)
+const searchWorkspace = (query, page) => searchWorkspaceFiles(query, page)
 
 // 侧边栏搜索到工作区文件后跳转到工作区并打开对应文件
 const handleSearchSelectFile = (entry) => {
@@ -476,7 +476,11 @@ const handleMoveConversation = async (threadId, targetProjectId, files, requestI
       ['会话已属于目标项目', 'request_id 已用于其他会话迁移意图'].includes(error.message)
     ) {
       try {
-        const snapshot = await agentApi.getAgentHistory(threadId)
+        const snapshot = await agentApi.getAgentHistory(threadId, {
+          limit: 1,
+          include_messages: false,
+          include_runs: false
+        })
         if (uid === userStore.uid && snapshot?.thread?.id === threadId) {
           chatThreadsStore.upsertThread(snapshot.thread)
         }

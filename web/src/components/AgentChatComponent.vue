@@ -78,6 +78,12 @@
         <!-- Main Chat Area -->
         <div class="chat-main" ref="chatMainRef">
           <div class="chat-box">
+            <div v-if="currentHistoryPage?.has_more" class="chat-history-load-more">
+              <button type="button" :disabled="loadingOlderHistory" @click="loadOlderThreadMessages">
+                {{ loadingOlderHistory ? '正在加载...' : '加载更早消息' }}
+              </button>
+              <span v-if="olderHistoryError" role="alert">{{ olderHistoryError }}</span>
+            </div>
             <template v-for="row in conversationRows" :key="row.key">
               <div v-if="row.type === 'conversation'" class="conv-box">
                 <div v-if="row.timeLabel" class="conversation-time">
@@ -897,6 +903,7 @@ import {
   bindMessageRequestRun
 } from '@/utils/messageDebug'
 import { MessageProcessor } from '@/utils/messageProcessor'
+import { mergeHistoryPage, reconcileHistoryPage } from '@/utils/threadHistoryPaging'
 import dayjs, { parseToShanghai } from '@/utils/time'
 import { agentApi, threadApi } from '@/apis'
 import HumanApprovalModal from '@/components/HumanApprovalModal.vue'
@@ -1004,6 +1011,9 @@ const { getThreadState, resetOnGoingConv, stopThreadStream } = useAgentThreadSta
 // 组件级别的消息、附件与提示状态
 const threadMessages = ref({})
 const threadRuns = ref({})
+const threadHistoryPages = ref({})
+const loadingOlderHistory = ref(false)
+const olderHistoryError = ref('')
 const threadAttachmentsMap = ref({})
 const attachmentUploadModalOpen = ref(false)
 const attachmentInitialFiles = ref([])
@@ -1937,6 +1947,7 @@ const { mentionConfig } = useAgentMentionConfig({
 
 const currentThreadMessages = computed(() => threadMessages.value[currentChatId.value] || [])
 const currentThreadRuns = computed(() => threadRuns.value[currentChatId.value] || [])
+const currentHistoryPage = computed(() => threadHistoryPages.value[currentChatId.value] || null)
 const currentRunById = computed(
   () => new Map(currentThreadRuns.value.map((run) => [run.run_id, run]))
 )
@@ -2858,14 +2869,53 @@ const fetchThreadMessages = async ({ agentId, threadId, delay = 0 }) => {
   }
 
   try {
-    const response = await agentApi.getAgentHistory(threadId)
-    const history = response.history || []
-    threadMessages.value[threadId] = history
-    threadRuns.value[threadId] = response.runs
+    const response = await agentApi.getAgentHistory(threadId, { limit: 50 })
+    const nextPage = reconcileHistoryPage(
+      threadHistoryPages.value[threadId], threadMessages.value[threadId], threadRuns.value[threadId], response
+    )
+    const merged = mergeHistoryPage(threadMessages.value[threadId], threadRuns.value[threadId], response)
+    threadMessages.value[threadId] = merged.history
+    threadRuns.value[threadId] = merged.runs
+    threadHistoryPages.value[threadId] = nextPage
     chatThreadsStore.upsertThread(response.thread)
   } catch (error) {
     handleChatError(error, 'load')
     throw error
+  }
+}
+
+const loadOlderThreadMessages = async () => {
+  const threadId = currentChatId.value
+  const page = threadHistoryPages.value[threadId]
+  if (!threadId || !page?.has_more || loadingOlderHistory.value) return
+
+  loadingOlderHistory.value = true
+  olderHistoryError.value = ''
+  const container = chatMainRef.value
+  const previousHeight = container?.scrollHeight || 0
+  scrollController.disableAutoScroll()
+  try {
+    const response = await agentApi.getAgentHistory(threadId, {
+      limit: 50,
+      before_message_id: page.before_message_id,
+      before_run_id: page.before_run_id,
+      include_messages: page.has_more_messages,
+      include_runs: page.has_more_runs
+    })
+    const merged = mergeHistoryPage(threadMessages.value[threadId], threadRuns.value[threadId], response)
+    threadMessages.value[threadId] = merged.history
+    threadRuns.value[threadId] = merged.runs
+    threadHistoryPages.value[threadId] = response.page
+    if (currentChatId.value === threadId && container) {
+      await nextTick()
+      container.scrollTop += container.scrollHeight - previousHeight
+      scrollController.handleScroll()
+    }
+  } catch (error) {
+    if (currentChatId.value === threadId) olderHistoryError.value = '加载更早消息失败，请重试'
+    console.error('Failed to load older thread messages:', error)
+  } finally {
+    loadingOlderHistory.value = false
   }
 }
 
@@ -3867,6 +3917,7 @@ watch(
       setCurrentThreadId(null)
       threadMessages.value = {}
       threadRuns.value = {}
+      threadHistoryPages.value = {}
       threadAttachmentsMap.value = {}
       resetAgentPanelState()
       // 清理所有线程状态
@@ -3927,6 +3978,7 @@ watch(
 
 watch(currentChatId, (threadId, oldThreadId) => {
   if (threadId === oldThreadId) return
+  olderHistoryError.value = ''
   // 旧线程已被删除时丢弃输入草稿，避免写入无法再次访问的孤儿缓存
   const keepInput = !oldThreadId || threads.value.some((thread) => thread.id === oldThreadId)
   // 切换线程：保存旧线程的输入草稿，并还原新线程（或新建对话）的草稿
@@ -4379,6 +4431,30 @@ watch(currentChatId, (threadId, oldThreadId) => {
   padding: 1rem 2rem;
   display: flex;
   flex-direction: column;
+}
+
+.chat-history-load-more {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: var(--color-error-600);
+  font-size: 12px;
+
+  button {
+    border: 1px solid var(--gray-200);
+    border-radius: 8px;
+    padding: 6px 14px;
+    background: var(--gray-0);
+    color: var(--main-color);
+    cursor: pointer;
+
+    &:disabled {
+      cursor: wait;
+      opacity: 0.6;
+    }
+  }
 }
 
 .conv-box {

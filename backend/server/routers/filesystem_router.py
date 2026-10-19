@@ -112,12 +112,16 @@ async def upload_viewer_files_route(
 async def search_viewer_files_route(
     thread_id: str = Query(..., description="线程 ID"),
     query: str = Query(..., description="搜索关键词"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
     return await search_viewer_files(
         thread_id=thread_id,
         query=query,
+        offset=offset,
+        limit=limit,
         current_user=current_user,
         db=db,
     )

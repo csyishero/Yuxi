@@ -109,11 +109,21 @@
         </div>
       </div>
 
+      <a-spin v-else-if="loadingState" class="task-loading" />
       <div v-else class="task-empty">
         <div class="task-empty-icon">🗂️</div>
         <div class="task-empty-title">{{ emptyHint.title }}</div>
         <div class="task-empty-subtitle">{{ emptyHint.subtitle }}</div>
       </div>
+      <a-pagination
+        v-if="filteredTotalState > PAGE_SIZE"
+        class="task-pagination"
+        :current="currentPage"
+        :page-size="PAGE_SIZE"
+        :total="filteredTotalState"
+        :show-size-changer="false"
+        @change="handlePageChange"
+      />
     </div>
   </a-modal>
 </template>
@@ -133,6 +143,7 @@ const {
   lastError,
   activeCount,
   totalCount,
+  filteredTotal,
   successCount,
   failedCount
 } = storeToRefs(taskerStore)
@@ -142,6 +153,9 @@ const tasks = computed(() => sortedTasks.value)
 const loadingState = computed(() => Boolean(loading.value))
 const lastErrorState = computed(() => lastError.value)
 const statusFilter = ref('all')
+const PAGE_SIZE = 20
+const currentPage = ref(1)
+const filteredTotalState = computed(() => filteredTotal.value || 0)
 const inProgressCount = computed(() => activeCount.value || 0)
 const completedCount = computed(() => successCount.value || 0)
 const failedTaskCount = computed(() => failedCount.value || 0)
@@ -228,7 +242,7 @@ const emptyHint = computed(() => {
     default:
       return {
         title: '暂无任务',
-        subtitle: '提交知识库导入等后台任务后，将在这里展示实时进度（仅展示最近的 100 个任务）。'
+        subtitle: '提交知识库导入等后台任务后，将在这里展示实时进度。'
       }
   }
 })
@@ -255,18 +269,44 @@ watch(
   isOpen,
   (open) => {
     if (open) {
-      taskerStore.loadTasks()
+      loadPage()
     }
   },
   { immediate: true }
 )
+
+watch(statusFilter, () => {
+  currentPage.value = 1
+  if (isOpen.value) loadPage()
+})
+
+watch(filteredTotalState, (total) => {
+  if (!isOpen.value) return
+  const lastPage = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  if (currentPage.value <= lastPage) return
+  currentPage.value = lastPage
+  loadPage()
+})
+
+function loadPage() {
+  return taskerStore.loadTasks({
+    status_group: statusFilter.value,
+    offset: (currentPage.value - 1) * PAGE_SIZE,
+    limit: PAGE_SIZE
+  })
+}
+
+function handlePageChange(page) {
+  currentPage.value = page
+  return loadPage()
+}
 
 function handleClose() {
   taskerStore.closeDrawer()
 }
 
 function handleRefresh() {
-  taskerStore.loadTasks()
+  loadPage()
 }
 
 function prettyJson(value) {
@@ -327,8 +367,9 @@ function handleDetail(taskId) {
   })
 }
 
-function handleCancel(taskId) {
-  taskerStore.cancelTask(taskId)
+async function handleCancel(taskId) {
+  await taskerStore.cancelTask(taskId)
+  await loadPage()
 }
 
 function handleDelete(taskId, taskName) {
@@ -338,8 +379,13 @@ function handleDelete(taskId, taskName) {
     okText: '删除',
     okType: 'danger',
     cancelText: '取消',
-    onOk: () => {
-      taskerStore.deleteTask(taskId)
+    onOk: async () => {
+      await taskerStore.deleteTask(taskId)
+      await loadPage()
+      if (currentPage.value > 1 && !tasks.value.length) {
+        currentPage.value -= 1
+        await loadPage()
+      }
     }
   })
 }
@@ -441,6 +487,15 @@ function canCancel(task) {
 
 .task-alert {
   margin-bottom: 4px;
+}
+
+.task-loading,
+.task-pagination {
+  align-self: center;
+}
+
+.task-pagination {
+  flex-shrink: 0;
 }
 
 .task-tip {

@@ -67,7 +67,7 @@ class APIKeyRepository:
         query = (
             select(APIKey)
             .where(APIKey.revoked_at.is_(None))
-            .order_by(APIKey.created_at.desc())
+            .order_by(APIKey.created_at.desc(), APIKey.id.desc())
             .offset(skip)
             .limit(limit)
         )

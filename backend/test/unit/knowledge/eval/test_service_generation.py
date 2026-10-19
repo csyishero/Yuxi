@@ -20,6 +20,10 @@ class FakeEvaluationRepository:
     async def update_dataset(self, dataset_id, payload):
         self.updated_dataset = (dataset_id, payload)
 
+    async def sync_active_dataset_build_metadata(self, dataset_id, metadata):
+        self.updated_dataset = (dataset_id, {"build_metadata": metadata})
+        return metadata
+
     async def get_dataset(self, dataset_id):
         return self.dataset
 

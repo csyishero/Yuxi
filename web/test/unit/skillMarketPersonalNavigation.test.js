@@ -74,12 +74,13 @@ test('点击市场卡的查看个人技能进入个人详情', async () => {
     })
     globalThis.fetch = async (url) => {
       const path = String(url)
+      if (path.startsWith('/api/skill-market/requests?')) return Response.json({ data: { items: [], total: 0 } })
       const data = path.startsWith('/api/skill-market?')
         ? [{ slug: 'reading-market', name: 'reading', owner_uid: 'work1', owner_name: 'work1', own_personal_slug: 'reading', scope: 'department', department_id: 3, latest_version: 1, install_count: 0, likes_count: 0, category: 'other' }]
         : path.startsWith('/api/skills?')
-          ? [{ slug: 'reading', name: 'reading', source_scope: 'personal', owner_uid: 'work1', category: 'other' }]
+          ? new URL(path, 'http://yuxi.local').searchParams.get('source') === 'shared' ? [] : [{ slug: 'reading', name: 'reading', source_scope: 'personal', owner_uid: 'work1', category: 'other' }]
           : []
-      return new Response(JSON.stringify({ data }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      return new Response(JSON.stringify({ data, has_more: false }), { status: 200, headers: { 'Content-Type': 'application/json' } })
     }
 
     server = await createServer({

@@ -84,9 +84,29 @@
               </button>
             </div>
 
-            <div v-else-if="fileSearchError" class="global-search-error">{{ fileSearchError }}</div>
+            <div v-else-if="fileSearchError" class="global-search-error">
+              <span>{{ fileSearchError }}</span>
+              <button type="button" class="global-search-retry" @click="retryFileSearch">重试</button>
+            </div>
 
             <div v-else-if="!isSearching" class="global-search-empty">未找到相关文件</div>
+
+            <div v-if="fileResults.length && fileSearchError" class="global-search-error file-page-error">
+              <span>{{ fileSearchError }}</span>
+              <button type="button" class="global-search-retry" @click="retryFileSearch">重试</button>
+            </div>
+            <button
+              v-else-if="fileHasMore"
+              type="button"
+              class="global-search-more-button"
+              :disabled="fileLoadingMore"
+              @click="loadMoreFiles"
+            >
+              {{ fileLoadingMore ? '加载中...' : '加载更多文件' }}
+            </button>
+            <div v-if="fileSearchTruncated" class="global-search-truncated">
+              已达到文件扫描范围上限，结果可能不完整。输入 path:/完整路径 可精确查找该文件。
+            </div>
           </div>
 
           <div
@@ -187,6 +207,7 @@ import dayjs, { parseToShanghai } from '@/utils/time'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 
 const CONVERSATION_SEARCH_LIMIT = 20
+const FILE_SEARCH_LIMIT = 50
 const RECENT_LIMIT = 30
 
 const props = defineProps({
@@ -242,6 +263,9 @@ let searchRequestId = 0
 // 文件搜索状态
 const fileResults = ref([])
 const fileSearchError = ref('')
+const fileHasMore = ref(false)
+const fileLoadingMore = ref(false)
+const fileSearchTruncated = ref(false)
 let fileSearchTimer = null
 let fileSearchRequestId = 0
 
@@ -301,6 +325,9 @@ const resetState = () => {
   conversationResults.value = []
   fileResults.value = []
   fileSearchError.value = ''
+  fileHasMore.value = false
+  fileLoadingMore.value = false
+  fileSearchTruncated.value = false
   hasMore.value = false
   isSearching.value = false
   isLoadingMore.value = false
@@ -441,28 +468,48 @@ const handleConversationScroll = () => {
   }
 }
 
-const searchFiles = async (query) => {
+const searchFiles = async (query, { reset = true } = {}) => {
   if (!props.fileSearch) return
   const requestId = ++fileSearchRequestId
-  isSearching.value = true
+  if (reset) isSearching.value = true
+  else fileLoadingMore.value = true
   fileSearchError.value = ''
   try {
-    const response = await props.fileSearch(query)
+    const response = await props.fileSearch(query, {
+      offset: reset ? 0 : fileResults.value.length,
+      limit: FILE_SEARCH_LIMIT
+    })
     if (requestId !== fileSearchRequestId) return
-    fileResults.value = response?.entries || []
-    selectedIndex.value = 0
+    const entries = response?.entries || []
+    fileResults.value = reset ? entries : [...fileResults.value, ...entries]
+    fileHasMore.value = Boolean(response?.has_more)
+    fileSearchTruncated.value = Boolean(response?.truncated)
+    if (reset) selectedIndex.value = 0
   } catch (error) {
     if (requestId === fileSearchRequestId) {
       console.warn('搜索文件失败:', error)
-      fileResults.value = []
+      if (reset) fileResults.value = []
       fileSearchError.value = error?.message || '搜索失败，请重试'
     }
   } finally {
-    if (requestId === fileSearchRequestId) isSearching.value = false
+    if (requestId === fileSearchRequestId) {
+      isSearching.value = false
+      fileLoadingMore.value = false
+    }
   }
 }
 
-const handleFileResultScroll = () => {}
+const loadMoreFiles = () => {
+  if (!fileHasMore.value || isSearching.value || fileLoadingMore.value) return
+  searchFiles(trimmedSearchText.value, { reset: false })
+}
+
+const retryFileSearch = () => searchFiles(trimmedSearchText.value, { reset: fileResults.value.length === 0 })
+
+const handleFileResultScroll = () => {
+  const el = resultListRef.value
+  if (el && el.scrollTop + el.clientHeight >= el.scrollHeight - 80) loadMoreFiles()
+}
 
 const getRecentGroupLabel = (thread) => {
   const parsed = parseToShanghai(thread.updated_at || thread.created_at)
@@ -541,11 +588,14 @@ watch(
 watch(trimmedSearchText, (query) => {
   selectedIndex.value = 0
   if (activeMode.value === 'file') {
+    fileSearchRequestId += 1
     clearTimeout(fileSearchTimer)
     fileResults.value = []
     fileSearchError.value = ''
+    fileHasMore.value = false
+    fileSearchTruncated.value = false
+    fileLoadingMore.value = false
     if (!query) {
-      fileSearchRequestId += 1
       isSearching.value = false
       return
     }
@@ -872,6 +922,37 @@ onUnmounted(() => {
   padding: 48px 16px;
   color: var(--color-error-500, #ff4d4f);
   font-size: 14px;
+  text-align: center;
+}
+
+.global-search-more-button,
+.global-search-retry {
+  border: 0;
+  background: transparent;
+  color: var(--color-primary-500);
+  cursor: pointer;
+}
+
+.global-search-more-button {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  text-align: center;
+}
+
+.global-search-more-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.file-page-error {
+  padding: 12px 16px;
+}
+
+.global-search-truncated {
+  padding: 12px 16px;
+  color: var(--gray-500);
+  font-size: 12px;
   text-align: center;
 }
 

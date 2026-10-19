@@ -64,6 +64,14 @@ class Workdir:
         matches = self.workspace.search_authorized_tree(self.root_path, query, **limits)
         return [{**item, "path": self.scope_path(str(item["path"]))} for item in matches]
 
+    def search_page(self, query: str, *, offset: int, limit: int, **limits) -> dict:
+        """在当前 Workdir 授权根内读取文件搜索结果页。"""
+        page = self.workspace.search_authorized_tree_page(self.root_path, query, offset=offset, limit=limit, **limits)
+        return {
+            **page,
+            "entries": [{**item, "path": self.scope_path(str(item["path"]))} for item in page["entries"]],
+        }
+
     def read_file(self, path: str, max_bytes: int) -> bytes:
         return self.workspace.read_authorized_file(self.resolve_path(path), max_bytes)
 

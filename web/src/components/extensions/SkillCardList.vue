@@ -93,7 +93,7 @@
     </div>
 
     <div
-      v-if="visibleSkillGroups.length === 0"
+      v-if="visibleSkillGroups.length === 0 && !sharedHasMore && !loading"
       class="extension-card-grid-empty-state skill-empty-state"
     >
       <div class="skill-empty-card">
@@ -177,9 +177,14 @@
           {{ catalogLoading ? '正在加载个人 Skill…' : '当前筛选下没有个人 Skill' }}
         </div>
         <div v-if="group.key === 'personal' && catalogNextOffset !== null" class="skill-catalog-more">
-          <a-button :loading="catalogLoading" @click="fetchCatalog()">加载更多人员的 Skill</a-button>
+          <a-button :loading="catalogLoading" @click="fetchCatalog()">加载更多个人技能</a-button>
         </div>
       </template>
+      <div v-if="sharedHasMore" class="skill-catalog-more">
+        <a-button :loading="sharedLoadingMore" :disabled="loading" @click="loadMoreSharedSkills">
+          加载更多共享技能
+        </a-button>
+      </div>
     </template>
     </template>
 
@@ -312,8 +317,13 @@
       :destroy-on-close="true"
       @cancel="closeShareRequests"
     >
+      <div class="skill-share-request-toolbar">
+        <span>状态</span>
+        <a-select v-model:value="shareRequestStatus" aria-label="共享申请状态" :options="shareRequestStatusOptions" @change="changeShareRequestStatus" />
+        <span>共 {{ shareRequestsTotal }} 条</span>
+      </div>
       <a-spin :spinning="shareRequestsLoading">
-        <a-empty v-if="!shareRequests.length" description="暂无共享申请" />
+        <a-empty v-if="!shareRequests.length && !shareRequestsLoading" description="暂无共享申请" />
         <div v-for="request in orderedShareRequests" :key="request.id" class="skill-share-request">
           <div class="skill-share-request-heading">
             <strong>{{ request.name }}</strong>
@@ -345,6 +355,7 @@
               :allowed-access-levels="['department', 'user']"
               :available-departments="userStore.isSuperAdmin ? null : ownDepartmentOptions"
               :available-users="shareUsers"
+              :search-users="searchShareUsers"
               :disabled="shareUsersLoading || reviewingRequestId === request.id"
             />
             <div class="skill-share-review-actions">
@@ -355,6 +366,11 @@
           </template>
         </div>
       </a-spin>
+      <div v-if="shareRequestsTotal > shareRequestsPageSize" class="skill-share-request-pages">
+        <a-button :disabled="shareRequestsPage === 1 || shareRequestsLoading" @click="changeShareRequestsPage(shareRequestsPage - 1)">上一页</a-button>
+        <span>第 {{ shareRequestsPage }} / {{ Math.ceil(shareRequestsTotal / shareRequestsPageSize) }} 页</span>
+        <a-button :disabled="shareRequestsPage * shareRequestsPageSize >= shareRequestsTotal || shareRequestsLoading" @click="changeShareRequestsPage(shareRequestsPage + 1)">下一页</a-button>
+      </div>
     </a-modal>
 
     <a-modal
@@ -671,7 +687,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import {
@@ -730,6 +746,12 @@ const selectedCardSlugs = ref([])
 const togglingSkillSlugs = ref([])
 
 const skills = ref([])
+const sharedHasMore = ref(false)
+const sharedLoadingMore = ref(false)
+const sharedPageSize = 30
+const sharedNextOffset = ref(0)
+let sharedRequestSeq = 0
+let searchTimer = null
 const catalogCards = ref([])
 const catalogDepartmentId = ref(undefined)
 const ownerSearch = ref('')
@@ -737,6 +759,7 @@ const appliedDepartmentId = ref(undefined)
 const appliedOwnerSearch = ref('')
 const catalogNextOffset = ref(null)
 const catalogLoading = ref(false)
+const catalogPageSize = 30
 let catalogRequestSeq = 0
 const skillPreviewVisible = ref(false)
 const previewSkill = ref(null)
@@ -749,6 +772,16 @@ const personalPublishSkill = ref(null)
 const shareRequests = ref([])
 const shareRequestsVisible = ref(false)
 const shareRequestsLoading = ref(false)
+const shareRequestsTotal = ref(0)
+const shareRequestsPage = ref(1)
+const shareRequestsPageSize = 10
+const shareRequestStatus = ref('pending')
+const shareRequestStatusOptions = [
+  { value: 'pending', label: '待审核' }, { value: 'all', label: '全部' },
+  { value: 'approved', label: '已发布' }, { value: 'rejected', label: '已驳回' }
+]
+const pendingShareRequestCount = ref(0)
+let shareRequestsSequence = 0
 const shareSnapshotVisible = ref(false)
 const shareSnapshotLoading = ref(false)
 const shareSnapshotMarkdown = ref('')
@@ -921,9 +954,6 @@ const canDeletePreviewSkill = computed(
     !isOtherPersonalSkill(previewSkill.value) &&
     previewSkill.value.sourceType !== 'builtin'
 )
-const pendingShareRequestCount = computed(
-  () => shareRequests.value.filter((request) => request.status === 'pending').length
-)
 const orderedShareRequests = computed(() =>
   [...shareRequests.value].sort(
     (left, right) => Number(right.status === 'pending') - Number(left.status === 'pending')
@@ -945,16 +975,44 @@ const shareRequestStatusLabel = (status) =>
 
 /** 读取当前用户可见的共享申请。 */
 const fetchShareRequests = async () => {
-  const result = await skillApi.listSkillShareRequests()
-  shareRequests.value = result?.data || []
+  const sequence = ++shareRequestsSequence
+  const page = (await skillApi.listSkillShareRequests({
+    status: shareRequestStatus.value === 'all' ? undefined : shareRequestStatus.value,
+    offset: (shareRequestsPage.value - 1) * shareRequestsPageSize,
+    limit: shareRequestsPageSize
+  }))?.data
+  if (sequence !== shareRequestsSequence) return
+  shareRequests.value = page.items
+  shareRequestsTotal.value = page.total
+  if (shareRequestStatus.value === 'pending') pendingShareRequestCount.value = page.total
+  else pendingShareRequestCount.value = (await skillApi.listSkillShareRequests({ status: 'pending', limit: 1 }))?.data?.total || 0
+  if (!page.items.length && page.total && shareRequestsPage.value > 1) {
+    shareRequestsPage.value = Math.ceil(page.total / shareRequestsPageSize)
+    await fetchShareRequests()
+  }
+}
+
+const changeShareRequestStatus = () => {
+  shareRequestsPage.value = 1
+  openShareRequests()
+}
+
+const changeShareRequestsPage = (page) => {
+  shareRequestsPage.value = page
+  openShareRequests()
 }
 
 /** 加载管理员有权指定的共享人员。 */
+const searchShareUsers = async ({ search = '', offset = 0, limit = 50 } = {}) => {
+  const users = await authApi.getUserAccessOptions({ skip: offset, limit: limit + 1, search })
+  return { items: users.slice(0, limit), has_more: users.length > limit }
+}
+
 const loadShareUsers = async () => {
   if (shareUsers.value.length || shareUsersLoading.value) return
   shareUsersLoading.value = true
   try {
-    shareUsers.value = await authApi.getUserAccessOptions()
+    shareUsers.value = (await searchShareUsers()).items
   } catch (error) {
     message.error(error?.response?.data?.detail || '加载可共享人员失败')
   } finally {
@@ -1099,7 +1157,7 @@ const reviewShareRequest = async (request, action) => {
     return
   }
   try {
-    await Promise.all([fetchShareRequests(), fetchSkills({ refreshPersonal: true })])
+    await Promise.all([openShareRequests(), fetchSkills({ refreshPersonal: true })])
   } catch (error) {
     message.error(error?.response?.data?.detail || '审核已完成，但刷新申请状态失败')
   } finally {
@@ -1474,7 +1532,7 @@ const handleBatchDelete = () => {
   })
 }
 
-/** 加载按人员分页的个人 Skill 目录。 */
+/** 按技能卡片分页加载授权范围内的个人目录。 */
 const fetchCatalog = async ({ reset = false } = {}) => {
   if (!userStore.isAdmin || (catalogLoading.value && !reset)) return
   const requestSeq = ++catalogRequestSeq
@@ -1482,14 +1540,28 @@ const fetchCatalog = async ({ reset = false } = {}) => {
   if (offset === null) return
   catalogLoading.value = true
   try {
-    const result = await skillApi.listPersonalSkillCatalog({
+    const criteria = {
       departmentId: appliedDepartmentId.value,
       ownerSearch: appliedOwnerSearch.value,
-      offset
-    })
-    if (requestSeq !== catalogRequestSeq) return
-    catalogCards.value = reset ? result.data.items : [...catalogCards.value, ...result.data.items]
-    catalogNextOffset.value = result.data.next_offset
+      offset,
+      limit: catalogPageSize,
+      cardPage: true,
+      search: searchQuery.value.trim(),
+      excludeOwn: props.governanceOnly
+    }
+    const result = await skillApi.listPersonalSkillCatalog(criteria)
+    if (
+      requestSeq !== catalogRequestSeq ||
+      criteria.departmentId !== appliedDepartmentId.value ||
+      criteria.ownerSearch !== appliedOwnerSearch.value ||
+      criteria.search !== searchQuery.value.trim()
+    ) return
+    const page = result?.data?.items || []
+    catalogCards.value = [...new Map(
+      (reset ? page : [...catalogCards.value, ...page])
+        .map((skill) => [`${skill.owner_uid}:${skill.slug}`, skill])
+    ).values()]
+    catalogNextOffset.value = result?.data?.next_offset ?? null
   } catch (error) {
     message.error(error?.response?.data?.detail || '加载个人 Skill 目录失败')
   } finally {
@@ -1521,19 +1593,55 @@ const loadDepartments = async () => {
 }
 
 const fetchSkills = async ({ refreshPersonal = false } = {}) => {
+  const requestSeq = ++sharedRequestSeq
   loading.value = true
+  sharedHasMore.value = false
+  sharedNextOffset.value = 0
+  skills.value = []
   try {
     const skillResult = await skillApi.listSkillCards({
+      source: 'shared',
+      limit: sharedPageSize,
+      offset: 0,
+      search: searchQuery.value.trim(),
       refreshPersonal,
       audienceSearch: userStore.isAdmin ? appliedOwnerSearch.value : undefined,
       audienceDepartmentId: userStore.isAdmin ? appliedDepartmentId.value : undefined
     })
+    if (requestSeq !== sharedRequestSeq) return
     skills.value = skillResult?.data || []
+    sharedNextOffset.value = skills.value.length
+    sharedHasMore.value = Boolean(skillResult?.has_more)
     if (userStore.isAdmin) await fetchCatalog({ reset: true })
   } catch {
-    message.error('加载失败')
+    if (requestSeq === sharedRequestSeq) message.error('加载共享技能失败')
   } finally {
-    loading.value = false
+    if (requestSeq === sharedRequestSeq) loading.value = false
+  }
+}
+
+const loadMoreSharedSkills = async () => {
+  if (!sharedHasMore.value || sharedLoadingMore.value || loading.value) return
+  const requestSeq = sharedRequestSeq
+  sharedLoadingMore.value = true
+  try {
+    const result = await skillApi.listSkillCards({
+      source: 'shared',
+      limit: sharedPageSize,
+      offset: sharedNextOffset.value,
+      search: searchQuery.value.trim(),
+      audienceSearch: userStore.isAdmin ? appliedOwnerSearch.value : undefined,
+      audienceDepartmentId: userStore.isAdmin ? appliedDepartmentId.value : undefined
+    })
+    if (requestSeq !== sharedRequestSeq) return
+    const page = result?.data || []
+    skills.value = [...new Map([...skills.value, ...page].map((skill) => [skill.id ?? skill.slug, skill])).values()]
+    sharedNextOffset.value += page.length
+    sharedHasMore.value = Boolean(result?.has_more)
+  } catch (error) {
+    if (requestSeq === sharedRequestSeq) message.error(error?.response?.data?.detail || '加载更多共享技能失败')
+  } finally {
+    if (requestSeq === sharedRequestSeq) sharedLoadingMore.value = false
   }
 }
 
@@ -1736,6 +1844,15 @@ watch(activeTab, () => {
   selectedSearchSkills.value = []
 })
 
+watch(searchQuery, () => {
+  if (props.toolbarOnly) return
+  if (searchTimer) window.clearTimeout(searchTimer)
+  searchTimer = window.setTimeout(() => {
+    searchTimer = null
+    fetchSkills()
+  }, 250)
+})
+
 onMounted(() => {
   if (!props.toolbarOnly) {
     fetchSkills()
@@ -1743,6 +1860,11 @@ onMounted(() => {
   }
   if (userStore.isAdmin && !props.governanceOnly) fetchShareRequests().catch(() => message.error('加载共享申请状态失败'))
   loadHistory()
+})
+
+onUnmounted(() => {
+  sharedRequestSeq += 1
+  if (searchTimer) window.clearTimeout(searchTimer)
 })
 
 defineExpose({
@@ -1824,6 +1946,18 @@ defineExpose({
   padding: 16px 0;
   border-bottom: 1px solid var(--gray-100);
 }
+
+.skill-share-request-toolbar,
+.skill-share-request-pages {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.skill-share-request-toolbar span:last-child { margin-left: auto; color: var(--color-text-secondary); }
+.skill-share-request-toolbar :deep(.ant-select) { min-width: 120px; }
+.skill-share-request-pages { justify-content: center; padding-top: 12px; }
 
 .skill-share-request-heading,
 .skill-share-review-actions {

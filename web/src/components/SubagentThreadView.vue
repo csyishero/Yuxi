@@ -2,6 +2,12 @@
   <div class="subagent-thread-view">
     <div ref="scrollContainerRef" class="subagent-thread-scroll" @scroll="handleScroll">
       <div ref="contentRef" class="subagent-thread-content">
+        <div v-if="page?.has_more" class="subagent-history-load-more">
+          <button type="button" :disabled="olderLoading" @click="loadOlderMessages">
+            {{ olderLoading ? '正在加载...' : '加载更早消息' }}
+          </button>
+          <span v-if="olderError" role="alert">{{ olderError }}</span>
+        </div>
         <div v-if="loading && !hasRenderableMessages" class="subagent-thread-state">
           正在加载子智能体消息...
         </div>
@@ -30,6 +36,7 @@ import { useAgentStreamHandler } from '@/composables/useAgentStreamHandler'
 import { useStreamSmoother } from '@/composables/useStreamSmoother'
 import ThreadMessageList from '@/components/ThreadMessageList.vue'
 import { MessageProcessor } from '@/utils/messageProcessor'
+import { mergeHistoryPage, reconcileHistoryPage } from '@/utils/threadHistoryPaging'
 import ScrollController from '@/utils/scrollController'
 
 const props = defineProps({
@@ -42,6 +49,9 @@ const loading = ref(false)
 const error = ref('')
 const messages = ref([])
 const runs = ref([])
+const page = ref(null)
+const olderLoading = ref(false)
+const olderError = ref('')
 const currentRunId = ref('')
 const currentRunStatus = ref('')
 const streamActive = ref(false)
@@ -138,10 +148,55 @@ const scrollToBottom = async (force = false) => {
   if (force) await scrollController.scrollToBottomStaticForce()
   else await scrollController.scrollToBottom()
 }
-const loadPersistedMessages = async () => {
-  const response = await agentApi.getAgentHistory(props.threadId)
-  messages.value = normalizeMessages(response.history || [])
-  runs.value = response.runs
+const loadPersistedMessages = async (version) => {
+  const response = await agentApi.getAgentHistory(props.threadId, { limit: 50 })
+  if (disposed || version !== loadVersion) return
+  const normalizedResponse = { ...response, history: normalizeMessages(response.history || []) }
+  const nextPage = reconcileHistoryPage(page.value, messages.value, runs.value, normalizedResponse)
+  const merged = mergeHistoryPage(messages.value, runs.value, {
+    ...normalizedResponse
+  })
+  messages.value = merged.history
+  runs.value = merged.runs
+  page.value = nextPage
+}
+const loadOlderMessages = async () => {
+  const currentPage = page.value
+  const threadId = props.threadId
+  const version = loadVersion
+  if (!currentPage?.has_more || olderLoading.value) return
+  olderLoading.value = true
+  olderError.value = ''
+  const container = scrollContainerRef.value
+  const previousHeight = container?.scrollHeight || 0
+  scrollController.disableAutoScroll()
+  try {
+    const response = await agentApi.getAgentHistory(threadId, {
+      limit: 50,
+      before_message_id: currentPage.before_message_id,
+      before_run_id: currentPage.before_run_id,
+      include_messages: currentPage.has_more_messages,
+      include_runs: currentPage.has_more_runs
+    })
+    if (disposed || version !== loadVersion) return
+    const merged = mergeHistoryPage(messages.value, runs.value, {
+      ...response,
+      history: normalizeMessages(response.history || [])
+    })
+    messages.value = merged.history
+    runs.value = merged.runs
+    page.value = response.page
+    await nextTick()
+    if (container) {
+      container.scrollTop += container.scrollHeight - previousHeight
+      scrollController.handleScroll()
+    }
+  } catch (loadError) {
+    if (version === loadVersion) olderError.value = '加载更早消息失败，请重试'
+    console.error('Failed to load older subagent messages:', loadError)
+  } finally {
+    olderLoading.value = false
+  }
 }
 const loadThread = async () => {
   if (!props.threadId) return
@@ -157,10 +212,10 @@ const loadThread = async () => {
     if (!currentRunId.value || isTerminalRunStatus(currentRunStatus.value)) {
       stopRunStream()
       resetStreamState()
-      await loadPersistedMessages()
+      await loadPersistedMessages(version)
       if (disposed || version !== loadVersion) return
     } else {
-      await loadPersistedMessages()
+      await loadPersistedMessages(version)
       if (disposed || version !== loadVersion) return
       messages.value = messages.value.filter(
         (message) => getMessageRunId(message) !== currentRunId.value
@@ -238,7 +293,13 @@ const startRunStream = async (runId, afterSeq = '0-0', resetMessages = false) =>
   }
 }
 
-watch(() => props.threadId, loadThread)
+watch(() => props.threadId, () => {
+  messages.value = []
+  runs.value = []
+  page.value = null
+  olderError.value = ''
+  loadThread()
+})
 watch(
   () => props.active,
   (active) => {
@@ -281,6 +342,30 @@ onUnmounted(() => {
   width: min(100%, 800px);
   min-height: 100%;
   margin: 0 auto;
+}
+
+.subagent-history-load-more {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: var(--color-error-600);
+  font-size: 12px;
+
+  button {
+    border: 1px solid var(--gray-200);
+    border-radius: 8px;
+    padding: 6px 14px;
+    background: var(--gray-0);
+    color: var(--main-color);
+    cursor: pointer;
+
+    &:disabled {
+      cursor: wait;
+      opacity: 0.6;
+    }
+  }
 }
 
 .subagent-thread-state {

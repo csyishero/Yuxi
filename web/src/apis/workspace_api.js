@@ -71,6 +71,6 @@ export const downloadWorkspaceFile = (path) => {
   return apiGet(`/api/workspace/download?${query}`, {}, true, 'blob')
 }
 
-export const searchWorkspaceFiles = (query) => {
-  return apiGet(`/api/workspace/search?${buildQuery({ query })}`)
+export const searchWorkspaceFiles = (query, { offset = 0, limit = 50 } = {}) => {
+  return apiGet(`/api/workspace/search?${buildQuery({ query, offset, limit })}`)
 }

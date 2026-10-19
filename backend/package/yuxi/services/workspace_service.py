@@ -34,29 +34,32 @@ MAX_WORKSPACE_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_BYTES
 MAX_WORKSPACE_UPLOAD_FILES = 50
 MAX_WORKSPACE_DOWNLOAD_SIZE_BYTES = 1024 * 1024 * 1024
 
-# 搜索返回条数上限，避免超大工作区一次性返回过多结果
-WORKSPACE_SEARCH_MAX_RESULTS = 100
 WORKSPACE_SCOPE_ROOT = "/"
 
 
-async def search_workspace_files(*, query: str, current_user: User) -> dict:
+async def search_workspace_files(*, query: str, current_user: User, offset: int = 0, limit: int = 50) -> dict:
     """按文件名在个人工作区内递归搜索，仅返回文件条目。"""
-    normalized_query = (query or "").strip().lower()
+    normalized_query = (query or "").strip()
     if not normalized_query:
-        return {"entries": []}
+        return {"entries": [], "has_more": False, "truncated": False}
 
     backend = _workspace_backend(current_user)
     try:
-        matches = await asyncio.to_thread(
-            backend.search_authorized_tree,
+        page = await asyncio.to_thread(
+            backend.search_authorized_tree_page,
             WORKSPACE_SCOPE_ROOT,
             normalized_query,
             include_directories=False,
-            max_results=WORKSPACE_SEARCH_MAX_RESULTS,
+            offset=offset,
+            limit=limit,
         )
     except FileNotFoundError:
-        return {"entries": []}
-    return {"entries": [_entry_from_metadata(item["path"], item) for item in matches]}
+        return {"entries": [], "has_more": False, "truncated": False}
+    return {
+        "entries": [_entry_from_metadata(item["path"], item) for item in page["entries"]],
+        "has_more": page["has_more"],
+        "truncated": page["truncated"],
+    }
 
 
 async def list_workspace_tree(

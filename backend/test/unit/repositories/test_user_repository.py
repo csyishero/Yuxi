@@ -90,6 +90,54 @@ async def test_user_page_filters_before_pagination_and_excludes_deleted_users(us
     assert all(row[0].is_deleted == 0 for row in rows)
 
 
+async def test_selected_user_lookup_excludes_other_departments_and_deleted_users(user_session) -> None:
+    session, _user, _keys, _previous_revocation = user_session
+    own_department = Department(name="Own Department")
+    other_department = Department(name="Other Department")
+    session.add_all([own_department, other_department])
+    await session.flush()
+    session.add_all(
+        [
+            User(
+                username="Selected",
+                uid="selected",
+                password_hash="placeholder",
+                role="user",
+                department_id=own_department.id,
+            ),
+            User(
+                username="Outside",
+                uid="outside",
+                password_hash="placeholder",
+                role="user",
+                department_id=other_department.id,
+            ),
+            User(
+                username="Deleted",
+                uid="deleted",
+                password_hash="placeholder",
+                role="user",
+                department_id=own_department.id,
+                is_deleted=1,
+            ),
+        ]
+    )
+    await session.commit()
+
+    rows = await UserRepository(session).list_with_department_by_uids(
+        uids=["selected", "outside", "deleted", "missing"], department_id=own_department.id
+    )
+    assert [(user.uid, department_name) for user, department_name in rows] == [("selected", "Own Department")]
+
+    all_rows = await UserRepository(session).list_with_department_by_uids(
+        uids=["selected", "outside", "deleted", "missing"], department_id=None
+    )
+    assert {(user.uid, department_name) for user, department_name in all_rows} == {
+        ("selected", "Own Department"),
+        ("outside", "Other Department"),
+    }
+
+
 async def test_soft_delete_tombstones_all_api_keys_without_rewriting_history(user_session) -> None:
     """通用软删除入口也必须阻止旧请求复活凭据。"""
 

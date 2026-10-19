@@ -6,7 +6,7 @@
           <div class="evaluation-section-heading">
             <div class="evaluation-section-title-row">
               <h3 id="evaluation-benchmarks-title">评估基准</h3>
-              <span class="evaluation-section-count">{{ datasets.length }}</span>
+              <span class="evaluation-section-count">{{ datasetTotal }}</span>
             </div>
             <p>管理评估题目与标准答案，选择基准后可查看题目和关联测试。</p>
           </div>
@@ -42,7 +42,11 @@
         <div class="evaluation-list-shell">
           <div v-if="loading" class="evaluation-skeleton-list" aria-label="正在加载评估基准">
             <div v-for="index in 3" :key="index" class="evaluation-skeleton-row">
-              <a-skeleton active :paragraph="{ rows: 1, width: ['72%'] }" :title="{ width: '38%' }" />
+              <a-skeleton
+                active
+                :paragraph="{ rows: 1, width: ['72%'] }"
+                :title="{ width: '38%' }"
+              />
             </div>
           </div>
 
@@ -52,7 +56,7 @@
               <strong>评估数据加载失败</strong>
               <span>{{ errorMessage }}</span>
             </div>
-            <a-button size="small" @click="loadOverview">重试</a-button>
+            <a-button size="small" @click="loadOverview()">重试</a-button>
           </div>
 
           <ResourceEmptyState
@@ -166,6 +170,15 @@
               </span>
             </div>
           </div>
+          <div v-if="datasetTotal > datasetPageSize" class="evaluation-list-pagination">
+            <a-pagination
+              :current="datasetPage"
+              :page-size="datasetPageSize"
+              :total="datasetTotal"
+              size="small"
+              @change="changeDatasetPage"
+            />
+          </div>
         </div>
       </section>
 
@@ -174,7 +187,7 @@
           <div class="evaluation-section-heading">
             <div class="evaluation-section-title-row">
               <h3 id="recent-evaluations-title">近期评估</h3>
-              <span class="evaluation-section-count">{{ runs.length }}</span>
+              <span class="evaluation-section-count">{{ runTotal }}</span>
             </div>
             <p>查看最近运行的 RAG 测试，完成后可进入对应基准检查逐题结果。</p>
           </div>
@@ -183,7 +196,6 @@
             v-if="canManage"
             type="button"
             class="lucide-icon-btn extension-panel-action extension-panel-action-primary"
-            :disabled="completedDatasets.length === 0"
             @click="runModalOpen = true"
           >
             <Plus :size="14" aria-hidden="true" />
@@ -194,22 +206,22 @@
         <div class="evaluation-list-shell">
           <div v-if="loading" class="evaluation-skeleton-list" aria-label="正在加载近期评估">
             <div v-for="index in 3" :key="index" class="evaluation-skeleton-row">
-              <a-skeleton active :paragraph="{ rows: 1, width: ['64%'] }" :title="{ width: '32%' }" />
+              <a-skeleton
+                active
+                :paragraph="{ rows: 1, width: ['64%'] }"
+                :title="{ width: '32%' }"
+              />
             </div>
           </div>
 
           <ResourceEmptyState
             v-else-if="runs.length === 0"
             title="暂无评估记录"
-            :description="
-              completedDatasets.length > 0
-                ? '选择一个评估基准开始首次测试。'
-                : '创建并完成一个评估基准后，即可运行 RAG 评估。'
-            "
+            description="选择一个已完成的评估基准开始首次测试。"
             :icon="BarChart3"
             size="compact"
           >
-            <template v-if="canManage && completedDatasets.length > 0" #actions>
+            <template v-if="canManage" #actions>
               <a-button type="primary" @click="runModalOpen = true">新建评估</a-button>
             </template>
           </ResourceEmptyState>
@@ -220,12 +232,7 @@
               :key="run.run_id"
               class="evaluation-list-row evaluation-run-row"
             >
-              <button
-                type="button"
-                class="evaluation-row-open"
-                :disabled="!datasetById[run.dataset_id]"
-                @click="openRun(run)"
-              >
+              <button type="button" class="evaluation-row-open" @click="openRun(run)">
                 <span class="evaluation-row-icon" :class="`run-${run.status}`" aria-hidden="true">
                   <LoaderCircle
                     v-if="run.status === 'running'"
@@ -244,7 +251,10 @@
                     </span>
                   </span>
                   <span class="evaluation-row-description">
-                    {{ datasetById[run.dataset_id]?.name || '关联基准已删除' }}
+                    {{
+                      datasetById[run.dataset_id]?.name ||
+                      (run.dataset_id ? `基准 ${run.dataset_id}` : '关联基准已删除')
+                    }}
                   </span>
                   <span v-if="run.status === 'running'" class="evaluation-row-progress">
                     <a-progress
@@ -254,7 +264,9 @@
                       status="active"
                     />
                     <span>
-                      {{ run.message || `已完成 ${run.completed_items || 0}/${run.total_items || 0}` }}
+                      {{
+                        run.message || `已完成 ${run.completed_items || 0}/${run.total_items || 0}`
+                      }}
                     </span>
                   </span>
                 </span>
@@ -274,12 +286,7 @@
                     <span>{{ formatTime(run.started_at) }}</span>
                   </span>
                 </span>
-                <ChevronRight
-                  v-if="datasetById[run.dataset_id]"
-                  class="evaluation-row-chevron"
-                  :size="17"
-                  aria-hidden="true"
-                />
+                <ChevronRight class="evaluation-row-chevron" :size="17" aria-hidden="true" />
               </button>
               <span v-if="canManage" class="evaluation-row-actions">
                 <a-popconfirm
@@ -299,6 +306,15 @@
                 </a-popconfirm>
               </span>
             </div>
+          </div>
+          <div v-if="runTotal > runPageSize" class="evaluation-list-pagination">
+            <a-pagination
+              :current="runPage"
+              :page-size="runPageSize"
+              :total="runTotal"
+              size="small"
+              @change="changeRunPage"
+            />
           </div>
         </div>
       </section>
@@ -320,6 +336,68 @@
       :datasets="completedDatasets"
       @success="handleRunCreated"
     />
+    <a-modal
+      :open="Boolean(orphanRun)"
+      :title="`历史评估结果 · ${getRunName(orphanRun)}`"
+      width="960px"
+      :footer="null"
+      @cancel="closeOrphanRun"
+    >
+      <div v-if="orphanRun" class="historical-run-results">
+        <p class="historical-run-context">
+          关联基准已删除，仍可查看运行时保存的逐题结果。共 {{ orphanPagination.total }} 条。
+        </p>
+        <div v-if="orphanResultsError" class="historical-run-error" role="alert">
+          <span>{{ orphanResultsError }}</span>
+          <a-button size="small" @click="loadOrphanResults(orphanPagination.current)"
+            >重试</a-button
+          >
+        </div>
+        <a-table
+          v-else
+          :columns="historicalResultColumns"
+          :data-source="orphanResults"
+          :pagination="false"
+          :loading="orphanResultsLoading"
+          :row-key="(record) => record.item_index"
+          :scroll="{ x: 880 }"
+          size="small"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'query'">
+              <div class="historical-run-cell">{{ record.query || '-' }}</div>
+            </template>
+            <template v-else-if="column.key === 'gold_answer'">
+              <div class="historical-run-cell">{{ record.gold_answer || '-' }}</div>
+            </template>
+            <template v-else-if="column.key === 'generated_answer'">
+              <div class="historical-run-cell">{{ record.generated_answer || '-' }}</div>
+            </template>
+            <template v-else-if="column.key === 'metrics'">
+              <div class="historical-run-metrics">
+                <span>R@10 {{ formatMetric(record.metrics?.['recall@10']) }}</span>
+                <span v-if="Number.isFinite(record.metrics?.score)">
+                  答案评分 {{ formatMetric(record.metrics.score) }}
+                </span>
+                <span v-if="record.metrics?.reasoning" class="historical-run-cell">
+                  {{ record.metrics.reasoning }}
+                </span>
+              </div>
+            </template>
+          </template>
+          <template #emptyText>暂无逐题结果</template>
+        </a-table>
+        <a-pagination
+          v-if="orphanPagination.total > orphanPagination.pageSize"
+          class="historical-run-pagination"
+          :current="orphanPagination.current"
+          :page-size="orphanPagination.pageSize"
+          :total="orphanPagination.total"
+          size="small"
+          @change="loadOrphanResults"
+        />
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -363,11 +441,32 @@ const loading = ref(true)
 const errorMessage = ref('')
 const datasets = ref([])
 const runs = ref([])
+const datasetPage = ref(1)
+const runPage = ref(1)
+const datasetPageSize = 20
+const runPageSize = 20
+const datasetTotal = ref(0)
+const runTotal = ref(0)
 const uploadModalOpen = ref(false)
 const generateModalOpen = ref(false)
 const runModalOpen = ref(false)
+const orphanRun = ref(null)
+const orphanResults = ref([])
+const orphanResultsLoading = ref(false)
+const orphanResultsError = ref('')
+const orphanPagination = reactive({ current: 1, pageSize: 20, total: 0 })
+const historicalResultColumns = [
+  { title: '问题', key: 'query', width: 250 },
+  { title: '标准答案', key: 'gold_answer', width: 210 },
+  { title: '生成答案', key: 'generated_answer', width: 210 },
+  { title: '指标', key: 'metrics', width: 210 }
+]
 const downloading = reactive({})
 let refreshTimer = null
+let latestOverviewRequest = 0
+let overviewInFlight = false
+let latestOrphanRequest = 0
+let disposed = false
 
 const completedDatasets = computed(() =>
   datasets.value.filter((dataset) => getDatasetStatus(dataset) === 'completed')
@@ -375,7 +474,7 @@ const completedDatasets = computed(() =>
 const datasetById = computed(() =>
   Object.fromEntries(datasets.value.map((dataset) => [dataset.dataset_id, dataset]))
 )
-const recentRuns = computed(() => runs.value.slice(0, 8))
+const recentRuns = computed(() => runs.value)
 
 const getDatasetStatus = (dataset) => dataset?.build_metadata?.status || 'completed'
 const isDatasetBuilding = (dataset) => ['pending', 'running'].includes(getDatasetStatus(dataset))
@@ -425,6 +524,7 @@ const stopRefreshTimer = () => {
 }
 
 const syncRefreshTimer = () => {
+  if (disposed) return
   if (!hasActiveWork()) {
     stopRefreshTimer()
     return
@@ -434,6 +534,9 @@ const syncRefreshTimer = () => {
 
 const loadOverview = async (silent = false) => {
   if (!props.kbId) return
+  if (silent && overviewInFlight) return
+  const requestId = ++latestOverviewRequest
+  overviewInFlight = true
   if (!silent) {
     loading.value = true
     errorMessage.value = ''
@@ -441,25 +544,58 @@ const loadOverview = async (silent = false) => {
 
   try {
     const [datasetResponse, runResponse] = await Promise.all([
-      evaluationApi.listDatasets(props.kbId),
-      evaluationApi.listRuns(props.kbId)
+      evaluationApi.listDatasets(props.kbId, {
+        limit: datasetPageSize,
+        offset: (datasetPage.value - 1) * datasetPageSize
+      }),
+      evaluationApi.listRuns(props.kbId, {
+        limit: runPageSize,
+        offset: (runPage.value - 1) * runPageSize
+      })
     ])
+    if (disposed || requestId !== latestOverviewRequest) return
     if (datasetResponse?.message !== 'success' || !Array.isArray(datasetResponse.data)) {
       throw new Error('评估基准数据格式错误')
     }
     if (runResponse?.message !== 'success' || !Array.isArray(runResponse.data)) {
       throw new Error('评估记录数据格式错误')
     }
+    const nextDatasetTotal = datasetResponse.pagination?.total ?? datasetResponse.data.length
+    const nextRunTotal = runResponse.pagination?.total ?? runResponse.data.length
+    const validDatasetPage = Math.max(1, Math.ceil(nextDatasetTotal / datasetPageSize))
+    const validRunPage = Math.max(1, Math.ceil(nextRunTotal / runPageSize))
+    if (datasetPage.value > validDatasetPage || runPage.value > validRunPage) {
+      datasetPage.value = Math.min(datasetPage.value, validDatasetPage)
+      runPage.value = Math.min(runPage.value, validRunPage)
+      await loadOverview(false)
+      return
+    }
     datasets.value = datasetResponse.data
     runs.value = runResponse.data
+    datasetTotal.value = nextDatasetTotal
+    runTotal.value = nextRunTotal
     errorMessage.value = ''
   } catch (error) {
+    if (disposed || requestId !== latestOverviewRequest) return
     console.error('加载评估工作台失败:', error)
     if (!silent) errorMessage.value = error.message || '请稍后重试'
   } finally {
-    if (!silent) loading.value = false
-    syncRefreshTimer()
+    if (!disposed && requestId === latestOverviewRequest) {
+      overviewInFlight = false
+      if (!silent) loading.value = false
+      syncRefreshTimer()
+    }
   }
+}
+
+const changeDatasetPage = async (page) => {
+  datasetPage.value = page
+  await loadOverview()
+}
+
+const changeRunPage = async (page) => {
+  runPage.value = page
+  await loadOverview()
 }
 
 const handleBenchmarkCreateAction = ({ key }) => {
@@ -476,12 +612,58 @@ const openDataset = (dataset) => {
 }
 
 const openRun = (run) => {
-  if (!datasetById.value[run.dataset_id]) return
+  if (!run.dataset_id) {
+    orphanRun.value = run
+    orphanResults.value = []
+    orphanResultsError.value = ''
+    orphanPagination.current = 1
+    orphanPagination.total = 0
+    loadOrphanResults(1)
+    return
+  }
   router.push({
     name: 'ExtensionEvaluationBenchmarkDetail',
     params: { kbId: props.kbId, datasetId: run.dataset_id },
     query: { view: 'results', run: run.run_id }
   })
+}
+
+const closeOrphanRun = () => {
+  latestOrphanRequest += 1
+  orphanRun.value = null
+  orphanResults.value = []
+  orphanResultsError.value = ''
+  orphanResultsLoading.value = false
+}
+
+const loadOrphanResults = async (page = 1) => {
+  const runId = orphanRun.value?.run_id
+  if (!runId) return
+  const requestId = ++latestOrphanRequest
+  orphanPagination.current = page
+  orphanResults.value = []
+  orphanResultsError.value = ''
+  orphanResultsLoading.value = true
+  try {
+    const response = await evaluationApi.getRunResults(props.kbId, runId, {
+      page,
+      pageSize: orphanPagination.pageSize
+    })
+    if (disposed || requestId !== latestOrphanRequest || orphanRun.value?.run_id !== runId) return
+    if (response?.message !== 'success' || !Array.isArray(response.data?.items)) {
+      throw new Error('逐题结果数据格式错误')
+    }
+    orphanResults.value = response.data.items
+    orphanPagination.current = response.data.pagination?.current_page || page
+    orphanPagination.total = response.data.pagination?.total ?? orphanResults.value.length
+  } catch (error) {
+    if (disposed || requestId !== latestOrphanRequest || orphanRun.value?.run_id !== runId) return
+    orphanResultsError.value = error.message || '加载逐题结果失败'
+  } finally {
+    if (!disposed && requestId === latestOrphanRequest && orphanRun.value?.run_id === runId) {
+      orphanResultsLoading.value = false
+    }
+  }
 }
 
 const downloadDataset = async (dataset) => {
@@ -518,6 +700,7 @@ const deleteDataset = (dataset) => {
     onOk: async () => {
       await evaluationApi.deleteDataset(dataset.dataset_id)
       message.success('评估基准已删除')
+      if (datasets.value.length === 1 && datasetPage.value > 1) datasetPage.value -= 1
       await loadOverview()
     }
   })
@@ -543,6 +726,7 @@ const deleteRun = async (run) => {
   try {
     await evaluationApi.deleteRun(props.kbId, run.run_id)
     message.success('评估记录已删除')
+    if (runs.value.length === 1 && runPage.value > 1) runPage.value -= 1
     await loadOverview()
   } catch (error) {
     console.error('删除评估记录失败:', error)
@@ -552,16 +736,23 @@ const deleteRun = async (run) => {
 
 const handleDatasetCreated = async () => {
   taskerStore.loadTasks()
+  datasetPage.value = 1
   await loadOverview()
 }
 
 const handleRunCreated = async () => {
   taskerStore.loadTasks()
+  runPage.value = 1
   await loadOverview()
 }
 
 onMounted(() => loadOverview())
-onUnmounted(stopRefreshTimer)
+onUnmounted(() => {
+  disposed = true
+  latestOverviewRequest += 1
+  latestOrphanRequest += 1
+  stopRefreshTimer()
+})
 
 defineExpose({ loadOverview })
 </script>
@@ -634,6 +825,13 @@ defineExpose({ loadOverview })
   border-radius: 10px;
   background: var(--gray-0);
   box-shadow: 0 1px 2px rgb(15 23 42 / 3%);
+}
+
+.evaluation-list-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 16px;
+  border-top: 1px solid var(--gray-150);
 }
 
 .evaluation-divider-list {
@@ -959,6 +1157,46 @@ defineExpose({ loadOverview })
 
 .evaluation-spin {
   animation: evaluation-spin 0.9s linear infinite;
+}
+
+.historical-run-results {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.historical-run-context {
+  margin: 0;
+  color: var(--gray-600);
+  font-size: 13px;
+}
+
+.historical-run-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  color: var(--color-error-700);
+  background: var(--color-error-50);
+  border-radius: 8px;
+}
+
+.historical-run-cell {
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.historical-run-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.historical-run-pagination {
+  align-self: flex-end;
 }
 
 @keyframes evaluation-spin {

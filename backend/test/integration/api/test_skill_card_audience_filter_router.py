@@ -115,15 +115,14 @@ async def test_person_search_filters_department_and_named_user_shares(monkeypatc
         no_match_response = await client.get("/api/skills?audience_search=missing")
 
     assert response.status_code == 200, response.text
-    assert [item["slug"] for item in response.json()["data"]] == [
-        "builtin", "global-share", "dept-one", "direct-one"
-    ]
+    assert [item["slug"] for item in response.json()["data"]] == ["builtin", "global-share", "dept-one", "direct-one"]
     assert response.json()["data"][-1]["read_user_names"] == ["测试用户"]
     assert [item["slug"] for item in no_match_response.json()["data"]] == ["builtin"]
 
 
 async def test_non_admin_cannot_search_other_users_skills(monkeypatch):
     """普通用户不能利用人员筛选查询目标账号范围。"""
+
     class FakeSkillRepository:
         def __init__(self, _db):
             pass
@@ -157,6 +156,7 @@ async def test_non_admin_cannot_search_other_users_skills(monkeypatch):
 
 async def test_department_admin_cannot_search_another_department(monkeypatch):
     """部门管理员不能借人员筛选查询其他部门。"""
+
     class FakeSkillRepository:
         def __init__(self, _db):
             pass

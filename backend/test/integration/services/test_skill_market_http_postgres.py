@@ -238,6 +238,12 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
             assert pending["existing_market_department_id"] == 1
             assert pending["current_market_version"] == 1
             assert pending["published_version"] is None
+            older = await client.get(
+                "/api/skill-market/requests", params={"slug": "credit-review", "limit": 1, "offset": 1}
+            )
+            assert older.status_code == 200, older.text
+            assert older.json()["data"]["total"] == 2
+            assert [item["id"] for item in older.json()["data"]["items"]] == [request_id]
             current = User(uid="root", username="Root", password_hash="x", role="superadmin", department_id=2)
             assert (await client.get("/api/skill-market/requests?mine_only=true")).json()["data"] == []
             current = User(uid="credit-admin", username="Admin", password_hash="x", role="admin", department_id=1)

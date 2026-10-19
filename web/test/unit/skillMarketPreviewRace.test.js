@@ -92,7 +92,7 @@ async function withPreview(view, verify) {
     })
     globalThis.fetch = async (url) => {
       const path = String(url)
-      if (path === '/api/skill-market/requests') return Response.json({ data: [request] })
+      if (path.startsWith('/api/skill-market/requests?')) return Response.json({ data: { items: [request], total: 1 } })
       if (path === '/api/skills/share-requests/release-2/tree') return Response.json({ data: files })
       if (path.startsWith('/api/skills/share-requests/release-2/snapshot?')) {
         const file = new URL(path, 'http://yuxi.local').searchParams.get('path')

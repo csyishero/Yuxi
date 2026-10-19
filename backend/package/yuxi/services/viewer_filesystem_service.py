@@ -24,7 +24,6 @@ from yuxi.utils.filepreview import (
 from yuxi.utils.upload_utils import write_upload_to_path
 from yuxi.workspace.errors import FileTransferLimitError
 
-SEARCH_MAX_RESULTS = 100
 SEARCH_MAX_DIRECTORIES = 600
 MAX_VIEWER_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_VIEWER_DOWNLOAD_BYTES = 1024 * 1024 * 1024
@@ -87,26 +86,29 @@ async def list_viewer_filesystem_tree(*, thread_id: str, path: str, current_user
     return {"entries": await _list_directory(access, path)}
 
 
-async def search_viewer_files(*, thread_id: str, query: str, current_user, db) -> dict:
+async def search_viewer_files(
+    *, thread_id: str, query: str, current_user, db, offset: int = 0, limit: int = 50
+) -> dict:
     """在实时 Workdir 内按文件名搜索。"""
-    normalized_query = str(query or "").strip().lower()
+    normalized_query = str(query or "").strip()
     if not normalized_query:
-        return {"entries": []}
+        return {"entries": [], "has_more": False, "truncated": False}
     access = await _viewer_state(thread_id=thread_id, current_user=current_user, db=db)
     try:
-        matches = await asyncio.to_thread(
-            access.workdir.search,
+        page = await asyncio.to_thread(
+            access.workdir.search_page,
             normalized_query,
-            max_results=SEARCH_MAX_RESULTS,
+            offset=offset,
+            limit=limit,
             max_directories=SEARCH_MAX_DIRECTORIES,
         )
     except (FileNotFoundError, NotADirectoryError, PermissionError, ValueError) as exc:
         raise HTTPException(status_code=404, detail="目录不存在") from exc
     entries = []
-    for item in matches:
+    for item in page["entries"]:
         parent = str(PurePosixPath(str(item["path"])).parent)
         entries.append(_entry(access, parent, item))
-    return {"entries": entries}
+    return {"entries": entries, "has_more": page["has_more"], "truncated": page["truncated"]}
 
 
 async def _download_to_temp(workdir, path: str, max_bytes: int) -> str:

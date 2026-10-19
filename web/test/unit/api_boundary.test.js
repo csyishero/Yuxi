@@ -291,6 +291,7 @@ test('用户管理分页 API 只请求当前页并编码服务端筛选条件', 
   })
 })
 
+
 test('用户管理组件不再通过 Store 全量加载用户', async () => {
   const source = await import('node:fs/promises').then((fs) =>
     fs.readFile(
@@ -424,7 +425,7 @@ test('四个 API 模块复用查询参数边界并保持 endpoint 问号语义',
 
     assert.deepEqual(requests, [
       '/api/projects/project-1?delete_workdir=false',
-      '/api/viewer/filesystem/search?thread_id=thread-1',
+      '/api/viewer/filesystem/search?thread_id=thread-1&offset=0&limit=50',
       '/api/workspace/knowledge/tree?kb_id=kb-1&page=0&page_size=false&recursive=false&files_only=false',
       '/api/knowledge/databases/kb-1/documents?page=0&page_size=false',
       '/api/knowledge/databases/kb-1/documents',

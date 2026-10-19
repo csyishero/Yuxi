@@ -118,6 +118,8 @@ class ConversationDetailResponse(BaseModel):
     status: str
     is_pinned: bool = False
     message_count: int
+    messages_offset: int
+    has_older_messages: bool
     created_at: str
     updated_at: str
     total_tokens: int | None
@@ -138,6 +140,15 @@ class FeedbackListItem(BaseModel):
     message_content: str
     conversation_title: str | None
     agent_id: str
+
+
+class FeedbackPageResponse(BaseModel):
+    """反馈分页响应。"""
+
+    items: list[FeedbackListItem]
+    total: int
+    limit: int
+    offset: int
 
 
 class TimeSeriesStats(BaseModel):
@@ -294,6 +305,22 @@ async def get_thread_analytics_stats(
     return ThreadAnalyticsResponse(**data)
 
 
+@dashboard.get("/feedbacks/page", response_model=FeedbackPageResponse)
+async def get_feedbacks_page(
+    rating: str | None = None,
+    agent_id: str | None = None,
+    scope: Literal["all", "current"] = "all",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_superadmin_user),
+):
+    """分页获取反馈记录（超级管理员权限）。"""
+    return await DashboardService(db, scope=scope).get_feedbacks(
+        rating=rating, agent_id=agent_id, limit=limit, offset=offset
+    )
+
+
 @dashboard.get("/feedbacks", response_model=list[FeedbackListItem])
 async def get_all_feedbacks(
     rating: str | None = None,
@@ -302,8 +329,9 @@ async def get_all_feedbacks(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_superadmin_user),
 ):
-    """获取所有反馈记录（超级管理员权限）。"""
-    return await DashboardService(db, scope=scope).get_feedbacks(rating=rating, agent_id=agent_id)
+    """保留旧反馈客户端的数组响应；管理页使用分页接口。"""
+    page = await DashboardService(db, scope=scope).get_feedbacks(rating=rating, agent_id=agent_id, limit=None, offset=0)
+    return page["items"]
 
 
 @dashboard.get("/conversations/options", response_model=ConversationFilterOptionsResponse)
@@ -349,11 +377,13 @@ async def get_all_conversations(
 async def get_conversation_detail(
     thread_id: str,
     scope: Literal["all", "current"] = "all",
+    limit: Annotated[int | None, Query(ge=1, le=100)] = None,
+    offset: Annotated[int | None, Query(ge=0)] = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_superadmin_user),
 ):
     """获取指定对话详情（超级管理员权限）。"""
-    data = await DashboardService(db, scope=scope).get_conversation_detail(thread_id)
+    data = await DashboardService(db, scope=scope).get_conversation_detail(thread_id, limit=limit, offset=offset)
     if not data:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return data

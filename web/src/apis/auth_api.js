@@ -9,7 +9,8 @@ import {
   apiPost,
   apiPut,
   apiSuperAdminGet,
-  apiSuperAdminPost
+  apiSuperAdminPost,
+  buildQuery
 } from './base'
 
 /**
@@ -46,8 +47,15 @@ async function getOIDCLoginUrl(redirectPath = '/') {
  *   department_name: string | null
  * }>}
  */
-async function getUserAccessOptions() {
-  return apiAdminGet('/api/auth/users/access-options')
+async function getUserAccessOptions({ skip, limit, search } = {}) {
+  const query = buildQuery({ skip, limit, search })
+  return apiAdminGet(`/api/auth/users/access-options${query ? `?${query}` : ''}`)
+}
+
+async function getUserAccessOptionsByUids(uids) {
+  const query = new URLSearchParams()
+  for (const uid of uids) query.append('uids', uid)
+  return apiAdminGet(`/api/auth/users/access-options/by-uids?${query}`)
 }
 
 async function exchangeOIDCCode(code) {
@@ -153,6 +161,7 @@ export const authApi = {
   getOIDCConfig,
   getOIDCLoginUrl,
   getUserAccessOptions,
+  getUserAccessOptionsByUids,
   exchangeOIDCCode,
   getCLIAuthSession,
   approveCLIAuthSession

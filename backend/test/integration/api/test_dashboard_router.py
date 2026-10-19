@@ -194,10 +194,15 @@ async def test_dashboard_http_applies_subagent_and_deleted_conversation_scopes(t
 
 
 async def test_admin_can_fetch_feedbacks(test_client, admin_headers):
-    """Test that feedback endpoint returns 200 and handles the User join correctly."""
-    response = await test_client.get("/api/dashboard/feedbacks", headers=admin_headers)
+    """反馈接口返回有界页面和同筛选范围的总数。"""
+    response = await test_client.get(
+        "/api/dashboard/feedbacks/page", params={"limit": 1, "offset": 0}, headers=admin_headers
+    )
     assert response.status_code == 200, f"feedbacks failed: {response.text}"
-    assert isinstance(response.json(), list)
+    payload = response.json()
+    assert payload["limit"] == 1 and payload["offset"] == 0
+    assert isinstance(payload["items"], list) and len(payload["items"]) <= 1
+    assert payload["total"] >= len(payload["items"])
 
 
 async def test_dashboard_http_reads_run_token_totals(test_client, admin_headers):

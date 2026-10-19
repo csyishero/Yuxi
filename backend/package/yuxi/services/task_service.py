@@ -239,11 +239,25 @@ class Tasker:
         )
         return Task.from_dict(record.to_dict()) if record else None
 
-    async def list_tasks(self, status: str | None = None, limit: int = 100) -> dict[str, Any]:
-        records = await self._repo.list(status=status, limit=limit)
+    async def list_tasks(
+        self,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        status_group: str = "all",
+    ) -> dict[str, Any]:
+        """按任务状态分组返回一页记录与全量状态统计。"""
+        status_groups = {
+            "all": None,
+            "active": {"pending", "running", "queued"},
+            "success": {"success"},
+            "failed": {"failed", "cancelled"},
+        }
+        statuses = status_groups[status_group]
+        records = await self._repo.list(status=status, statuses=statuses, offset=offset, limit=limit)
         return {
             "tasks": [record.to_summary_dict() for record in records],
-            "summary": await self._repo.summarize(status=status),
+            "summary": await self._repo.summarize(status=status, statuses=statuses),
         }
 
     async def get_task(self, task_id: str) -> dict[str, Any] | None:

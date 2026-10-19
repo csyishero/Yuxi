@@ -378,6 +378,7 @@
                     :show-knowledge-base-inheritance="true"
                     :available-departments="departments"
                     :available-users="users"
+                    :search-users="searchPermissionUsers"
                   />
                 </a-form-item-rest>
               </a-form-item>
@@ -903,13 +904,19 @@ const loadPermissionOptions = async (targetKbId = kbId.value) => {
     return
   }
   try {
-    const result = await databaseApi.getPermissionOptions(targetKbId)
+    const result = await databaseApi.getPermissionOptions(targetKbId, { offset: 0, limit: 50 })
     departments.value = result.departments || []
-    users.value = result.users || []
+    users.value = [...new Map([...(result.users || []), ...(result.selected_users || [])]
+      .map((user) => [user.uid, user])).values()]
   } catch {
     departments.value = []
     users.value = []
   }
+}
+
+const searchPermissionUsers = async ({ search = '', offset = 0, limit = 50 } = {}) => {
+  const result = await databaseApi.getPermissionOptions(kbId.value, { search, offset, limit })
+  return { items: result.users || [], has_more: Boolean(result.has_more) }
 }
 
 const handleEditModalAfterClose = () => {

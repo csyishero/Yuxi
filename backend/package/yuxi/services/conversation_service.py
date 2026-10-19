@@ -600,6 +600,11 @@ async def get_thread_history_view(
     thread_id: str,
     current_uid: str,
     db: AsyncSession,
+    limit: int | None = None,
+    before_message_id: int | None = None,
+    before_run_id: str | None = None,
+    include_messages: bool = True,
+    include_runs: bool = True,
 ) -> dict:
     """读取线程、Run 与历史消息，保留独立的已读写操作。"""
     conv_repo = ConversationRepository(db)
@@ -607,16 +612,41 @@ async def get_thread_history_view(
     if not conversation or conversation.uid != str(current_uid) or conversation.status == "deleted":
         raise HTTPException(status_code=404, detail="对话线程不存在")
 
-    messages = await conv_repo.get_messages(conversation.id)
-    messages = [
-        message
-        for message in messages
-        if not (message.role == "user" and message.delivery_status in {"queued", "cancelled", "rejected"})
-    ]
+    if limit is None:
+        messages = await conv_repo.get_messages(conversation.id)
+        messages = [
+            message
+            for message in messages
+            if not (message.role == "user" and message.delivery_status in {"queued", "cancelled", "rejected"})
+        ]
+        runs = await conv_repo.list_agent_runs_for_history(conversation.id)
+        run_page = runs
+        more_messages = more_runs = False
+        latest_run = next((run for run in reversed(runs) if run.run_type in {"chat", "resume"}), None)
+    else:
+        try:
+            messages, more_messages = (
+                await conv_repo.get_history_message_page(
+                    conversation.id, limit=limit, before_message_id=before_message_id
+                )
+                if include_messages
+                else ([], False)
+            )
+            run_page, more_runs = (
+                await conv_repo.get_history_run_page(conversation.id, limit=limit, before_run_id=before_run_id)
+                if include_runs
+                else ([], False)
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        latest_run = await conv_repo.get_latest_history_top_level_run(conversation.id)
+        run_ids = {message.run_id for message in messages if message.run_id}
+        if latest_run is not None:
+            run_ids.add(latest_run.id)
+        extra_runs = await conv_repo.get_history_runs_by_ids(conversation.id, run_ids - {run.id for run in run_page})
+        runs = sorted([*run_page, *extra_runs], key=lambda run: (run.created_at, run.id))
 
-    runs = await conv_repo.list_agent_runs_for_history(conversation.id)
     run_created_at = {run.id: run.created_at for run in runs}
-    latest_run = next((run for run in reversed(runs) if run.run_type in {"chat", "resume"}), None)
     thread = await _serialize_thread(
         conversation,
         thread_status=_thread_status(
@@ -695,7 +725,7 @@ async def get_thread_history_view(
         history.append(msg_dict)
 
     logger.info(f"Loaded {len(history)} messages with feedback for thread {thread_id}")
-    return {
+    response = {
         "thread": thread,
         "runs": [
             {
@@ -708,6 +738,16 @@ async def get_thread_history_view(
         ],
         "history": history,
     }
+    if limit is not None:
+        response["page"] = {
+            "has_more": more_messages or more_runs,
+            "has_more_messages": more_messages,
+            "has_more_runs": more_runs,
+            "before_message_id": messages[0].id if more_messages else None,
+            "before_run_id": run_page[0].id if more_runs else None,
+            "run_page_ids": [run.id for run in run_page],
+        }
+    return response
 
 
 def _thread_status(run_id: str | None, run_status: str | None, last_viewed_run_id: str | None) -> str:

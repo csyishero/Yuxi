@@ -202,6 +202,100 @@ def test_search_tree_limits_flat_directory_width_and_total_scan(tmp_path: Path, 
     assert all(item["name"].startswith("file-") for item in results)
 
 
+def test_search_tree_page_reaches_matches_after_first_page_without_following_links(tmp_path: Path, monkeypatch) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    for index in range(6):
+        (workspace_root / f"report-{index}.txt").write_text(str(index), encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "report-secret.txt").write_text("secret", encoding="utf-8")
+    (workspace_root / "linked").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(workspace_filesystem_module, "user_workspace_dir", lambda _uid: workspace_root)
+
+    first = Workspace("user-1").search_authorized_tree_page("/", "report", offset=0, limit=2)
+    second = Workspace("user-1").search_authorized_tree_page("/", "report", offset=2, limit=2)
+    third = Workspace("user-1").search_authorized_tree_page("/", "report", offset=4, limit=2)
+
+    assert [item["name"] for item in first["entries"]] == ["report-0.txt", "report-1.txt"]
+    assert [item["name"] for item in second["entries"]] == ["report-2.txt", "report-3.txt"]
+    assert [item["name"] for item in third["entries"]] == ["report-4.txt", "report-5.txt"]
+    assert [first["has_more"], second["has_more"], third["has_more"]] == [True, True, False]
+    assert all(not page["truncated"] for page in (first, second, third))
+
+
+def test_search_tree_page_reports_scan_budget_truncation(tmp_path: Path, monkeypatch) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    for index in range(6):
+        (workspace_root / f"report-{index}.txt").write_text(str(index), encoding="utf-8")
+    monkeypatch.setattr(workspace_filesystem_module, "user_workspace_dir", lambda _uid: workspace_root)
+
+    page = Workspace("user-1").search_authorized_tree_page("/", "report", offset=0, limit=3, max_scanned_entries=2)
+
+    assert len(page["entries"]) == 2
+    assert page["has_more"] is False
+    assert page["truncated"] is True
+
+
+def test_search_tree_page_exact_budget_does_not_report_truncation(tmp_path: Path, monkeypatch) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "report.txt").write_text("ready", encoding="utf-8")
+    monkeypatch.setattr(workspace_filesystem_module, "user_workspace_dir", lambda _uid: workspace_root)
+
+    page = Workspace("user-1").search_authorized_tree_page("/", "report", offset=0, limit=3, max_scanned_entries=1)
+
+    assert [item["name"] for item in page["entries"]] == ["report.txt"]
+    assert page["has_more"] is False
+    assert page["truncated"] is False
+
+
+def test_search_page_reaches_file_after_first_500_directory_entries(tmp_path: Path, monkeypatch) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    for index in range(510):
+        (workspace_root / f"a-{index:03}.txt").write_text("", encoding="utf-8")
+    (workspace_root / "z-late-report.txt").write_text("late", encoding="utf-8")
+    monkeypatch.setattr(workspace_filesystem_module, "user_workspace_dir", lambda _uid: workspace_root)
+
+    real_scandir = os.scandir
+
+    class SortedScandir:
+        def __init__(self, directory_fd):
+            with real_scandir(directory_fd) as iterator:
+                self.entries = iter(sorted(iterator, key=lambda entry: entry.name))
+
+        def __enter__(self):
+            return self.entries
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(workspace_filesystem_module.os, "scandir", SortedScandir)
+
+    page = Workspace("user-1").search_authorized_tree_page("/", "late-report", offset=0, limit=1)
+
+    assert [item["name"] for item in page["entries"]] == ["z-late-report.txt"]
+    assert page["truncated"] is False
+
+
+def test_search_page_exact_path_finds_file_beyond_scan_budget(tmp_path: Path, monkeypatch) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    for index in range(5):
+        (workspace_root / f"a-{index}.txt").write_text("", encoding="utf-8")
+    (workspace_root / "Target.txt").write_text("late", encoding="utf-8")
+    monkeypatch.setattr(workspace_filesystem_module, "user_workspace_dir", lambda _uid: workspace_root)
+
+    page = Workspace("user-1").search_authorized_tree_page(
+        "/", "path:/Target.txt", offset=0, limit=1, max_scanned_entries=2
+    )
+
+    assert [item["path"] for item in page["entries"]] == ["/Target.txt"]
+    assert page["truncated"] is False
+
+
 def test_search_tree_entry_budget_limits_actual_directory_iteration(tmp_path: Path, monkeypatch) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
@@ -241,4 +335,4 @@ def test_search_tree_entry_budget_limits_actual_directory_iteration(tmp_path: Pa
         max_scanned_entries=7,
     )
 
-    assert examined == 7
+    assert examined == 8  # one extra directory entry is probed to distinguish exact budget from truncation

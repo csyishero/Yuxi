@@ -239,6 +239,216 @@ async def test_list_visible_skills_for_management_includes_owned_disabled_and_en
 
 
 @pytest.mark.asyncio
+async def test_personal_skill_page_stops_after_next_valid_record(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """首页只解析首批和下一项，不能为精确 total 读取全部个人文件。"""
+    root = tmp_path / "skills"
+    root.mkdir()
+    for index in range(12):
+        slug = f"report-{index:02d}"
+        folder = root / slug
+        folder.mkdir()
+        (folder / "SKILL.md").write_text(f"---\nname: {slug}\ndescription: Report {index}\n---\n# Skill\n")
+    monkeypatch.setattr(svc, "personal_skills_root", lambda _uid: root)
+    original_parse = svc.parse_skill_dir_metadata
+    parsed = []
+
+    def counted_parse(folder):
+        parsed.append(folder.name)
+        return original_parse(folder)
+
+    monkeypatch.setattr(svc, "parse_skill_dir_metadata", counted_parse)
+    items, has_more = await svc.list_personal_skills_page("user-1", offset=0, limit=2)
+
+    assert [item.slug for item in items] == ["report-00", "report-01"]
+    assert has_more is True
+    assert parsed == ["report-00", "report-01", "report-02"]
+
+
+@pytest.mark.asyncio
+async def test_audience_skill_page_filters_before_database_limit(monkeypatch: pytest.MonkeyPatch):
+    """受众筛选必须在共享技能 SQL 分页时生效，不读取全部共享技能。"""
+    skill = Skill(
+        slug="audience-visible",
+        name="audience-visible",
+        description="visible",
+        dir_path="/tmp/audience-visible",
+        source_type="upload",
+        enabled=True,
+        created_by="another-user",
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []},
+            "manage_scope": None,
+        },
+    )
+    captured = {}
+
+    class FakeRepo:
+        def __init__(self, _db):
+            pass
+
+        async def page_visible(self, _user, *, limit, offset, search, audience_search, audience_department_id):
+            captured.update(
+                limit=limit,
+                offset=offset,
+                search=search,
+                audience_search=audience_search,
+                audience_department_id=audience_department_id,
+            )
+            return [skill], 3
+
+    class FakeUserRepo:
+        def __init__(self, _db):
+            pass
+
+        async def list_skill_catalog_audience(self, *, search, department_id):
+            raise AssertionError("受众分页不应加载全部目标用户")
+
+    async def fail_full_list(*_args, **_kwargs):
+        raise AssertionError("受众分页不能读取完整共享技能列表")
+
+    async def no_personal(_uid, _slug):
+        raise ValueError("个人 Skill 不存在")
+
+    monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
+    monkeypatch.setattr(svc, "UserRepository", FakeUserRepo)
+    monkeypatch.setattr(svc, "list_visible_skills_for_management", fail_full_list)
+    monkeypatch.setattr(svc, "get_personal_skill", no_personal)
+
+    cards, total, has_more = await svc.page_skill_cards_for_user(
+        None,
+        _user("admin", role="admin"),
+        source="shared",
+        limit=1,
+        offset=1,
+        search="visible",
+        audience_search="viewer",
+        audience_department_id=1,
+    )
+
+    assert [card.slug for card in cards] == ["audience-visible"]
+    assert (total, has_more) == (3, True)
+    assert captured == {
+        "limit": 1,
+        "offset": 1,
+        "search": "visible",
+        "audience_search": "viewer",
+        "audience_department_id": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_combined_skill_page_keeps_shared_audience_filter_in_database(monkeypatch: pytest.MonkeyPatch):
+    """合并视图翻过个人来源后仍由数据库筛选共享受众。"""
+    personal = svc.ResolvedSkill(
+        id="personal:mine",
+        slug="mine",
+        name="mine",
+        description="personal",
+        source_type="personal",
+        source_scope="personal",
+        source_dir=Path("/tmp/mine"),
+        enabled=True,
+        created_by="admin",
+        share_config=None,
+        tool_dependencies=[],
+        mcp_dependencies=[],
+        skill_dependencies=[],
+    )
+    shared = Skill(
+        slug="shared-one",
+        name="shared-one",
+        description="shared",
+        dir_path="/tmp/shared-one",
+        source_type="upload",
+        enabled=True,
+        created_by="another-user",
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []},
+            "manage_scope": None,
+        },
+    )
+    calls = []
+
+    class FakeRepo:
+        def __init__(self, _db):
+            pass
+
+        async def page_visible(self, _user, **kwargs):
+            calls.append(kwargs)
+            return [shared], 3
+
+        async def get_by_slug(self, _slug):
+            raise AssertionError("本页没有个人卡片，不应查额外共享技能")
+
+    async def personal_items(_uid):
+        return [personal]
+
+    async def fail_full_list(*_args, **_kwargs):
+        raise AssertionError("合并视图不应读取完整共享列表")
+
+    monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
+    monkeypatch.setattr(svc, "list_personal_skills", personal_items)
+    monkeypatch.setattr(svc, "list_visible_skills_for_management", fail_full_list)
+
+    cards, total, has_more = await svc.page_skill_cards_for_user(
+        None,
+        _user("admin"),
+        source="all",
+        limit=1,
+        offset=1,
+        audience_search="viewer",
+        audience_department_id=1,
+    )
+
+    assert [(card.slug, card.source_scope) for card in cards] == [("shared-one", "shared")]
+    assert (total, has_more) == (4, True)
+    assert calls == [
+        {
+            "limit": 1,
+            "offset": 0,
+            "search": "",
+            "audience_search": "viewer",
+            "audience_department_id": 1,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_skill_audience_page_rejects_out_of_department_before_query(monkeypatch: pytest.MonkeyPatch):
+    """部门管理员不可借分页搜索越权查看其他部门的受众。"""
+
+    async def fail_query(*_args, **_kwargs):
+        raise AssertionError("越权请求不应触发目录查询")
+
+    monkeypatch.setattr(svc, "page_visible_skills_for_management", fail_query)
+
+    with pytest.raises(ValueError, match="无权访问该部门"):
+        await svc.page_skill_cards_for_user(
+            None,
+            _user("admin"),
+            source="shared",
+            limit=10,
+            offset=0,
+            audience_department_id=2,
+        )
+
+
+@pytest.mark.asyncio
+async def test_personal_skill_detail_treats_broken_metadata_as_missing(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """单项详情与列表一致地跳过损坏的个人技能。"""
+    root = tmp_path / "skills"
+    folder = root / "broken-skill"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_bytes(b"\xff\xfe")
+    monkeypatch.setattr(svc, "personal_skills_root", lambda _uid: root)
+
+    with pytest.raises(ValueError, match="个人 Skill 不存在"):
+        await svc.get_personal_skill("user-1", "broken-skill")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "skill,operator",
     [

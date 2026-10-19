@@ -39,9 +39,9 @@ from server.routers import (
         ),
         (
             knowledge_eval_router.list_evaluation_datasets,
-            {"kb_id": "kb-1"},
+            {"kb_id": "kb-1", "limit": 20, "offset": 0, "status": None, "search": None},
             knowledge_eval_router.EvaluationService,
-            "list_datasets",
+            "list_datasets_page",
         ),
         (graph_router.get_graphs, {}, graph_router.knowledge_base, "get_databases_by_uid"),
         (

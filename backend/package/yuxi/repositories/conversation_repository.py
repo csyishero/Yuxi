@@ -5,7 +5,7 @@
 import json
 import uuid as uuid_lib
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, load_only, selectinload
 from sqlalchemy.orm.attributes import flag_modified
@@ -433,7 +433,7 @@ class ConversationRepository:
                     _state_proven_model_tool_call_condition(),
                 ),
             )
-            .order_by(Message.created_at.asc())
+            .order_by(Message.created_at.asc(), Message.id.asc())
         )
 
         if limit:
@@ -441,6 +441,59 @@ class ConversationRepository:
 
         result = await self.db.execute(query)
         return list(result.scalars().unique().all())
+
+    async def count_messages(self, conversation_id: int) -> int:
+        """统计与 get_messages 一致的可展示消息数。"""
+        result = await self.db.execute(
+            select(func.count())
+            .select_from(Message)
+            .where(
+                Message.conversation_id == conversation_id,
+                or_(
+                    Message.message_type.is_(None),
+                    Message.message_type.notin_(AUDIT_MESSAGE_TYPES),
+                    _state_proven_model_tool_call_condition(),
+                ),
+            )
+        )
+        return int(result.scalar_one())
+
+    async def get_history_message_page(
+        self, conversation_id: int, *, limit: int, before_message_id: int | None = None
+    ) -> tuple[list[Message], bool]:
+        """按展示顺序取较早消息，游标在同一会话内定位。"""
+        sort_at = func.coalesce(AgentRun.created_at, Message.created_at)
+        role_order = case((Message.role == "user", 0), else_=1)
+        sort_key = tuple_(sort_at, role_order, Message.created_at, Message.id)
+        visible = or_(
+            Message.message_type.is_(None),
+            Message.message_type.notin_(AUDIT_MESSAGE_TYPES),
+            _state_proven_model_tool_call_condition(),
+        )
+        delivered = or_(Message.role != "user", Message.delivery_status.notin_(("queued", "cancelled", "rejected")))
+        query = (
+            select(Message)
+            .outerjoin(AgentRun, AgentRun.id == Message.run_id)
+            .options(selectinload(Message.tool_calls), selectinload(Message.feedbacks))
+            .where(Message.conversation_id == conversation_id, visible, delivered)
+        )
+        if before_message_id is not None:
+            cursor = await self.db.execute(
+                select(sort_at, role_order, Message.created_at, Message.id)
+                .outerjoin(AgentRun, AgentRun.id == Message.run_id)
+                .where(Message.conversation_id == conversation_id, Message.id == before_message_id, visible, delivered)
+            )
+            row = cursor.one_or_none()
+            if row is None:
+                raise ValueError("无效的消息游标")
+            query = query.where(sort_key < tuple_(*row))
+        result = await self.db.execute(
+            query.order_by(sort_at.desc(), role_order.desc(), Message.created_at.desc(), Message.id.desc()).limit(
+                limit + 1
+            )
+        )
+        newest_first = list(result.scalars().unique().all())
+        return list(reversed(newest_first[:limit])), len(newest_first) > limit
 
     async def get_message_source_ids_by_thread_id(self, thread_id: str) -> set[str]:
         """读取全部持久 Message 来源 ID，包括普通历史隐藏的审计行。"""
@@ -496,6 +549,80 @@ class ConversationRepository:
             .order_by(AgentRun.created_at.asc(), AgentRun.id.asc())
         )
         return list(result.scalars().all())
+
+    async def get_history_run_page(
+        self, conversation_id: int, *, limit: int, before_run_id: str | None = None
+    ) -> tuple[list[AgentRun], bool]:
+        """按创建顺序取较早运行，包括没有消息的运行。"""
+        query = select(AgentRun).where(AgentRun.conversation_id == conversation_id)
+        if before_run_id is not None:
+            cursor = await self.db.execute(
+                select(AgentRun.created_at, AgentRun.id).where(
+                    AgentRun.conversation_id == conversation_id, AgentRun.id == before_run_id
+                )
+            )
+            row = cursor.one_or_none()
+            if row is None:
+                raise ValueError("无效的运行游标")
+            query = query.where(tuple_(AgentRun.created_at, AgentRun.id) < tuple_(*row))
+        result = await self.db.execute(
+            query.options(
+                load_only(
+                    AgentRun.id,
+                    AgentRun.request_id,
+                    AgentRun.run_type,
+                    AgentRun.created_by_run_id,
+                    AgentRun.status,
+                    AgentRun.created_at,
+                    AgentRun.started_at,
+                    AgentRun.prepared_at,
+                    AgentRun.first_model_request_at,
+                    AgentRun.first_output_at,
+                    AgentRun.finished_at,
+                    raiseload=True,
+                )
+            )
+            .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+            .limit(limit + 1)
+        )
+        newest_first = list(result.scalars().all())
+        return list(reversed(newest_first[:limit])), len(newest_first) > limit
+
+    async def get_history_runs_by_ids(self, conversation_id: int, run_ids: set[str]) -> list[AgentRun]:
+        """补齐消息页引用的运行，保持消息与运行元数据关联。"""
+        if not run_ids:
+            return []
+        result = await self.db.execute(
+            select(AgentRun)
+            .where(AgentRun.conversation_id == conversation_id, AgentRun.id.in_(run_ids))
+            .options(
+                load_only(
+                    AgentRun.id,
+                    AgentRun.request_id,
+                    AgentRun.run_type,
+                    AgentRun.created_by_run_id,
+                    AgentRun.status,
+                    AgentRun.created_at,
+                    AgentRun.started_at,
+                    AgentRun.prepared_at,
+                    AgentRun.first_model_request_at,
+                    AgentRun.first_output_at,
+                    AgentRun.finished_at,
+                    raiseload=True,
+                )
+            )
+        )
+        return list(result.scalars().all())
+
+    async def get_latest_history_top_level_run(self, conversation_id: int) -> AgentRun | None:
+        """读取会话最新顶层运行，避免旧 Agent 名称影响线程状态。"""
+        result = await self.db.execute(
+            select(AgentRun)
+            .where(AgentRun.conversation_id == conversation_id, AgentRun.run_type.in_(("chat", "resume")))
+            .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def list_agent_runs_for_trace(self, conversation_id: int, *, limit: int) -> tuple[list[AgentRun], bool]:
         """按创建顺序返回有界 AgentRun 调试事实。"""

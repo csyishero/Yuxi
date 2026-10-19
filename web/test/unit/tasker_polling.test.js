@@ -231,6 +231,28 @@ test('任务请求时序与轮询生命周期', async (t) => {
       assert.equal(store.tasks[0].status, 'success')
       store.reset()
     })
+    await t.test('任务页按服务端状态查询，后续刷新保留当前页和总数', async () => {
+      const { store } = makeStore()
+      const requests = []
+      taskerApi.fetchTasks = async (params) => {
+        requests.push({ ...params })
+        return {
+          tasks: [{ id: 'older-success', status: 'success' }],
+          summary: { total: 125, filtered_total: 24, status_counts: { success: 24 } }
+        }
+      }
+
+      await store.loadTasks({ status_group: 'success', offset: 20, limit: 20 })
+      await store.loadTasks()
+
+      assert.deepEqual(requests, [
+        { status_group: 'success', offset: 20, limit: 20 },
+        { status_group: 'success', offset: 20, limit: 20 }
+      ])
+      assert.equal(store.tasks[0].id, 'older-success')
+      assert.equal(store.filteredTotal, 24)
+      store.reset()
+    })
     await t.test('退出登录使在途响应失效并立即清空状态', async () => {
       const { store, user } = makeStore()
       const response = deferred()

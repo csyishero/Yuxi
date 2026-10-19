@@ -206,8 +206,9 @@ class EvaluationService:
             metadata.update(status=task.status, progress=task.progress, message=task.message)
 
         if metadata != (row.build_metadata or {}):
-            await self.eval_repo.update_dataset(row.dataset_id, {"build_metadata": metadata})
-            row.build_metadata = metadata
+            persisted = await self.eval_repo.sync_active_dataset_build_metadata(row.dataset_id, metadata)
+            if persisted is not None:
+                row.build_metadata = persisted
 
     async def _sync_evaluation_run(self, row, task: Any = _TASK_NOT_LOADED):
         """把 Durable Task 终态投影到单条 EvaluationRun。"""
@@ -335,15 +336,40 @@ class EvaluationService:
             logger.error(f"上传评估数据集失败: {e}")
             raise
 
-    async def list_datasets(self, kb_id: str) -> list[dict[str, Any]]:
+    async def list_datasets(
+        self, kb_id: str, *, offset: int = 0, status: str | None = None, search: str | None = None
+    ) -> list[dict[str, Any]]:
         try:
             rows = await self.eval_repo.list_datasets(kb_id)
             for row in rows:
                 await self._sync_dataset_build_metadata(row)
+            if status:
+                rows = [row for row in rows if (row.build_metadata or {}).get("status", "completed") == status]
+            if search:
+                query = search.casefold()
+                rows = [row for row in rows if query in row.name.casefold()]
+            if offset:
+                rows = rows[offset:]
             return [self._dataset_to_dict(row) for row in rows]
         except Exception as e:
             logger.error(f"获取评估数据集列表失败: {e}")
             raise
+
+    async def list_datasets_page(
+        self, kb_id: str, *, limit: int, offset: int, status: str | None = None, search: str | None = None
+    ) -> dict[str, Any]:
+        rows, total = await self.eval_repo.page_datasets(
+            kb_id, limit=limit, offset=offset, status=status, search=search
+        )
+        for row in rows:
+            await self._sync_dataset_build_metadata(row)
+        return {
+            "items": [self._dataset_to_dict(row) for row in rows],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(rows) < total,
+        }
 
     async def get_dataset_detail(
         self, kb_id: str, dataset_id: str, page: int = 1, page_size: int = 10
@@ -920,9 +946,54 @@ class EvaluationService:
             await context.set_message(f"Error: {error}")
             raise
 
-    async def list_runs(self, kb_id: str) -> list[dict[str, Any]]:
+    async def list_runs(
+        self,
+        kb_id: str,
+        *,
+        offset: int = 0,
+        dataset_id: str | None = None,
+        run_id: str | None = None,
+        before_id: int | None = None,
+    ) -> list[dict[str, Any]]:
         try:
             rows = await self.eval_repo.list_runs(kb_id)
+            if dataset_id:
+                rows = [row for row in rows if row.dataset_id == dataset_id]
+            if run_id:
+                rows = [row for row in rows if row.run_id == run_id]
+            if before_id is not None:
+                rows = [row for row in rows if row.id < before_id]
+            if offset:
+                rows = rows[offset:]
+            return await self._serialize_run_rows(rows)
+        except Exception as e:
+            logger.error(f"获取评估运行历史失败: {e}")
+            raise
+
+    async def list_runs_page(
+        self,
+        kb_id: str,
+        *,
+        limit: int,
+        offset: int,
+        dataset_id: str | None = None,
+        run_id: str | None = None,
+        before_id: int | None = None,
+    ) -> dict[str, Any]:
+        rows, total, has_more = await self.eval_repo.page_runs(
+            kb_id, limit=limit, offset=offset, dataset_id=dataset_id, run_id=run_id, before_id=before_id
+        )
+        return {
+            "items": await self._serialize_run_rows(rows),
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": has_more,
+            "next_cursor": rows[-1].id if rows else None,
+        }
+
+    async def _serialize_run_rows(self, rows) -> list[dict[str, Any]]:
+        try:
             running_run_ids = {row.run_id for row in rows if row.status == "running"}
             task_by_run_id = {}
             if running_run_ids:

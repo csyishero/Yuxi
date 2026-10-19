@@ -124,9 +124,11 @@ async def get_workspace_tree(
 @workspace.get("/search", response_model=dict)
 async def search_workspace_files_route(
     query: str = Query(..., description="搜索关键词"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
     current_user: User = Depends(get_required_user),
 ):
-    return await search_workspace_files(query=query, current_user=current_user)
+    return await search_workspace_files(query=query, offset=offset, limit=limit, current_user=current_user)
 
 
 def _binary_preview_response(data: dict) -> StreamingResponse:

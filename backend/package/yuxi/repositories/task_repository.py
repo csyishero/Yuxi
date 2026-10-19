@@ -19,16 +19,29 @@ class TaskRepository:
         async with pg_manager.get_async_session_context() as session:
             return await session.get(TaskRecord, task_id)
 
-    async def list(self, status: str | None = None, limit: int = 100) -> list[TaskRecord]:
+    async def list(
+        self,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        statuses: set[str] | None = None,
+    ) -> list[TaskRecord]:
+        """按状态筛选任务并以时间和 ID 稳定翻页。"""
         async with pg_manager.get_async_session_context() as session:
             stmt = select(TaskRecord)
             if status:
                 stmt = stmt.where(TaskRecord.status == status)
-            active_first = case((TaskRecord.status.in_({"pending", "running"}), 0), else_=1)
-            stmt = stmt.order_by(active_first, TaskRecord.created_at.desc()).limit(max(limit, 0))
+            if statuses is not None:
+                stmt = stmt.where(TaskRecord.status.in_(statuses))
+            active_first = case((TaskRecord.status.in_({"pending", "running", "queued"}), 0), else_=1)
+            stmt = (
+                stmt.order_by(active_first, TaskRecord.created_at.desc(), TaskRecord.id.desc())
+                .offset(offset)
+                .limit(limit)
+            )
             return list((await session.execute(stmt)).scalars().all())
 
-    async def summarize(self, *, status: str | None = None) -> dict[str, Any]:
+    async def summarize(self, *, status: str | None = None, statuses: set[str] | None = None) -> dict[str, Any]:
         """从完整 Task 表计算列表摘要，不受返回 limit 影响。"""
         async with pg_manager.get_async_session_context() as session:
             status_rows = (
@@ -36,12 +49,14 @@ class TaskRepository:
             ).all()
             type_rows = (await session.execute(select(TaskRecord.type, func.count()).group_by(TaskRecord.type))).all()
             total = sum(int(count) for _value, count in status_rows)
-            filtered_total = total
+            selected_statuses = statuses
             if status is not None:
-                filtered_total = next(
-                    (int(count) for value, count in status_rows if value == status),
-                    0,
-                )
+                selected_statuses = {status} if statuses is None else statuses & {status}
+            filtered_total = (
+                total
+                if selected_statuses is None
+                else sum(int(count) for value, count in status_rows if value in selected_statuses)
+            )
             return {
                 "total": total,
                 "filtered_total": filtered_total,

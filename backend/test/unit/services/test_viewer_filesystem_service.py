@@ -64,6 +64,14 @@ class _Backend:
                     results.append({"path": path, **item})
         return results
 
+    def search_authorized_tree_page(self, root, query, *, offset, limit, **_kwargs):
+        entries = self.search_authorized_tree(root, query)
+        return {
+            "entries": entries[offset : offset + limit],
+            "has_more": len(entries) > offset + limit,
+            "truncated": False,
+        }
+
     def create_authorized_directory(self, parent, name, *, root):
         assert root == "/projects/11111111-1111-4111-8111-111111111111"
         return {"is_dir": True, "size": 0, "modified_at": 1}
@@ -200,6 +208,57 @@ async def test_viewer_search_walks_current_workdir(realtime_viewer):
 
 
 @pytest.mark.asyncio
+async def test_viewer_search_continues_within_current_workdir(realtime_viewer):
+    root = "/projects/11111111-1111-4111-8111-111111111111"
+    realtime_viewer.directories[root] = [
+        {"name": f"report-{index:03}.txt", "is_dir": False, "size": 1, "modified_at": 1} for index in range(105)
+    ]
+
+    first = await svc.search_viewer_files(
+        thread_id="thread-1",
+        query="report",
+        offset=0,
+        limit=100,
+        current_user=SimpleNamespace(uid="user-1"),
+        db=object(),
+    )
+    second = await svc.search_viewer_files(
+        thread_id="thread-1",
+        query="report",
+        offset=100,
+        limit=100,
+        current_user=SimpleNamespace(uid="user-1"),
+        db=object(),
+    )
+
+    assert len(first["entries"]) == 100
+    assert first["has_more"] is True
+    assert [entry["path"] for entry in second["entries"]] == [f"/report-{index:03}.txt" for index in range(100, 105)]
+    assert second["has_more"] is False
+
+
+@pytest.mark.asyncio
+async def test_viewer_search_exact_path_preserves_filename_case(realtime_viewer, monkeypatch):
+    root = "/projects/11111111-1111-4111-8111-111111111111"
+
+    def search_exact(_root, query, *, offset, limit, **_kwargs):
+        entries = (
+            [{"path": f"{root}/Target.txt", "name": "Target.txt", "is_dir": False, "size": 1, "modified_at": 1}]
+            if query == "path:/Target.txt"
+            else []
+        )
+        return {"entries": entries[offset : offset + limit], "has_more": False, "truncated": False}
+
+    monkeypatch.setattr(realtime_viewer, "search_authorized_tree_page", search_exact)
+
+    response = await svc.search_viewer_files(
+        thread_id="thread-1", query="path:/Target.txt", current_user=SimpleNamespace(uid="user-1"), db=object()
+    )
+
+    assert [entry["path"] for entry in response["entries"]] == ["/Target.txt"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "files",
     [
@@ -271,7 +330,4 @@ async def test_viewer_upload_returns_scope_path_and_artifact_url(realtime_viewer
             ),
         }
     ]
-    assert (
-        realtime_viewer.files["/projects/11111111-1111-4111-8111-111111111111/report.txt"]
-        == b"hello\nworld\n"
-    )
+    assert realtime_viewer.files["/projects/11111111-1111-4111-8111-111111111111/report.txt"] == b"hello\nworld\n"

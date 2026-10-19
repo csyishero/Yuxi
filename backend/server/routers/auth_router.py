@@ -723,18 +723,50 @@ def _ensure_user_in_current_department(current_user: User, target_user: User) ->
 
 @auth.get("/users/access-options", response_model=list[UserAccessOption])
 async def read_user_access_options(
-    skip: int = 0,
-    limit: int = 1000,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(1000, ge=1, le=1000),
+    search: str | None = Query(None, max_length=100),
     current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if current_user.role != "superadmin" and current_user.department_id is None:
+        return []
     user_repo = UserRepository(db)
-    if current_user.role == "superadmin":
-        users_with_dept = await user_repo.list_with_department(skip=skip, limit=limit)
-    else:
-        users_with_dept = await user_repo.list_with_department(
-            skip=skip, limit=limit, department_id=current_user.department_id
-        )
+    users_with_dept, _ = await user_repo.list_page_with_department(
+        offset=skip,
+        limit=limit,
+        department_id=None if current_user.role == "superadmin" else current_user.department_id,
+        search=search.strip() or None if search is not None else None,
+    )
+    return [
+        {
+            "uid": user.uid,
+            "username": user.username,
+            "role": user.role,
+            "department_id": user.department_id,
+            "department_name": dept_name,
+        }
+        for user, dept_name in users_with_dept
+    ]
+
+
+@auth.get("/users/access-options/by-uids", response_model=list[UserAccessOption])
+async def read_user_access_options_by_uids(
+    uids: list[str] = Query(...),
+    current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if not uids or len(uids) > 50:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="请提供 1 至 50 个用户 ID")
+    if current_user.role != "superadmin" and current_user.department_id is None:
+        return []
+    normalized_uids = list(dict.fromkeys(uid.strip() for uid in uids if uid.strip()))
+    if not normalized_uids:
+        return []
+    users_with_dept = await UserRepository(db).list_with_department_by_uids(
+        uids=normalized_uids,
+        department_id=None if current_user.role == "superadmin" else current_user.department_id,
+    )
     return [
         {
             "uid": user.uid,

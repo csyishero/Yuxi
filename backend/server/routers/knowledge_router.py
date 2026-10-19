@@ -452,6 +452,9 @@ async def get_database_info(
 @knowledge.get("/databases/{kb_id}/permission-options")
 async def get_database_permission_options(
     kb_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(1000, ge=1, le=1000),
+    search: str | None = Query(None, max_length=100),
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -472,7 +475,7 @@ async def get_database_permission_options(
     user_repo = UserRepository(db)
     if current_user.role == "superadmin":
         departments = await department_repo.list_departments()
-        users_with_department = await user_repo.list_with_department(limit=1000)
+        scoped_department_id = None
     else:
         scoped_department_id = current_user.department_id or database.owner_department_id
         departments = []
@@ -480,10 +483,24 @@ async def get_database_permission_options(
             department = await department_repo.get_by_id(int(scoped_department_id))
             if department is not None:
                 departments.append(department)
-        users_with_department = await user_repo.list_with_department(
-            limit=1000,
-            department_id=int(scoped_department_id) if scoped_department_id is not None else None,
+
+    visible_department_id = int(scoped_department_id) if scoped_department_id is not None else None
+    users_with_department, total = await user_repo.list_page_with_department(
+        offset=offset,
+        limit=limit + 1,
+        department_id=visible_department_id,
+        search=search.strip() or None if search is not None else None,
+    )
+
+    share_config = database.share_config or {}
+    selected_uids = []
+    if offset == 0 and not search:
+        scopes = [share_config, *share_config.values()] if isinstance(share_config, dict) else []
+        selected_uids = sorted(
+            {str(uid) for scope in scopes if isinstance(scope, dict) for uid in scope.get("user_uids", [])}
         )
+    selected_users = await user_repo.list_by_uids(selected_uids) if selected_uids else []
+    department_names = {department.id: department.name for department in departments}
 
     return {
         "departments": [{"id": department.id, "name": department.name} for department in departments],
@@ -495,7 +512,20 @@ async def get_database_permission_options(
                 "department_id": user.department_id,
                 "department_name": department_name,
             }
-            for user, department_name in users_with_department
+            for user, department_name in users_with_department[:limit]
+        ],
+        "has_more": len(users_with_department) > limit,
+        "total": total,
+        "selected_users": [
+            {
+                "uid": user.uid,
+                "username": user.username,
+                "role": user.role,
+                "department_id": user.department_id,
+                "department_name": department_names.get(user.department_id),
+            }
+            for user in selected_users
+            if user.is_deleted == 0 and (visible_department_id is None or user.department_id == visible_department_id)
         ],
     }
 

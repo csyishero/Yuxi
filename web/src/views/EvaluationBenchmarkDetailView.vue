@@ -193,11 +193,15 @@
                   v-model:value="selectedRunId"
                   class="benchmark-run-select"
                   :options="runOptions"
-                  :loading="runsLoading"
+                  :loading="runsLoading || runsLoadingMore"
                   :disabled="datasetRuns.length === 0"
                   :bordered="false"
+                  @popupScroll="loadMoreRuns"
                   @change="handleRunSelection"
                 />
+                <span v-if="runsHasMore" class="benchmark-run-more-hint">
+                  已加载 {{ runsSequentialLoaded }} / {{ runsTotal }} 条，展开后向下滚动加载更多
+                </span>
                 <div class="benchmark-run-meta">
                   <span
                     >{{ formatTime(selectedRun?.started_at) }} ·
@@ -420,7 +424,13 @@ const questionSaving = ref(false)
 const questionEditor = reactive({ itemId: '', query: '', goldAnswer: '' })
 
 const runsLoading = ref(false)
+const runsLoadingMore = ref(false)
 const datasetRuns = ref([])
+const runsTotal = ref(0)
+const runsSequentialLoaded = ref(0)
+const runsNextCursor = ref(null)
+const runsHasMore = ref(false)
+const runPageSize = 20
 const selectedRunId = ref('')
 const selectedRun = computed(() =>
   datasetRuns.value.find((run) => run.run_id === selectedRunId.value)
@@ -686,19 +696,55 @@ const syncRefreshTimer = () => {
 }
 
 const loadRuns = async (silent = false) => {
-  if (runsRefreshInFlight) return
+  if (runsRefreshInFlight || runsLoadingMore.value) return
   runsRefreshInFlight = true
   if (!silent) runsLoading.value = true
+  const selectedRunIdBeforeRefresh = selectedRunId.value
+  const selectedRunWasRunning = selectedRun.value?.status === 'running'
+  const requestedRunId = silent ? selectedRunIdBeforeRefresh : String(route.query.run || '')
   try {
-    const response = await evaluationApi.listRuns(kbId.value)
+    const response = await evaluationApi.listRuns(kbId.value, {
+      datasetId: datasetId.value,
+      limit: runPageSize,
+      offset: 0
+    })
     if (disposed) return
     if (response?.message !== 'success' || !Array.isArray(response.data)) {
       throw new Error('评估记录数据格式错误')
     }
-    const selectedRunIdBeforeRefresh = selectedRunId.value
-    const selectedRunWasRunning = selectedRun.value?.status === 'running'
-    datasetRuns.value = response.data.filter((run) => run.dataset_id === datasetId.value)
-    const requestedRunId = silent ? selectedRunId.value : String(route.query.run || '')
+    if (selectedRunId.value !== selectedRunIdBeforeRefresh) return
+    let targetedRun = []
+    if (requestedRunId && !response.data.some((run) => run.run_id === requestedRunId)) {
+      const targeted = await evaluationApi.listRuns(kbId.value, {
+        datasetId: datasetId.value,
+        runId: requestedRunId,
+        limit: 1,
+        offset: 0
+      })
+      if (disposed) return
+      if (selectedRunId.value !== selectedRunIdBeforeRefresh) return
+      targetedRun = Array.isArray(targeted.data) ? targeted.data : []
+    }
+    const missingSelectedRunId = requestedRunId && !response.data.some((run) => run.run_id === requestedRunId) && !targetedRun.length
+      ? requestedRunId
+      : ''
+    const previouslyLoaded = silent
+      ? datasetRuns.value.filter((run) => run.run_id !== missingSelectedRunId)
+      : []
+    const refreshedIds = new Set([...response.data, ...targetedRun].map((run) => run.run_id))
+    datasetRuns.value = [
+      ...response.data,
+      ...targetedRun,
+      ...previouslyLoaded.filter((run) => !refreshedIds.has(run.run_id))
+    ]
+    runsTotal.value = response.pagination?.total ?? response.data.length
+    runsSequentialLoaded.value = silent
+      ? Math.max(runsSequentialLoaded.value, response.data.length)
+      : response.data.length
+    if (!silent || runsSequentialLoaded.value <= response.data.length) {
+      runsNextCursor.value = response.pagination?.next_cursor ?? null
+      runsHasMore.value = Boolean(response.pagination?.has_more)
+    }
     const matchedRunId = datasetRuns.value.find((run) => run.run_id === requestedRunId)?.run_id
     if (matchedRunId) selectedRunId.value = matchedRunId
     else if (!silent) selectedRunId.value = datasetRuns.value[0]?.run_id || ''
@@ -731,6 +777,34 @@ const loadRuns = async (silent = false) => {
   } finally {
     runsRefreshInFlight = false
     if (!silent) runsLoading.value = false
+    syncRefreshTimer()
+  }
+}
+
+const loadMoreRuns = async (event) => {
+  const target = event.target
+  if (!target || target.scrollTop + target.clientHeight < target.scrollHeight - 16) return
+  if (runsLoadingMore.value || runsRefreshInFlight || !runsHasMore.value || !runsNextCursor.value)
+    return
+  runsLoadingMore.value = true
+  try {
+    const response = await evaluationApi.listRuns(kbId.value, {
+      datasetId: datasetId.value,
+      limit: runPageSize,
+      beforeId: runsNextCursor.value
+    })
+    if (disposed || response?.message !== 'success' || !Array.isArray(response.data)) return
+    datasetRuns.value = [
+      ...new Map([...datasetRuns.value, ...response.data].map((run) => [run.run_id, run])).values()
+    ]
+    runsSequentialLoaded.value += response.data.length
+    runsTotal.value = response.pagination?.total ?? runsTotal.value
+    runsNextCursor.value = response.pagination?.next_cursor ?? null
+    runsHasMore.value = Boolean(response.pagination?.has_more)
+  } catch (error) {
+    if (!disposed) message.error(error.message || '加载更多评估记录失败')
+  } finally {
+    runsLoadingMore.value = false
     syncRefreshTimer()
   }
 }
@@ -893,6 +967,12 @@ onUnmounted(() => {
   padding: 0;
   color: var(--gray-900);
   font-size: 14px;
+}
+
+.benchmark-run-more-hint {
+  color: var(--gray-500);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 :deep(.benchmark-run-select.ant-select:not(.ant-select-disabled) .ant-select-selector) {

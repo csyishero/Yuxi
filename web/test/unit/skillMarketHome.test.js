@@ -54,7 +54,7 @@ const stub = (name) => ({
   }
 })
 
-async function withHome({ role = 'user', query = {}, shares = [], mineShares = [], mineMarket = [], extraPersonal = [], snapshots = {}, hiddenOwn = false, marketFailure = false, personalFailure = false, historyFailureOnce = false } = {}, verify) {
+async function withHome({ role = 'user', query = {}, shares = [], marketRequests = [], mineShares = [], mineMarket = [], extraPersonal = [], extraShared = [], extraInstalls = [], extraMarket = [], snapshots = {}, hiddenOwn = false, marketFailure = false, personalFailure = false, historyFailureOnce = false } = {}, verify) {
   const componentDir = new URL('../../src/components/extensions/', import.meta.url)
   const sharedDir = new URL('../../src/components/shared/', import.meta.url)
   const compiledPath = fileURLToPath(new URL(`.skill-market-home-${pid}.mjs`, componentDir))
@@ -98,30 +98,85 @@ async function withHome({ role = 'user', query = {}, shares = [], mineShares = [
       if (path.startsWith('/api/skill-market?')) return marketFailure
         ? Response.json({ detail: '市场暂不可用' }, { status: 503 })
         : Response.json({ data: [
-        { slug: 'new-market', name: '市场新技能', owner_uid: 'bob', owner_name: 'Bob', latest_version: 1, install_count: 4, likes_count: 2, category: 'other', scope: 'global', description: '市场展示条目' }
+        { slug: 'new-market', name: '市场新技能', owner_uid: 'bob', owner_name: 'Bob', latest_version: 1, install_count: 4, likes_count: 2, category: 'other', scope: 'global', description: '市场展示条目' },
+        ...extraMarket
         ] })
-      if (path === '/api/skill-market/-/installs') return Response.json({ data: [
-        { slug: 'installed-market', name: '已安装市场版', installed_version: 2, visible: true, category: 'other' },
-        { slug: 'old-market', name: '不应显示的旧详情', description: '不应显示的描述', owner_uid: 'bob', installed_version: 1, visible: false },
-        ...(hiddenOwn ? [{ slug: 'my-market-old', owner_uid: 'alice', own_personal_slug: 'my-skill', name: '不应显示的本人旧详情', installed_version: 1, visible: false }] : [])
-      ] })
-      if (path.startsWith('/api/skills?') || path === '/api/skills') return personalFailure
-        ? Response.json({ detail: '个人技能暂不可用' }, { status: 503 })
-        : Response.json({ data: [
-        { slug: 'my-skill', name: '我创建的技能', source_scope: 'personal', source_type: 'upload', owner_uid: 'alice', category: 'other' },
-        ...extraPersonal,
-        { slug: 'team-skill', name: '团队共享技能', source_scope: 'shared', source_type: 'upload', enabled: true, category: 'other', can_manage: role !== 'user' },
-        { slug: 'builtin-skill', name: '内置技能', source_scope: 'builtin', source_type: 'builtin', enabled: true, category: 'other' }
-        ] })
-      if (path === '/api/skill-market/requests') return Response.json({ data: [] })
-      if (path === '/api/skills/share-requests') return Response.json({ data: shares })
-      if (path === '/api/skills/share-requests?mine_only=true') {
-        historyAttempts++
-        return historyFailureOnce && historyAttempts === 1
-          ? Response.json({ detail: '发布记录暂不可用' }, { status: 503 })
-          : Response.json({ data: mineShares })
+      if (path.startsWith('/api/skill-market/-/installs')) {
+        const params = new URL(path, 'http://yuxi.local').searchParams
+        const offset = Number(params.get('offset') || 0)
+        const limit = Number(params.get('limit') || 30)
+        const installs = [
+          { slug: 'installed-market', name: '已安装市场版', installed_version: 2, visible: true, category: 'other' },
+          { slug: 'old-market', name: '不应显示的旧详情', description: '不应显示的描述', owner_uid: 'bob', installed_version: 1, visible: false },
+          ...(hiddenOwn ? [{ slug: 'my-market-old', owner_uid: 'alice', own_personal_slug: 'my-skill', name: '不应显示的本人旧详情', installed_version: 1, visible: false }] : []),
+          ...extraInstalls
+        ]
+        const search = (params.get('search') || '').toLowerCase()
+        const matching = installs.filter((item) => !search || `${item.slug} ${item.visible === false ? '' : `${item.name} ${item.description || ''}`}`.toLowerCase().includes(search))
+        return Response.json({ data: matching.slice(offset, offset + limit), total: matching.length, has_more: offset + limit < matching.length, limit, offset })
       }
-      if (path === '/api/skill-market/requests?mine_only=true') return Response.json({ data: mineMarket })
+      if (path.startsWith('/api/skills?') || path === '/api/skills') {
+        if (personalFailure) return Response.json({ detail: '个人技能暂不可用' }, { status: 503 })
+        const params = new URL(path, 'http://yuxi.local').searchParams
+        const personal = [
+          { slug: 'my-skill', name: '我创建的技能', source_scope: 'personal', source_type: 'upload', owner_uid: 'alice', category: 'other' },
+          ...extraPersonal
+        ]
+        const shared = [
+          { slug: 'team-skill', name: '团队共享技能', source_scope: 'shared', source_type: 'upload', enabled: true, category: 'other', can_manage: role !== 'user' },
+          { slug: 'builtin-skill', name: '内置技能', source_scope: 'builtin', source_type: 'builtin', enabled: true, category: 'other' },
+          ...extraShared
+        ]
+        const source = params.get('source')
+        const search = (params.get('search') || '').toLowerCase()
+        const all = (source === 'personal' ? personal : source === 'shared' ? shared : [...personal, ...shared])
+          .filter((item) => !search || `${item.slug} ${item.name} ${item.description || ''}`.toLowerCase().includes(search))
+        const offset = Number(params.get('offset') || 0)
+        const limit = Number(params.get('limit') || 30)
+        return Response.json({ data: all.slice(offset, offset + limit), total: source === 'personal' ? null : all.length, has_more: offset + limit < all.length, limit, offset })
+      }
+      if (path.startsWith('/api/skills/personal/')) {
+        const slug = decodeURIComponent(path.split('/').at(-1))
+        const found = [
+          { slug: 'my-skill', name: '我创建的技能', source_scope: 'personal', owner_uid: 'alice' },
+          ...extraPersonal
+        ].find((item) => item.slug === slug)
+        return found ? Response.json({ data: found }) : Response.json({ detail: '个人 Skill 不存在' }, { status: 404 })
+      }
+      if (path.startsWith('/api/skills/publication-records?')) {
+        historyAttempts++
+        if (historyFailureOnce && historyAttempts === 1) return Response.json({ detail: '发布记录暂不可用' }, { status: 503 })
+        const params = new URL(path, 'http://yuxi.local').searchParams
+        const rows = [...mineShares, ...mineMarket].filter((item) => item.owner_uid === 'alice')
+        const activity = (item) => Date.parse(item.reviewed_at || item.created_at || 0)
+        const latestActivity = (slug) => rows.filter((item) => item.personal_slug === slug)
+          .sort((left, right) => activity(right) - activity(left))[0]
+        const slugs = [...new Set(rows.map((item) => item.personal_slug))]
+          .sort((left, right) => activity(latestActivity(right)) - activity(latestActivity(left)))
+        const offset = Number(params.get('offset') || 0)
+        const selected = slugs.slice(offset, offset + Number(params.get('limit') || 20))
+        const latestAndApproved = (source) => selected.flatMap((slug) => {
+          const own = source.filter((item) => item.owner_uid === 'alice' && item.personal_slug === slug)
+            .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
+          return [own[0], own.find((item) => item.status === 'approved')].filter((item, index, items) => item && items.findIndex((candidate) => candidate?.id === item.id) === index)
+        })
+        return Response.json({ data: {
+          slugs: selected,
+          activities: Object.fromEntries(selected.map((slug) => [slug, latestActivity(slug).reviewed_at || latestActivity(slug).created_at])),
+          shared_requests: latestAndApproved(mineShares), market_requests: latestAndApproved(mineMarket), total: slugs.length
+        } })
+      }
+      if (path.startsWith('/api/skills/share-requests?') || path.startsWith('/api/skill-market/requests?')) {
+        const params = new URL(path, 'http://yuxi.local').searchParams
+        const source = path.startsWith('/api/skill-market')
+          ? params.get('mine_only') === 'true' ? mineMarket : marketRequests
+          : params.get('mine_only') === 'true' ? mineShares : shares
+        const filtered = source.filter((item) => (!params.get('slug') || item.personal_slug === params.get('slug')) && (!params.get('status') || item.status === params.get('status')))
+          .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
+        const offset = Number(params.get('offset') || 0)
+        const limit = Number(params.get('limit') || 20)
+        return Response.json({ data: { items: filtered.slice(offset, offset + limit), total: filtered.length } })
+      }
       const snapshotMatch = path.match(/^\/api\/skills\/share-requests\/([^/]+)\/(tree|snapshot)(?:\?path=(.*))?$/)
       if (snapshotMatch) {
         const [, id, endpoint] = snapshotMatch
@@ -214,6 +269,145 @@ test('我的技能默认是唯一清单，包含本人来源而不混入待安�
   })
 })
 
+test('个人与团队技能分别按来源续页，后续技能仍可从列表进入', async () => {
+  const extraPersonal = Array.from({ length: 30 }, (_, index) => ({
+    slug: `personal-${index}`, name: `个人技能 ${index}`, source_scope: 'personal', source_type: 'upload', owner_uid: 'alice', category: 'other'
+  }))
+  const extraShared = Array.from({ length: 29 }, (_, index) => ({
+    slug: `shared-${index}`, name: `共享技能 ${index}`, source_scope: 'shared', source_type: 'upload', enabled: true, category: 'other'
+  }))
+  await withHome({ extraPersonal, extraShared }, async ({ host, requested, tick }) => {
+    let home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.ok(requested.some((request) => request.path.includes('source=personal') && request.path.includes('limit=30') && request.path.includes('offset=0')))
+    assert.ok(requested.some((request) => request.path.includes('source=shared') && request.path.includes('limit=30') && request.path.includes('offset=0')))
+    assert.doesNotMatch(visibleText(home), /个人技能 29|共享技能 28/)
+    const morePersonal = findAll(home, (item) => item.type === 'a-button' && visibleText(item).includes('加载更多我创建的技能'))[0]
+    assert.ok(morePersonal)
+    morePersonal.props.onClick()
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.match(visibleText(home), /个人技能 29/)
+    assert.ok(requested.some((request) => request.path.includes('source=personal') && request.path.includes('offset=30')))
+    const moreShared = findAll(home, (item) => item.type === 'a-button' && visibleText(item).includes('加载更多团队与系统技能'))[0]
+    assert.ok(moreShared)
+    moreShared.props.onClick()
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.match(visibleText(home), /共享技能 28/)
+    assert.ok(requested.some((request) => request.path.includes('source=shared') && request.path.includes('offset=30')))
+  })
+})
+
+test('个人技能尚未全部加载时，发布记录不推断未加载的原件已删除', async () => {
+  const extraPersonal = Array.from({ length: 30 }, (_, index) => ({
+    slug: `personal-${index}`, name: `个人技能 ${index}`, source_scope: 'personal', source_type: 'upload', owner_uid: 'alice', category: 'other'
+  }))
+  const mineShares = [{
+    id: 'late-share', owner_uid: 'alice', personal_slug: 'personal-29', name: '个人技能 29', status: 'approved',
+    published_version: 1, created_at: '2026-10-14T08:00:00Z'
+  }]
+  await withHome({ extraPersonal, mineShares }, async ({ host, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
+    await tick()
+    const records = findAll(host, (item) => item.props['aria-label'] === '发布与审核记录')[0]
+    assert.match(visibleText(records), /个人技能 29/)
+    assert.doesNotMatch(visibleText(records), /原件已删除/)
+  })
+})
+
+test('个人技能搜索结果不能用来判定发布记录的原件是否已删除', async () => {
+  const mineShares = [{
+    id: 'share-my-skill', owner_uid: 'alice', personal_slug: 'my-skill', name: '我创建的技能', status: 'approved',
+    published_version: 1, created_at: '2026-10-14T08:00:00Z'
+  }]
+  await withHome({ mineShares }, async ({ host, tick }) => {
+    const search = findAll(host, (item) => item.type === 'a-input' && item.props['aria-label'] === '搜索我的技能')[0]
+    search.props['onUpdate:value']('不存在的关键词')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    await tick()
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
+    await tick()
+    const records = findAll(host, (item) => item.props['aria-label'] === '发布与审核记录')[0]
+    assert.match(visibleText(records), /我创建的技能/)
+    assert.doesNotMatch(visibleText(records), /原件已删除/)
+  })
+})
+
+test('市场已安装技能按页读取，旧安装在后续页仍可管理', async () => {
+  const extraInstalls = Array.from({ length: 29 }, (_, index) => ({
+    slug: `installed-${index}`, name: `安装技能 ${index}`, installed_version: 1, visible: true, category: 'other'
+  }))
+  await withHome({ extraInstalls }, async ({ host, requested, tick }) => {
+    let home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.ok(requested.some((request) => request.path.includes('/api/skill-market/-/installs?limit=30&offset=0')))
+    assert.doesNotMatch(visibleText(home), /安装技能 28/)
+    const more = findAll(home, (item) => item.type === 'a-button' && visibleText(item).includes('加载更多市场已安装技能'))[0]
+    assert.ok(more)
+    more.props.onClick()
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.match(visibleText(home), /安装技能 28/)
+    assert.ok(requested.some((request) => request.path.includes('/api/skill-market/-/installs?limit=30&offset=30')))
+  })
+})
+
+test('搜索市场安装时请求服务端，后续页的安装可直接找到', async () => {
+  const extraInstalls = Array.from({ length: 29 }, (_, index) => ({
+    slug: `installed-${index}`, name: `安装技能 ${index}`, installed_version: 1, visible: true, category: 'other',
+    description: index === 28 ? '专门做数据汇总' : ''
+  }))
+  await withHome({ extraInstalls }, async ({ host, requested, tick }) => {
+    const search = findAll(host, (item) => item.type === 'a-input' && item.props['aria-label'] === '搜索我的技能')[0]
+    search.props['onUpdate:value']('数据汇总')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    await tick()
+    const home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.ok(requested.some((request) => request.path.includes('/api/skill-market/-/installs?') && request.path.includes('search=%E6%95%B0%E6%8D%AE%E6%B1%87%E6%80%BB')))
+    assert.match(visibleText(home), /安装技能 28/)
+  })
+})
+
+test('本人原件位于后续页时，市场操作定向核验并打开个人原件', async () => {
+  const extraPersonal = Array.from({ length: 30 }, (_, index) => ({
+    slug: `personal-${index}`, name: `个人技能 ${index}`, source_scope: 'personal', source_type: 'upload', owner_uid: 'alice', category: 'other'
+  }))
+  const extraMarket = [{
+    slug: 'late-market', name: '后续页的市场技能', owner_uid: 'alice', owner_name: 'Alice', own_personal_slug: 'personal-29',
+    latest_version: 1, install_count: 0, likes_count: 0, category: 'other', scope: 'global'
+  }]
+  await withHome({ extraPersonal, extraMarket }, async ({ host, requested, router, tick }) => {
+    findAll(host, (item) => item.props.role === 'tab' && visibleText(item) === '技能市场')[0].props.onClick()
+    await tick()
+    const card = findAll(host, (item) => item.props.class === 'market-card' && visibleText(item).includes('后续页的市场技能'))[0]
+    assert.ok(card)
+    const action = findAll(card, (item) => item.type === 'a-button' && visibleText(item) === '查看个人技能')[0]
+    assert.ok(action)
+    action.props.onClick()
+    await tick()
+    assert.equal(router.currentRoute.value.fullPath, '/extensions/skill/personal-29?scope=personal')
+    assert.ok(requested.some((request) => request.path === '/api/skills/personal/personal-29'))
+    assert.equal(requested.some((request) => request.path.includes('/api/skill-market/late-market/install')), false)
+  })
+})
+
+test('搜索个人技能时由服务器查询后续页，描述命中仍显示结果', async () => {
+  const extraPersonal = Array.from({ length: 30 }, (_, index) => ({
+    slug: `personal-${index}`, name: `个人技能 ${index}`, source_scope: 'personal', source_type: 'upload', owner_uid: 'alice', category: 'other',
+    description: index === 29 ? '特别分析任务' : ''
+  }))
+  await withHome({ extraPersonal }, async ({ host, requested, tick }) => {
+    const search = findAll(host, (item) => item.type === 'a-input' && item.props['aria-label'] === '搜索我的技能')[0]
+    assert.ok(search)
+    search.props['onUpdate:value']('特别分析')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    await tick()
+    const home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.ok(requested.some((request) => request.path.includes('source=personal') && request.path.includes('search=%E7%89%B9%E5%88%AB%E5%88%86%E6%9E%90')))
+    assert.match(visibleText(home), /个人技能 29/)
+    assert.doesNotMatch(visibleText(home), /没有找到匹配的技能/)
+  })
+})
+
 test('切换技能市场后只展示已上架条目，返回仍是个人清单', async () => {
   await withHome({}, async ({ host, router, tick }) => {
     const marketTab = findAll(host, (item) => item.props.role === 'tab' && visibleText(item) === '技能市场')[0]
@@ -283,6 +477,32 @@ test('管理员从个人首页可打开共享审核并看到待审申请', async
   })
 })
 
+test('共享与市场审核只展示当前页，并能继续查看后续申请', async () => {
+  const requests = Array.from({ length: 11 }, (_, index) => ({
+    id: `request-${index}`, name: `申请 ${index}`, owner_uid: 'bob', personal_slug: `skill-${index}`,
+    status: 'pending', created_at: new Date(Date.UTC(2026, 9, index + 1)).toISOString()
+  }))
+  await withHome({ role: 'admin', shares: requests, marketRequests: requests }, async ({ host, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item).includes('共享申请'))[0].props.onClick()
+    await tick()
+    let modal = findAll(host, (item) => item.type === 'a-modal' && item.props.title === 'Skill 共享申请')[0]
+    assert.equal(findAll(modal, (item) => item.props.class === 'skill-share-request').length, 10)
+    findAll(modal, (item) => item.type === 'a-button' && visibleText(item) === '下一页')[0].props.onClick()
+    await tick()
+    modal = findAll(host, (item) => item.type === 'a-modal' && item.props.title === 'Skill 共享申请')[0]
+    assert.equal(findAll(modal, (item) => item.props.class === 'skill-share-request').length, 1)
+
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item).includes('市场审核'))[0].props.onClick()
+    await tick()
+    modal = findAll(host, (item) => item.type === 'a-modal' && item.props.title === '市场审核申请')[0]
+    assert.equal(findAll(modal, (item) => item.props.class === 'market-request').length, 10)
+    findAll(modal, (item) => item.type === 'a-button' && visibleText(item) === '下一页')[0].props.onClick()
+    await tick()
+    modal = findAll(host, (item) => item.type === 'a-modal' && item.props.title === '市场审核申请')[0]
+    assert.equal(findAll(modal, (item) => item.props.class === 'market-request').length, 1)
+  })
+})
+
 test('治理视图只列共享、内置和其他成员技能，不复制个人上传与安装清单', async () => {
   await withHome({ role: 'admin' }, async ({ host, tick }) => {
     const entry = findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '技能治理')[0]
@@ -296,6 +516,21 @@ test('治理视图只列共享、内置和其他成员技能，不复制个人�
     assert.ok(findAll(governance, (item) => item.type === 'a-button' && visibleText(item) === '批量管理').length)
     const enabledManageActions = findAll(governance, (item) => item.type === 'button' && item.props['aria-label'] === '禁用 Skill' && item.props.disabled === false)
     assert.ok(enabledManageActions.length, '管理员仍能管理共享技能的启用状态')
+  })
+})
+
+test('可管理的共享技能在后续页时仍显示治理入口', async () => {
+  const extraShared = Array.from({ length: 29 }, (_, index) => ({
+    slug: `later-shared-${index}`,
+    name: `共享技能 ${index}`,
+    source_scope: 'shared',
+    source_type: 'upload',
+    enabled: true,
+    can_manage: index === 28
+  }))
+  await withHome({ role: 'user', extraShared }, async ({ host }) => {
+    const entry = findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '技能治理')[0]
+    assert.ok(entry, '后续页可能有可治理技能时，入口仍应可见')
   })
 })
 
@@ -356,8 +591,42 @@ test('发布记录仅列真实申请，按技能合并两个渠道并保留已�
     for (const label of ['我创建的技能', '已删除原件的技能', '直接共享', '上架市场', '已上架', '待审核', '全公司', '本部门', '原件已删除']) assert.match(text, new RegExp(label))
     assert.doesNotMatch(text, /从未发布的草稿|他人技能/)
     assert.equal(findAll(records, (item) => item.props['data-skill-slug'] === 'my-skill').length, 1)
-    assert.ok(requested.some((request) => request.path === '/api/skills/share-requests?mine_only=true'))
-    assert.ok(requested.some((request) => request.path === '/api/skill-market/requests?mine_only=true'))
+    assert.ok(requested.some((request) => request.path.startsWith('/api/skills/publication-records?')))
+  })
+})
+
+test('发布技能分组和历史申请各自按需加载后续记录', async () => {
+  const mineShares = Array.from({ length: 21 }, (_, index) => ({
+    id: `archived-${index}`, owner_uid: 'alice', personal_slug: `archived-${index}`, name: `归档 ${index}`,
+    status: 'rejected', created_at: new Date(Date.UTC(2026, 9, index + 1)).toISOString()
+  }))
+  await withHome({ mineShares }, async ({ host, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
+    await tick()
+    let records = findAll(host, (item) => item.props['aria-label'] === '发布与审核记录')[0]
+    assert.equal(findAll(records, (item) => item.props['data-skill-slug']).length, 20)
+    findAll(records, (item) => item.type === 'a-button' && visibleText(item).includes('加载更多技能'))[0].props.onClick()
+    await tick()
+    records = findAll(host, (item) => item.props['aria-label'] === '发布与审核记录')[0]
+    assert.equal(findAll(records, (item) => item.props['data-skill-slug']).length, 21)
+  })
+
+  const versions = Array.from({ length: 21 }, (_, index) => ({
+    id: `version-${index}`, owner_uid: 'alice', personal_slug: 'archive', name: '归档技能',
+    status: 'rejected', created_at: new Date(Date.UTC(2026, 9, index + 1)).toISOString()
+  }))
+  await withHome({ mineShares: versions }, async ({ host, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
+    await tick()
+    const row = findAll(host, (item) => item.props['data-skill-slug'] === 'archive')[0]
+    findAll(row, (item) => item.type === 'a-button' && visibleText(item) === '查看记录')[0].props.onClick()
+    await tick()
+    let history = findAll(host, (item) => item.props['aria-label'] === '技能审核历程')[0]
+    assert.equal(findAll(history, (item) => item.props['data-request-id']).length, 20)
+    findAll(history, (item) => item.type === 'a-button' && visibleText(item) === '加载更多记录')[0].props.onClick()
+    await tick()
+    history = findAll(host, (item) => item.props['aria-label'] === '技能审核历程')[0]
+    assert.equal(findAll(history, (item) => item.props['data-request-id']).length, 21)
   })
 })
 

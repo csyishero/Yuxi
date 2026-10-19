@@ -197,6 +197,24 @@ class UserRepository:
             )
             return list(page_result.all()), total_result.scalar() or 0
 
+    async def list_with_department_by_uids(
+        self, *, uids: list[str], department_id: int | None = None
+    ) -> list[tuple[User, str | None]]:
+        """批量获取可见的有效用户及部门名称。"""
+        async with self._session() as session:
+            from yuxi.storage.postgres.models_business import Department
+
+            query = (
+                select(User, Department.name.label("department_name"))
+                .outerjoin(Department, User.department_id == Department.id)
+                .where(User.is_deleted == 0, User.uid.in_(uids))
+                .order_by(User.id.asc())
+            )
+            if department_id is not None:
+                query = query.where(User.department_id == department_id)
+            result = await session.execute(query)
+            return list(result.all())
+
     async def list_skill_catalog_audience(
         self, *, search: str | None = None, department_id: int | None = None
     ) -> list[tuple[str, int | None]]:

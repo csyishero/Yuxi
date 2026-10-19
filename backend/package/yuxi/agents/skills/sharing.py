@@ -185,46 +185,71 @@ async def publish_personal_skill_directly(
 
 
 async def list_skill_share_requests(
-    db: AsyncSession, *, operator: User, channel: str = "shared", mine_only: bool = False
-) -> list[dict]:
-    """申请人读取本人记录；管理员默认读取本部门，必要时只读取本人。"""
-    query = (
-        select(SkillShareRequest, User.username)
-        .outerjoin(User, User.uid == SkillShareRequest.owner_uid)
-        .where(SkillShareRequest.channel == channel)
-    )
+    db: AsyncSession,
+    *,
+    operator: User,
+    channel: str = "shared",
+    mine_only: bool = False,
+    status: str | None = None,
+    slug: str | None = None,
+    limit: int | None = 20,
+    offset: int = 0,
+    request_ids: list[str] | None = None,
+) -> dict:
+    """按授权范围和筛选条件读取申请；limit=None 兼容旧版完整列表。"""
+    conditions = [SkillShareRequest.channel == channel]
+    if status is not None:
+        conditions.append(SkillShareRequest.status == status)
+    if slug is not None:
+        conditions.append(SkillShareRequest.personal_slug == slug)
+    if request_ids is not None:
+        conditions.append(SkillShareRequest.id.in_(request_ids))
     if mine_only or operator.role not in {"admin", "superadmin"}:
-        query = query.where(SkillShareRequest.owner_uid == operator.uid)
+        conditions.append(SkillShareRequest.owner_uid == operator.uid)
     elif operator.role == "admin":
-        query = query.where(
+        conditions.append(
             SkillShareRequest.owner_department_id == operator.department_id
             if operator.department_id is not None
             else SkillShareRequest.id.is_(None)
         )
-    rows = (await db.execute(query.order_by(SkillShareRequest.created_at.desc()))).all()
+
+    total = await db.scalar(select(func.count(SkillShareRequest.id)).where(*conditions)) or 0
+    query = (
+        select(SkillShareRequest, User.username)
+        .outerjoin(User, User.uid == SkillShareRequest.owner_uid)
+        .where(*conditions)
+        .order_by(SkillShareRequest.created_at.desc(), SkillShareRequest.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = (await db.execute(query)).all()
     published_versions: dict[str, str] = {}
     published_copies: dict[int, tuple[str, bool]] = {}
     if channel == "shared" and rows:
-        sources = {(item.owner_uid, item.personal_slug) for item, _ in rows}
-        approved = await db.execute(
-            select(SkillShareRequest.id, SkillShareRequest.owner_uid, SkillShareRequest.personal_slug)
-            .where(
-                SkillShareRequest.channel == "shared",
-                SkillShareRequest.status == "approved",
-                tuple_(SkillShareRequest.owner_uid, SkillShareRequest.personal_slug).in_(sources),
+        approved_ids = [item.id for item, _ in rows if item.status == "approved"]
+        if approved_ids:
+            sources = {(item.owner_uid, item.personal_slug) for item, _ in rows if item.status == "approved"}
+            ranked = (
+                select(
+                    SkillShareRequest.id.label("request_id"),
+                    func.row_number()
+                    .over(
+                        partition_by=(SkillShareRequest.owner_uid, SkillShareRequest.personal_slug),
+                        order_by=(SkillShareRequest.created_at, SkillShareRequest.id),
+                    )
+                    .label("version"),
+                )
+                .where(
+                    SkillShareRequest.channel == "shared",
+                    SkillShareRequest.status == "approved",
+                    tuple_(SkillShareRequest.owner_uid, SkillShareRequest.personal_slug).in_(sources),
+                )
+                .subquery()
             )
-            .order_by(
-                SkillShareRequest.owner_uid,
-                SkillShareRequest.personal_slug,
-                SkillShareRequest.created_at,
-                SkillShareRequest.id,
+            versions = await db.execute(
+                select(ranked.c.request_id, ranked.c.version).where(ranked.c.request_id.in_(approved_ids))
             )
-        )
-        counts: dict[tuple[str, str], int] = {}
-        for request_id, owner_uid, personal_slug in approved.all():
-            key = (owner_uid, personal_slug)
-            counts[key] = counts.get(key, 0) + 1
-            published_versions[request_id] = f"{counts[key]}.0.0"
+            published_versions = {request_id: f"{version}.0.0" for request_id, version in versions.all()}
         skill_ids = {item.published_skill_id for item, _ in rows if item.published_skill_id is not None}
         if skill_ids:
             copies = await db.execute(select(Skill.id, Skill.source_type, Skill.enabled).where(Skill.id.in_(skill_ids)))
@@ -244,7 +269,7 @@ async def list_skill_share_requests(
         result.append(
             {**item.to_dict(), "owner_name": name, "published_version": version, "published_copy_status": copy_status}
         )
-    return result
+    return {"items": result, "total": total, "limit": limit, "offset": offset}
 
 
 async def authorized_share_snapshot_path(db: AsyncSession, *, request_id: str, operator: User) -> Path:

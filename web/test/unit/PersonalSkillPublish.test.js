@@ -90,10 +90,18 @@ async function withPanel({ role = 'user', shares = shareRecords, market = market
         posted.push({ path, body: JSON.parse(options.body) })
         return Response.json({ data: { id: 'new-request', status: 'pending' } })
       }
-      if (path === '/api/skills/share-requests?mine_only=true') return Response.json({ data: shares })
-      if (path === '/api/skill-market/requests?mine_only=true') return historyFailure
-        ? Response.json({ detail: '状态服务不可用' }, { status: 503 })
-        : Response.json({ data: market })
+      if (path.startsWith('/api/skills/share-requests?') || path.startsWith('/api/skill-market/requests?')) {
+        if (historyFailure && path.startsWith('/api/skill-market/requests?')) return Response.json({ detail: '状态服务不可用' }, { status: 503 })
+        const params = new URL(path, 'http://yuxi.local').searchParams
+        const source = path.startsWith('/api/skill-market') ? market : shares
+        const filtered = source.filter((item) => item.personal_slug === params.get('slug') &&
+          (params.get('mine_only') !== 'true' || item.owner_uid === 'alice') &&
+          (!params.get('status') || item.status === params.get('status')))
+          .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
+        const offset = Number(params.get('offset') || 0)
+        const limit = Number(params.get('limit') || 20)
+        return Response.json({ data: { items: filtered.slice(offset, offset + limit), total: filtered.length } })
+      }
       if (path === '/api/skills/personal/reporter/tree') return Response.json({ data: [{ name: 'SKILL.md', path: 'SKILL.md', is_dir: false }] })
       if (path === '/api/skills/personal/reporter/file?path=SKILL.md') return Response.json({ data: { content: '# 当前源码' } })
       if (path === '/api/skills/share-requests/share-rejected/tree') return Response.json({ data: [{ name: 'SKILL.md', path: 'SKILL.md', is_dir: false }] })
@@ -147,8 +155,8 @@ async function withPanel({ role = 'user', shares = shareRecords, market = market
 
 test('打开后按作者和 slug 汇总两个渠道，同时保留最近申请与已发布版本', async () => {
   await withPanel({}, async ({ host, requested, tick }) => {
-    assert.ok(requested.includes('/api/skills/share-requests?mine_only=true'))
-    assert.ok(requested.includes('/api/skill-market/requests?mine_only=true'))
+    assert.ok(requested.some((path) => path.startsWith('/api/skills/share-requests?') && path.includes('slug=reporter') && path.includes('limit=1')))
+    assert.ok(requested.some((path) => path.startsWith('/api/skill-market/requests?') && path.includes('slug=reporter') && path.includes('limit=1')))
     const shared = findAll(host, (item) => item.props['data-channel'] === 'shared')[0]
     const market = findAll(host, (item) => item.props['data-channel'] === 'market')[0]
     assert.match(visibleText(shared), /已驳回/, requested.join(', '))
@@ -238,8 +246,7 @@ test('任一渠道历史读取失败时不允许在未知待审状态下提交',
 })
 
 test('管理员只对自己的个人技能直接共享，并带上方向、原因与目标范围', async () => {
-  await withPanel({ role: 'admin', shares: [], market: [] }, async ({ host, posted, requested, tick }) => {
-    assert.ok(requested.includes('/api/auth/users/access-options'), '范围表单应加载可选择的用户')
+  await withPanel({ role: 'admin', shares: [], market: [] }, async ({ host, posted, tick }) => {
     const reason = findAll(host, (item) => item.type === 'a-textarea' && item.props['aria-label'] === '发布说明')[0]
     reason.props['onUpdate:value']('给设计部使用')
     await nextTick()

@@ -131,6 +131,6 @@ test('知识库权限界面展示快捷授权、高级权限树和系统继承�
   assert.doesNotMatch(shareSource, /创建人.*继承管理权限/)
   assert.match(detailSource, /:resource-department-id="database\.owner_department_id"/)
   assert.match(detailSource, /:available-departments="departments"/)
-  assert.match(detailSource, /databaseApi\.getPermissionOptions\(targetKbId\)/)
+  assert.match(detailSource, /databaseApi\.getPermissionOptions\(targetKbId, \{ offset: 0, limit: 50 \}\)/)
   assert.doesNotMatch(detailSource, /:auto-select-user-dept="true"/)
 })

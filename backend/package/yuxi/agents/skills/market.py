@@ -7,7 +7,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.agents.skills.market_repository import MarketSkillRepository
@@ -72,12 +72,33 @@ async def submit_market_skill(
     )
 
 
-async def list_market_requests(db: AsyncSession, *, operator: User, mine_only: bool = False) -> list[dict]:
-    """为市场申请附上已有条目的发布范围，供新版审核沿用。"""
-    requests = await list_skill_share_requests(db, operator=operator, channel="market", mine_only=mine_only)
+async def list_market_requests(
+    db: AsyncSession,
+    *,
+    operator: User,
+    mine_only: bool = False,
+    status: str | None = None,
+    slug: str | None = None,
+    limit: int | None = 20,
+    offset: int = 0,
+    request_ids: list[str] | None = None,
+) -> dict:
+    """读取市场申请并附上发布范围与版本；limit=None 兼容旧版完整列表。"""
+    page = await list_skill_share_requests(
+        db,
+        operator=operator,
+        channel="market",
+        mine_only=mine_only,
+        status=status,
+        slug=slug,
+        limit=limit,
+        offset=offset,
+        request_ids=request_ids,
+    )
+    requests = page["items"]
     sources = {(item["owner_uid"], item["personal_slug"]) for item in requests}
     if not sources:
-        return requests
+        return page
 
     rows = await db.execute(
         select(
@@ -108,7 +129,94 @@ async def list_market_requests(db: AsyncSession, *, operator: User, mine_only: b
         item["existing_market_department_id"] = department_id
         item["current_market_version"] = current_version
         item["published_version"] = published_versions.get(item["id"])
-    return requests
+    return page
+
+
+async def list_personal_publication_records(
+    db: AsyncSession, *, operator: User, limit: int = 20, offset: int = 0
+) -> dict:
+    """按个人技能分组分页，摘要只取各渠道最近申请和最近批准。"""
+    activity = func.coalesce(SkillShareRequest.reviewed_at, SkillShareRequest.created_at)
+    groups = (
+        select(
+            SkillShareRequest.personal_slug.label("slug"),
+            func.max(activity).label("last_activity"),
+        )
+        .where(
+            SkillShareRequest.owner_uid == operator.uid,
+            SkillShareRequest.channel.in_(("shared", "market")),
+        )
+        .group_by(SkillShareRequest.personal_slug)
+        .subquery()
+    )
+    total = await db.scalar(select(func.count()).select_from(groups)) or 0
+    rows = (
+        await db.execute(
+            select(groups.c.slug, groups.c.last_activity)
+            .order_by(groups.c.last_activity.desc(), groups.c.slug)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    slugs = [slug for slug, _ in rows]
+    activities = {slug: format_utc_datetime(last_activity) for slug, last_activity in rows}
+    if not slugs:
+        return {
+            "slugs": [],
+            "activities": {},
+            "shared_requests": [],
+            "market_requests": [],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    newest = func.row_number().over(
+        partition_by=(SkillShareRequest.personal_slug, SkillShareRequest.channel),
+        order_by=(SkillShareRequest.created_at.desc(), SkillShareRequest.id.desc()),
+    )
+    newest_status = func.row_number().over(
+        partition_by=(SkillShareRequest.personal_slug, SkillShareRequest.channel, SkillShareRequest.status),
+        order_by=(SkillShareRequest.created_at.desc(), SkillShareRequest.id.desc()),
+    )
+    ranked = (
+        select(
+            SkillShareRequest.id.label("request_id"),
+            SkillShareRequest.channel,
+            SkillShareRequest.status,
+            newest.label("newest"),
+            newest_status.label("newest_status"),
+        )
+        .where(
+            SkillShareRequest.owner_uid == operator.uid,
+            SkillShareRequest.channel.in_(("shared", "market")),
+            SkillShareRequest.personal_slug.in_(slugs),
+        )
+        .subquery()
+    )
+    selected = await db.execute(
+        select(ranked.c.request_id, ranked.c.channel).where(
+            or_(ranked.c.newest == 1, and_(ranked.c.status == "approved", ranked.c.newest_status == 1))
+        )
+    )
+    selected_rows = selected.all()
+    shared_ids = [request_id for request_id, channel in selected_rows if channel == "shared"]
+    market_ids = [request_id for request_id, channel in selected_rows if channel == "market"]
+    shared = await list_skill_share_requests(
+        db, operator=operator, mine_only=True, request_ids=shared_ids, limit=max(1, len(shared_ids))
+    )
+    market = await list_market_requests(
+        db, operator=operator, mine_only=True, request_ids=market_ids, limit=max(1, len(market_ids))
+    )
+    return {
+        "slugs": slugs,
+        "activities": activities,
+        "shared_requests": shared["items"],
+        "market_requests": market["items"],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 async def review_market_skill(
@@ -305,6 +413,21 @@ async def list_market_skills(
 async def list_user_market_installs(db: AsyncSession, *, user: User) -> list[dict]:
     """列出本人已安装版本的安全摘要，包括现时可见状态。"""
     items = await MarketSkillRepository(db).installed_releases_for_user(str(user.uid))
+    return _market_install_summaries(items, user=user)
+
+
+async def page_user_market_installs(
+    db: AsyncSession, *, user: User, offset: int, limit: int, search: str = ""
+) -> tuple[list[dict], int]:
+    """按页返回本人已安装版本，并保持隐藏条目的安全摘要。"""
+    items, total = await MarketSkillRepository(db).page_installed_releases_for_user(
+        str(user.uid), user=user, offset=offset, limit=limit, search=search
+    )
+    return _market_install_summaries(items, user=user), total
+
+
+def _market_install_summaries(items: list[tuple[MarketSkill, MarketSkillRelease]], *, user: User) -> list[dict]:
+    """将安装指针转为按当前可见范围裁剪的页面摘要。"""
     cards = []
     for listing, release in items:
         detail_available = bool(user.department_id) and listing.latest_release_id is not None

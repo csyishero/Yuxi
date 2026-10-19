@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, case, delete, func, select
 
 from yuxi.storage.postgres.manager import pg_manager
+from yuxi.storage.postgres.models_business import TaskRecord
 from yuxi.storage.postgres.models_knowledge import (
     EvaluationDataset,
     EvaluationDatasetItem,
@@ -73,6 +74,21 @@ class EvaluationRepository:
         async with pg_manager.get_async_session_context() as session:
             return await self.update_dataset_in_session(session, dataset_id, data)
 
+    async def sync_active_dataset_build_metadata(self, dataset_id: str, metadata: dict[str, Any]) -> dict | None:
+        """仅在构建未终结时写入 Task 投影，避免旧快照覆盖终态。"""
+        async with pg_manager.get_async_session_context() as session:
+            row = await session.scalar(
+                select(EvaluationDataset).where(EvaluationDataset.dataset_id == dataset_id).with_for_update()
+            )
+            if row is None:
+                return None
+            current = dict(row.build_metadata or {})
+            if current.get("status") in {"completed", "failed"}:
+                return current
+            row.build_metadata = metadata
+            await session.flush()
+            return metadata
+
     @staticmethod
     async def add_dataset_items_in_session(session, items_data: list[dict[str, Any]]) -> None:
         session.add_all(EvaluationDatasetItem(**item) for item in items_data)
@@ -91,6 +107,41 @@ class EvaluationRepository:
                 .order_by(EvaluationDataset.created_at.desc())
             )
             return list(result.scalars().all())
+
+    async def page_datasets(
+        self, kb_id: str, *, limit: int, offset: int, status: str | None = None, search: str | None = None
+    ) -> tuple[list[EvaluationDataset], int]:
+        filters = [EvaluationDataset.kb_id == kb_id]
+        if status:
+            stored_status = func.coalesce(EvaluationDataset.build_metadata["status"].as_string(), "completed")
+            task_status = (
+                select(TaskRecord.status)
+                .where(TaskRecord.id == EvaluationDataset.build_metadata["task_id"].as_string())
+                .scalar_subquery()
+            )
+            generated_active = and_(
+                EvaluationDataset.build_metadata["source"].as_string() == "generated",
+                stored_status.in_(("pending", "running")),
+            )
+            effective_status = case(
+                (and_(generated_active, task_status == "success"), "completed"),
+                (and_(generated_active, task_status.in_(("failed", "cancelled"))), "failed"),
+                else_=stored_status,
+            )
+            filters.append(effective_status == status)
+        if search:
+            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            filters.append(EvaluationDataset.name.ilike(f"%{escaped}%", escape="\\"))
+        async with pg_manager.get_async_session_context() as session:
+            total = await session.scalar(select(func.count(EvaluationDataset.id)).where(*filters))
+            result = await session.execute(
+                select(EvaluationDataset)
+                .where(*filters)
+                .order_by(EvaluationDataset.created_at.desc(), EvaluationDataset.id.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            return list(result.scalars().all()), int(total or 0)
 
     async def list_dataset_items(
         self, dataset_id: str, offset: int = 0, limit: int = 100
@@ -191,6 +242,36 @@ class EvaluationRepository:
                 select(EvaluationRun).where(EvaluationRun.kb_id == kb_id).order_by(EvaluationRun.started_at.desc())
             )
             return list(result.scalars().all())
+
+    async def page_runs(
+        self,
+        kb_id: str,
+        *,
+        limit: int,
+        offset: int,
+        dataset_id: str | None = None,
+        run_id: str | None = None,
+        before_id: int | None = None,
+    ) -> tuple[list[EvaluationRun], int, bool]:
+        filters = [EvaluationRun.kb_id == kb_id]
+        if dataset_id:
+            filters.append(EvaluationRun.dataset_id == dataset_id)
+        if run_id:
+            filters.append(EvaluationRun.run_id == run_id)
+        async with pg_manager.get_async_session_context() as session:
+            total = await session.scalar(select(func.count(EvaluationRun.id)).where(*filters))
+            page_filters = [*filters]
+            if before_id is not None:
+                page_filters.append(EvaluationRun.id < before_id)
+            result = await session.execute(
+                select(EvaluationRun)
+                .where(*page_filters)
+                .order_by(EvaluationRun.id.desc())
+                .limit(limit + 1)
+                .offset(offset)
+            )
+            rows = list(result.scalars().all())
+            return rows[:limit], int(total or 0), len(rows) > limit
 
     @staticmethod
     async def update_run_in_session(session, run_id: str, data: dict[str, Any]) -> EvaluationRun | None:

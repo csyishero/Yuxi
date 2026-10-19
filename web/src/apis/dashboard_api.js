@@ -50,8 +50,12 @@ export const dashboardApi = {
    * @param {string} threadId - 对话线程ID
    * @returns {Promise<Object>} - 对话详情
    */
-  getConversationDetail: (threadId, scope = 'all') => {
-    return apiAdminGet(`/api/dashboard/conversations/${threadId}${scopeQuery(scope)}`)
+  getConversationDetail: (threadId, scope = 'all', page = {}) => {
+    const query = new URLSearchParams()
+    if (scope === 'current') query.set('scope', 'current')
+    if (page.limit) query.set('limit', String(page.limit))
+    if (page.offset !== undefined) query.set('offset', String(page.offset))
+    return apiAdminGet(`/api/dashboard/conversations/${threadId}?${query.toString()}`)
   },
 
   /**
@@ -67,15 +71,17 @@ export const dashboardApi = {
    * @param {Object} params - 查询参数
    * @param {string} [params.rating] - 反馈类型过滤 (like/dislike/all)
    * @param {string} [params.agent_id] - 智能体ID过滤
-   * @returns {Promise<Array>} - 反馈列表
+   * @returns {Promise<Object>} - 当前页、总数和分页参数
    */
   getFeedbacks: (params = {}) => {
     const queryParams = new URLSearchParams()
     if (params.scope) queryParams.append('scope', params.scope)
     if (params.rating && params.rating !== 'all') queryParams.append('rating', params.rating)
     if (params.agent_id) queryParams.append('agent_id', params.agent_id)
+    if (params.limit) queryParams.append('limit', params.limit)
+    if (params.offset !== undefined) queryParams.append('offset', params.offset)
 
-    return apiAdminGet(`/api/dashboard/feedbacks?${queryParams.toString()}`)
+    return apiAdminGet(`/api/dashboard/feedbacks/page?${queryParams.toString()}`)
   },
 
   /**

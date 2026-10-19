@@ -3,7 +3,6 @@ import { computed, onScopeDispose, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { taskerApi } from '@/apis/tasker'
 import { useUserStore } from '@/stores/user'
-import { parseToShanghai } from '@/utils/time'
 
 const ACTIVE_STATUSES = new Set(['pending', 'running', 'queued'])
 const FAILED_STATUSES = new Set(['failed', 'cancelled'])
@@ -39,6 +38,7 @@ export const useTaskerStore = defineStore('tasker', () => {
   const lastError = ref(null)
   const isDrawerOpen = ref(false)
   const summary = ref(createDefaultSummary())
+  const listQuery = ref({ status_group: 'all', offset: 0, limit: 20 })
   let pollingTimer = null
   let sessionGeneration = 0
   let listRequestId = 0
@@ -46,16 +46,7 @@ export const useTaskerStore = defineStore('tasker', () => {
   let pollingFailures = 0
   const detailRequests = new Map()
 
-  const sortedTasks = computed(() => {
-    return [...tasks.value].sort((a, b) => {
-      const timeA = parseToShanghai(a.created_at)
-      const timeB = parseToShanghai(b.created_at)
-      if (!timeA && !timeB) return 0
-      if (!timeA) return 1
-      if (!timeB) return -1
-      return timeB.valueOf() - timeA.valueOf()
-    })
-  })
+  const sortedTasks = computed(() => tasks.value)
 
   const statusCounts = computed(() => summary.value?.status_counts || {})
 
@@ -73,6 +64,7 @@ export const useTaskerStore = defineStore('tasker', () => {
   )
   const successCount = computed(() => statusCounts.value?.success || 0)
   const totalCount = computed(() => summary.value?.total || 0)
+  const filteredTotal = computed(() => summary.value?.filtered_total || 0)
 
   // 是否存在需要持续轮询的任务：summary 统计或本地乐观登记的活跃任务
   const hasActiveTasks = computed(
@@ -97,18 +89,23 @@ export const useTaskerStore = defineStore('tasker', () => {
       return
     }
 
+    const query = { ...listQuery.value, ...params }
+    const queryChanged = Object.keys(params).some((key) => params[key] !== listQuery.value[key])
+    listQuery.value = query
     const requestId = ++listRequestId
     const revision = taskRevision
     stopPolling()
     loading.value = true
     lastError.value = null
+    if (queryChanged) tasks.value = []
     try {
-      const response = await taskerApi.fetchTasks(params)
+      const response = await taskerApi.fetchTasks(query)
       if (requestId !== listRequestId || revision !== taskRevision) return
       const taskList = response?.tasks || []
       summary.value = {
         ...createDefaultSummary(),
-        ...(response?.summary || {})
+        ...(response?.summary || {}),
+        filtered_total: response?.summary?.filtered_total ?? response?.summary?.total ?? 0
       }
       tasks.value = taskList.map(toTask)
       pollingFailures = 0
@@ -258,6 +255,7 @@ export const useTaskerStore = defineStore('tasker', () => {
     lastError.value = null
     isDrawerOpen.value = false
     summary.value = createDefaultSummary()
+    listQuery.value = { status_group: 'all', offset: 0, limit: 20 }
   }
 
   // 同步失效：退出或切换账号后，旧请求即使完成也不能写回新会话。
@@ -269,6 +267,7 @@ export const useTaskerStore = defineStore('tasker', () => {
     tasks,
     sortedTasks,
     totalCount,
+    filteredTotal,
     successCount,
     failedCount,
     loading,

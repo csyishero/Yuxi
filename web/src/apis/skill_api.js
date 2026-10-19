@@ -19,7 +19,13 @@ export const listMarketRankings = async ({ metric = 'installs', scope = 'company
 }
 
 export const getMarketSkill = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}`)
-export const listMarketInstalls = async () => apiGet(`${MARKET_BASE_URL}/-/installs`)
+export const listMarketInstalls = async ({ limit, offset, search } = {}) => {
+  const params = new URLSearchParams()
+  if (limit !== undefined) params.set('limit', String(limit))
+  if (offset !== undefined) params.set('offset', String(offset))
+  if (search?.trim()) params.set('search', search.trim())
+  return apiGet(`${MARKET_BASE_URL}/-/installs${params.size ? `?${params}` : ''}`)
+}
 export const getMarketSkillTree = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/tree`)
 export const getMarketSkillFile = async (slug, path = 'SKILL.md') =>
   apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/file?path=${encodeURIComponent(path)}`)
@@ -29,30 +35,52 @@ export const upgradeMarketSkill = async (slug) => apiPost(`${MARKET_BASE_URL}/${
 export const toggleMarketSkillLike = async (slug) => apiPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/like`)
 export const submitMarketSkill = async (slug, applicationReason, category) =>
   apiPost(`${MARKET_BASE_URL}/personal/${encodeURIComponent(slug)}/submit`, { application_reason: applicationReason, category })
-export const listMarketRequests = async ({ mineOnly = false } = {}) =>
-  apiGet(`${MARKET_BASE_URL}/requests${mineOnly ? '?mine_only=true' : ''}`)
+export const listMarketRequests = async ({ mineOnly = false, status, slug, offset = 0, limit = 20 } = {}) => {
+  const params = new URLSearchParams({ offset: String(offset), limit: String(limit) })
+  if (mineOnly) params.set('mine_only', 'true')
+  if (status) params.set('status', status)
+  if (slug) params.set('slug', slug)
+  return apiGet(`${MARKET_BASE_URL}/requests?${params}`)
+}
 export const reviewMarketSkill = async (requestId, approved, scope, note) =>
   apiAdminPost(`${MARKET_BASE_URL}/requests/${encodeURIComponent(requestId)}/${approved ? 'approve' : 'reject'}`, {
     scope,
     note
   })
 
-export const listSkills = async () => {
-  return apiGet(BASE_URL)
+export const listSkills = async ({ limit, offset, search } = {}) => {
+  const params = new URLSearchParams()
+  if (limit !== undefined) params.set('limit', String(limit))
+  if (offset !== undefined) params.set('offset', String(offset))
+  if (search?.trim()) params.set('search', search.trim())
+  return apiGet(`${BASE_URL}${params.size ? `?${params}` : ''}`)
 }
 
-export const listSkillCards = async ({ refreshPersonal = false, audienceSearch, audienceDepartmentId } = {}) => {
+export const getSkillDetail = async (slug) => apiGet(`${BASE_URL}/${encodeURIComponent(slug)}/details`)
+export const getPersonalSkillDetail = async (slug) => apiGet(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}`)
+
+export const listSkillCards = async ({
+  source, limit, offset, search, refreshPersonal = false, audienceSearch, audienceDepartmentId
+} = {}) => {
   const params = new URLSearchParams()
+  if (source) params.set('source', source)
+  if (limit !== undefined) params.set('limit', String(limit))
+  if (offset !== undefined) params.set('offset', String(offset))
+  if (search?.trim()) params.set('search', search.trim())
   if (refreshPersonal) params.set('refresh_personal', 'true')
   if (audienceSearch?.trim()) params.set('audience_search', audienceSearch.trim())
   if (audienceDepartmentId) params.set('audience_department_id', String(audienceDepartmentId))
   return apiGet(`${USER_BASE_URL}${params.size ? `?${params}` : ''}`)
 }
 
-export const listPersonalSkillCatalog = async ({ departmentId, ownerSearch, offset = 0 } = {}) => {
+export const listPersonalSkillCatalog = async ({ departmentId, ownerSearch, offset = 0, limit, search, excludeOwn = false, cardPage = false } = {}) => {
   const params = new URLSearchParams({ offset: String(offset) })
   if (departmentId) params.set('department_id', String(departmentId))
   if (ownerSearch?.trim()) params.set('owner_search', ownerSearch.trim())
+  if (limit !== undefined) params.set('limit', String(limit))
+  if (search?.trim()) params.set('search', search.trim())
+  if (excludeOwn) params.set('exclude_own', 'true')
+  if (cardPage) params.set('card_page', 'true')
   return apiGet(`${USER_BASE_URL}/personal-catalog?${params}`)
 }
 
@@ -209,9 +237,16 @@ export const submitSkillShareRequest = async (slug, applicationReason, category)
   })
 }
 
-export const listSkillShareRequests = async ({ mineOnly = false } = {}) => {
-  return apiGet(`${USER_BASE_URL}/share-requests${mineOnly ? '?mine_only=true' : ''}`)
+export const listSkillShareRequests = async ({ mineOnly = false, status, slug, offset = 0, limit = 20 } = {}) => {
+  const params = new URLSearchParams({ offset: String(offset), limit: String(limit) })
+  if (mineOnly) params.set('mine_only', 'true')
+  if (status) params.set('status', status)
+  if (slug) params.set('slug', slug)
+  return apiGet(`${USER_BASE_URL}/share-requests?${params}`)
 }
+
+export const listPersonalPublicationRecords = async ({ offset = 0, limit = 20 } = {}) =>
+  apiGet(`${USER_BASE_URL}/publication-records?offset=${offset}&limit=${limit}`)
 
 export const getSkillShareSnapshot = async (requestId, path = 'SKILL.md') => {
   return apiGet(
@@ -251,6 +286,8 @@ export const deleteSkillsBatch = async (slugs) => {
 
 export const skillApi = {
   listSkills,
+  getSkillDetail,
+  getPersonalSkillDetail,
   listSkillCards,
   listPersonalSkillCatalog,
   getPersonalSkillCatalogFile,

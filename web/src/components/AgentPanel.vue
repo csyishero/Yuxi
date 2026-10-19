@@ -431,10 +431,10 @@ const fileSearchPlaceholder = computed(() =>
   activeTreeScope.value === 'workspace' ? '搜索个人空间的文件...' : '搜索当前对话的文件...'
 )
 
-const searchActiveTreeFiles = (query) =>
+const searchActiveTreeFiles = (query, page) =>
   activeTreeScope.value === 'workspace'
-    ? searchWorkspaceFiles(query)
-    : searchViewerFiles(props.threadId, query)
+    ? searchWorkspaceFiles(query, page)
+    : searchViewerFiles(props.threadId, query, page)
 
 const handleSearchSelect = (entry) => {
   if (!entry?.path) return

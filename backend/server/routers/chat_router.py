@@ -83,7 +83,14 @@ async def call(
 
 @chat.get("/thread/{thread_id}/history")
 async def get_thread_history(
-    thread_id: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)
+    thread_id: str,
+    limit: int | None = Query(None, ge=1, le=100),
+    before_message_id: int | None = Query(None, ge=1),
+    before_run_id: str | None = None,
+    include_messages: bool = True,
+    include_runs: bool = True,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """读取当前用户的线程信息、Run 与历史消息。"""
     try:
@@ -91,6 +98,11 @@ async def get_thread_history(
             thread_id=thread_id,
             current_uid=str(current_user.uid),
             db=db,
+            limit=limit,
+            before_message_id=before_message_id,
+            before_run_id=before_run_id,
+            include_messages=include_messages,
+            include_runs=include_runs,
         )
 
     except HTTPException:

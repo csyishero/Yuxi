@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiDelete, apiPut, apiRequest } from './base'
+import { apiGet, apiPost, apiDelete, apiPut, apiRequest, buildQuery } from './base'
 import { useUserStore } from '@/stores/user'
 
 /**
@@ -71,7 +71,10 @@ export const agentApi = {
    * @returns {Promise} - 历史消息
    */
   // 线程阅读快照：{ thread, runs, history }，消息通过 run_id 关联运行。
-  getAgentHistory: (threadId) => apiGet(`/api/chat/thread/${threadId}/history`),
+  getAgentHistory: (threadId, page = {}) => {
+    const query = buildQuery(page)
+    return apiGet(`/api/chat/thread/${threadId}/history${query ? `?${query}` : ''}`)
+  },
 
   /**
    * 获取会话内持久化的 Model/Tool 生命周期审计

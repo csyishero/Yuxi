@@ -91,6 +91,9 @@ for (const [component, start, end, action, values, apiName] of [
       loadingFeedbacks: ref(false),
       feedbackFilter: ref('all'),
       feedbacks: ref([]),
+      feedbackPage: ref(1),
+      feedbackTotal: ref(0),
+      feedbackPageSize: 20,
       expandedStates: ref(new Map())
     }),
     'getFeedbacks'
@@ -103,6 +106,7 @@ for (const [component, start, end, action, values, apiName] of [
     () => ({
       visible: ref(false),
       loading: ref(false),
+      loadingOlder: ref(false),
       detail: ref(null),
       expandedTools: ref(new Set())
     }),

@@ -22,8 +22,16 @@
           v-model:value="form.datasetId"
           placeholder="请选择评估基准"
           :options="datasetOptions"
+          :loading="datasetsLoading"
+          show-search
+          :filter-option="false"
+          @search="searchDatasets"
+          @popupScroll="loadMoreDatasets"
           @change="handleDatasetChange"
         />
+        <div v-if="datasetsTotal > 20" class="dataset-picker-hint">
+          已显示 {{ remoteDatasets.length }} / {{ datasetsTotal }} 项，可搜索或向下滚动加载
+        </div>
       </a-form-item>
 
       <div class="evaluation-model-grid">
@@ -65,7 +73,7 @@
       <a-button
         type="primary"
         :loading="submitting"
-        :disabled="datasets.length === 0"
+        :disabled="!form.datasetId"
         @click="submitEvaluation"
       >
         开始评估
@@ -75,7 +83,7 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { Info } from '@lucide/vue'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
@@ -92,6 +100,13 @@ const emit = defineEmits(['update:open', 'success'])
 
 const formRef = ref(null)
 const submitting = ref(false)
+const datasetsLoading = ref(false)
+const remoteDatasets = ref([])
+const datasetsTotal = ref(0)
+const chosenDataset = ref(null)
+let datasetsSearchTimer = null
+let datasetsRequestId = 0
+let datasetsQuery = ''
 const form = reactive({
   name: '',
   datasetId: '',
@@ -110,22 +125,76 @@ const visible = computed({
 })
 
 const datasetOptions = computed(() =>
-  props.datasets.map((dataset) => ({
+  [
+    ...new Map(
+      [chosenDataset.value, ...remoteDatasets.value]
+        .filter(Boolean)
+        .map((dataset) => [dataset.dataset_id, dataset])
+    ).values()
+  ].map((dataset) => ({
     value: dataset.dataset_id,
     label: `${dataset.name}（${dataset.item_count || 0} 题）`
   }))
 )
 
-const selectedDataset = computed(() =>
-  props.datasets.find((dataset) => dataset.dataset_id === form.datasetId)
+const selectedDataset = computed(
+  () =>
+    chosenDataset.value ||
+    remoteDatasets.value.find((dataset) => dataset.dataset_id === form.datasetId)
 )
+
+const fetchDatasets = async (search = '', append = false) => {
+  if (!props.kbId || (datasetsLoading.value && append)) return
+  const requestId = ++datasetsRequestId
+  const offset = append ? remoteDatasets.value.length : 0
+  datasetsLoading.value = true
+  try {
+    const response = await evaluationApi.listDatasets(props.kbId, {
+      limit: 20,
+      offset,
+      status: 'completed',
+      search
+    })
+    if (requestId !== datasetsRequestId || !props.open) return
+    if (response?.message !== 'success' || !Array.isArray(response.data)) {
+      throw new Error('评估基准数据格式错误')
+    }
+    const items = append ? [...remoteDatasets.value, ...response.data] : response.data
+    remoteDatasets.value = [...new Map(items.map((item) => [item.dataset_id, item])).values()]
+    datasetsTotal.value = response.pagination?.total ?? remoteDatasets.value.length
+    if (!form.datasetId && remoteDatasets.value.length) {
+      form.datasetId = remoteDatasets.value[0].dataset_id
+      chosenDataset.value = remoteDatasets.value[0]
+    }
+  } catch (error) {
+    if (requestId === datasetsRequestId && props.open) {
+      message.error(error.message || '加载评估基准失败')
+    }
+  } finally {
+    if (requestId === datasetsRequestId) datasetsLoading.value = false
+  }
+}
+
+const searchDatasets = (value) => {
+  datasetsQuery = value.trim()
+  if (datasetsSearchTimer) clearTimeout(datasetsSearchTimer)
+  datasetsSearchTimer = setTimeout(() => fetchDatasets(datasetsQuery), 250)
+}
+
+const loadMoreDatasets = (event) => {
+  const target = event.target
+  if (!target || target.scrollTop + target.clientHeight < target.scrollHeight - 16) return
+  if (remoteDatasets.value.length < datasetsTotal.value) fetchDatasets(datasetsQuery, true)
+}
 
 const buildDefaultName = () => {
   const now = new Date()
   const date = [now.getFullYear(), now.getMonth() + 1, now.getDate()]
     .map((value, index) => (index === 0 ? value : String(value).padStart(2, '0')))
     .join('')
-  const suffix = globalThis.crypto?.randomUUID?.().replaceAll('-', '').slice(0, 6) || Date.now().toString(16).slice(-6)
+  const suffix =
+    globalThis.crypto?.randomUUID?.().replaceAll('-', '').slice(0, 6) ||
+    Date.now().toString(16).slice(-6)
   return `eval-${date}-${suffix}`
 }
 
@@ -145,10 +214,20 @@ const resetForm = () => {
     ''
   form.answerModel = ''
   form.judgeModel = ''
+  chosenDataset.value =
+    props.datasets.find((dataset) => dataset.dataset_id === form.datasetId) || null
+  remoteDatasets.value = []
+  datasetsTotal.value = 0
+  datasetsQuery = ''
+  fetchDatasets()
   formRef.value?.clearValidate()
 }
 
-const handleDatasetChange = () => {
+const handleDatasetChange = (datasetId) => {
+  chosenDataset.value =
+    remoteDatasets.value.find((dataset) => dataset.dataset_id === datasetId) ||
+    props.datasets.find((dataset) => dataset.dataset_id === datasetId) ||
+    null
   form.answerModel = ''
   form.judgeModel = ''
 }
@@ -201,8 +280,16 @@ watch(
   () => props.open,
   (open) => {
     if (open) resetForm()
+    else {
+      datasetsRequestId += 1
+      if (datasetsSearchTimer) clearTimeout(datasetsSearchTimer)
+    }
   }
 )
+onUnmounted(() => {
+  datasetsRequestId += 1
+  if (datasetsSearchTimer) clearTimeout(datasetsSearchTimer)
+})
 </script>
 
 <style lang="less" scoped>
@@ -210,6 +297,12 @@ watch(
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
+}
+
+.dataset-picker-hint {
+  margin-top: 6px;
+  color: var(--gray-500);
+  font-size: 12px;
 }
 
 .evaluation-run-hint {

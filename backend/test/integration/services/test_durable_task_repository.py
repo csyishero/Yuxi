@@ -830,6 +830,46 @@ async def test_payload_lookup_finds_active_task_beyond_recent_history_window(dur
     assert listing["summary"]["status_counts"]["pending"] == 1
 
 
+async def test_task_pages_keep_status_filter_total_and_stable_order(durable_task_schema) -> None:
+    """任务翻页不会遗漏同一创建时间的记录，分组统计不受页大小影响。"""
+    now = utc_now_naive()
+    rows = [(f"success-{index:03d}", "success") for index in range(25)]
+    rows += [("active-pending", "pending"), ("active-running", "running")]
+    rows += [("failed-one", "failed"), ("failed-cancelled", "cancelled")]
+    async with durable_task_schema.get_async_session_context() as session:
+        session.add_all(
+            TaskRecord(
+                id=task_id,
+                **{
+                    **_task_data(),
+                    "status": status,
+                    "created_at": now,
+                    "updated_at": now,
+                    "dedupe_key": None,
+                },
+            )
+            for task_id, status in rows
+        )
+
+    tasker = Tasker()
+    first = await tasker.list_tasks(status_group="success", offset=0, limit=20)
+    second = await tasker.list_tasks(status_group="success", offset=20, limit=20)
+    active = await tasker.list_tasks(status_group="active", offset=0, limit=20)
+    failed = await tasker.list_tasks(status_group="failed", offset=0, limit=20)
+    exact_failed = await tasker.list_tasks(status="failed", offset=0, limit=20)
+
+    assert [row["id"] for row in first["tasks"]] == [f"success-{index:03d}" for index in range(24, 4, -1)]
+    assert [row["id"] for row in second["tasks"]] == [f"success-{index:03d}" for index in range(4, -1, -1)]
+    assert first["summary"]["total"] == 29
+    assert first["summary"]["filtered_total"] == 25
+    assert second["summary"]["filtered_total"] == 25
+    assert {row["id"] for row in active["tasks"]} == {"active-pending", "active-running"}
+    assert active["summary"]["filtered_total"] == 2
+    assert {row["id"] for row in failed["tasks"]} == {"failed-one", "failed-cancelled"}
+    assert failed["summary"]["filtered_total"] == 2
+    assert [row["id"] for row in exact_failed["tasks"]] == ["failed-one"]
+
+
 async def test_concurrent_dedupe_creates_one_active_task(durable_task_schema) -> None:
     task_ids = [uuid.uuid4().hex, uuid.uuid4().hex]
     dedupe_key = uuid.uuid4().hex

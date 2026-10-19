@@ -188,6 +188,7 @@
                         class="select-action lucide-icon-btn"
                         :aria-label="option.value === 'department' ? '选择部门' : '选择用户'"
                         :disabled="disabled"
+                        @click="option.value === 'user' && openUserSearch(scope.key)"
                       >
                         <UserPlus class="select-action-icon" :size="14" />
                         <span class="access-count">{{
@@ -213,6 +214,7 @@
                             :placeholder="option.value === 'department' ? '搜索部门' : '搜索用户'"
                             @mousedown.stop
                             @click.stop
+                            @update:value="option.value === 'user' && queueUserSearch(scope.key)"
                           />
                           <div
                             v-if="getSelectionOptions(scope.key, option.value).length"
@@ -269,7 +271,23 @@
                               </span>
                             </div>
                           </div>
-                          <div v-else class="selection-empty">暂无可选项</div>
+                          <div v-else class="selection-empty">
+                            {{ remoteUsersLoading && option.value === 'user' ? '搜索中...' : '暂无可选项' }}
+                          </div>
+                          <div v-if="option.value === 'user' && userSearchProvider" class="selection-page-actions">
+                            <span v-if="remoteUsersError">加载用户失败。</span>
+                            <button
+                              v-if="remoteUsersError"
+                              type="button"
+                              @click="loadUserOptions(scope.key, remoteUsers.length > 0)"
+                            >重试加载用户</button>
+                            <button
+                              v-else-if="remoteUsersHasMore"
+                              type="button"
+                              :disabled="remoteUsersLoading"
+                              @click="loadUserOptions(scope.key, true)"
+                            >{{ remoteUsersLoading ? '加载中...' : '加载更多用户' }}</button>
+                          </div>
                         </div>
                       </template>
                     </a-dropdown>
@@ -376,7 +394,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { Building2, BookOpen, FilePenLine, Globe, ShieldCheck, Users, UserPlus } from '@lucide/vue'
 import { useUserStore } from '@/stores/user'
 import { authApi } from '@/apis/auth_api'
@@ -416,6 +434,7 @@ const props = defineProps({
   showKnowledgeBaseInheritance: { type: Boolean, default: false },
   availableDepartments: { type: Array, default: null },
   availableUsers: { type: Array, default: null },
+  searchUsers: { type: Function, default: null },
   allowedAccessLevels: {
     type: Array,
     default: () => ['global', 'department', 'user']
@@ -616,6 +635,116 @@ const selectionSearch = reactive({
   edit_scope: { department: '', user: '' },
   manage_scope: { department: '', user: '' }
 })
+const knownUsers = ref([])
+const remoteUsers = ref([])
+const remoteUsersHasMore = ref(false)
+const remoteUsersLoading = ref(false)
+const remoteUsersError = ref(false)
+let activeUserScope = ''
+let userSearchTimer = null
+let userSearchRequestId = 0
+
+const searchAdminUsers = async ({ search, offset, limit }) => {
+  const users = await authApi.getUserAccessOptions({
+    skip: offset,
+    limit: limit + 1,
+    search: search || undefined
+  })
+  return { items: users.slice(0, limit), has_more: users.length > limit }
+}
+const usesDefaultAdminUserSearch = computed(() =>
+  !props.searchUsers && !props.availableUsers && !isMcpPermissionMode.value && userStore.isAdmin
+)
+const userSearchProvider = computed(() => {
+  if (props.searchUsers) return props.searchUsers
+  return usesDefaultAdminUserSearch.value ? searchAdminUsers : null
+})
+const canHydrateSelectedUsers = computed(() =>
+  Boolean(userSearchProvider.value) && userStore.isAdmin && !isMcpPermissionMode.value
+)
+
+const rememberUsers = (items) => {
+  const byUid = new Map(knownUsers.value.map((item) => [String(item.uid), item]))
+  for (const item of items || []) byUid.set(String(item.uid), item)
+  knownUsers.value = [...byUid.values()]
+}
+watch(() => props.availableUsers, rememberUsers, { immediate: true })
+
+const selectedUserUids = computed(() => [...new Set(
+  ['read_scope', 'edit_scope', 'manage_scope']
+    .filter((scopeKey) => scopes[scopeKey]?.access_level === 'user')
+    .flatMap((scopeKey) => scopes[scopeKey].user_uids)
+)])
+
+watch(
+  () => [canHydrateSelectedUsers.value, ...selectedUserUids.value],
+  async (_selection, _previousSelection, onCleanup) => {
+    if (!canHydrateSelectedUsers.value) return
+    let active = true
+    onCleanup(() => { active = false })
+    const knownUids = new Set(knownUsers.value.map((user) => String(user.uid)))
+    const missingUids = selectedUserUids.value.filter((uid) => !knownUids.has(uid))
+    for (let offset = 0; offset < missingUids.length; offset += 50) {
+      try {
+        const users = await authApi.getUserAccessOptionsByUids(missingUids.slice(offset, offset + 50))
+        if (!active) return
+        rememberUsers(users)
+      } catch (error) {
+        if (active) console.warn('加载已选用户失败:', error)
+        return
+      }
+    }
+  },
+  { immediate: true }
+)
+
+const loadUserOptions = async (scopeKey, append = false) => {
+  const searchUsers = userSearchProvider.value
+  if (!searchUsers) return
+  clearTimeout(userSearchTimer)
+  activeUserScope = scopeKey
+  const requestId = ++userSearchRequestId
+  const offset = append ? remoteUsers.value.length : 0
+  remoteUsersLoading.value = true
+  remoteUsersError.value = false
+  if (!append) {
+    remoteUsers.value = []
+    remoteUsersHasMore.value = false
+  }
+  try {
+    const page = await searchUsers({
+      search: selectionSearch[scopeKey].user.trim(),
+      offset,
+      limit: 50
+    })
+    if (requestId !== userSearchRequestId) return
+    const items = page?.items || []
+    remoteUsers.value = append ? [...remoteUsers.value, ...items] : items
+    remoteUsersHasMore.value = Boolean(page?.has_more)
+    rememberUsers(items)
+  } catch (error) {
+    if (requestId === userSearchRequestId) {
+      console.warn('搜索用户失败:', error)
+      remoteUsersError.value = true
+    }
+  } finally {
+    if (requestId === userSearchRequestId) remoteUsersLoading.value = false
+  }
+}
+
+const openUserSearch = (scopeKey) => loadUserOptions(scopeKey)
+
+const queueUserSearch = (scopeKey) => {
+  if (!userSearchProvider.value) return
+  clearTimeout(userSearchTimer)
+  userSearchRequestId += 1
+  activeUserScope = scopeKey
+  remoteUsers.value = []
+  remoteUsersHasMore.value = false
+  remoteUsersError.value = false
+  remoteUsersLoading.value = true
+  userSearchTimer = setTimeout(() => loadUserOptions(scopeKey), 250)
+}
 
 const currentDepartmentId = computed(() =>
   userStore.departmentId ? Number(userStore.departmentId) : null
@@ -808,7 +937,7 @@ const departmentOptions = computed(() =>
   }))
 )
 const userOptions = computed(() =>
-  (props.availableUsers || users.value).map((user) => ({
+  (userSearchProvider.value ? knownUsers.value : props.availableUsers || users.value).map((user) => ({
     label: user.department_name ? `${user.username}（${user.department_name}）` : user.username,
     value: user.uid,
     department_id: user.department_id,
@@ -917,12 +1046,31 @@ const getAccessSummary = (scopeKey, accessLevel) => {
 }
 const getSelectionOptions = (scopeKey, accessLevel) => {
   let options = accessLevel === 'department' ? departmentOptions.value : userOptions.value
+  if (accessLevel === 'user' && userSearchProvider.value) {
+    const selectedUsers = (scopes[scopeKey]?.user_uids || []).map((uid) =>
+      userOptions.value.find((user) => String(user.value) === String(uid)) || {
+        label: String(uid),
+        value: String(uid)
+      }
+    )
+    const pageUsers = activeUserScope === scopeKey
+      ? remoteUsers.value.map((user) => ({
+          label: user.department_name ? `${user.username}（${user.department_name}）` : user.username,
+          value: user.uid,
+          department_id: user.department_id,
+          role: user.role
+        }))
+      : []
+    options = [...new Map([...selectedUsers, ...pageUsers].map((user) => [String(user.value), user])).values()]
+  }
   if (!isMcpPermissionMode.value && scopeKey === 'manage_scope' && accessLevel === 'user') {
     options = options.filter((item) => !inheritedManagerUids.value.has(String(item.value)))
   }
 
   const query = selectionSearch[scopeKey][accessLevel].trim().toLowerCase()
-  return query ? options.filter((item) => item.label.toLowerCase().includes(query)) : options
+  return query && !(userSearchProvider.value && accessLevel === 'user')
+    ? options.filter((item) => item.label.toLowerCase().includes(query))
+    : options
 }
 const isSelected = (scopeKey, accessLevel, value) => {
   const scope = scopes[scopeKey]
@@ -970,13 +1118,22 @@ const loadDepartments = async () => {
   }
 }
 const loadUsers = async () => {
-  if (props.availableUsers) return
-  try {
-    users.value = await authApi.getUserAccessOptions()
-  } catch (error) {
-    console.error('加载用户列表失败:', error)
+  if (props.availableUsers || userSearchProvider.value) return
+  if (userStore.uid && !isMcpPermissionMode.value) {
+    users.value = [{
+      uid: userStore.uid,
+      username: userStore.username || userStore.uid,
+      role: userStore.userRole,
+      department_id: userStore.departmentId,
+      department_name: userStore.departmentName
+    }]
   }
 }
+
+onUnmounted(() => {
+  clearTimeout(userSearchTimer)
+  userSearchRequestId += 1
+})
 
 watch(() => props.modelValue, initConfig, { deep: true })
 watch(normalizedAllowedAccessLevels, initConfig)

@@ -9,6 +9,7 @@
         </p>
       </div>
       <div class="header-actions">
+        <span class="total-count">共 {{ total }} 个 API Key</span>
         <a-button
           @click="handleRefresh"
           :loading="refreshing"
@@ -82,6 +83,15 @@
               </template>
             </a-table>
           </div>
+          <a-pagination
+            v-if="total > PAGE_SIZE"
+            class="list-pagination"
+            :current="currentPage"
+            :page-size="PAGE_SIZE"
+            :total="total"
+            :show-size-changer="false"
+            @change="handlePageChange"
+          />
         </template>
 
         <div v-else class="empty-state">
@@ -154,6 +164,10 @@ const loading = ref(false)
 const refreshing = ref(false)
 const error = ref(null)
 const apiKeys = ref([])
+const PAGE_SIZE = 20
+const currentPage = ref(1)
+const total = ref(0)
+let latestListRequest = 0
 
 const createModalVisible = ref(false)
 const secretModalVisible = ref(false)
@@ -189,16 +203,33 @@ const formatTime = (timeStr) => {
 }
 
 const loadApiKeys = async () => {
+  const requestId = ++latestListRequest
+  const requestedPage = currentPage.value
   loading.value = true
   error.value = null
   try {
-    const res = await apikeyApi.list()
+    const res = await apikeyApi.list((requestedPage - 1) * PAGE_SIZE, PAGE_SIZE)
+    if (requestId !== latestListRequest) return
     apiKeys.value = res.api_keys || []
+    total.value = res.total || 0
+    const lastPage = Math.max(1, Math.ceil(total.value / PAGE_SIZE))
+    if (requestedPage > lastPage) {
+      currentPage.value = lastPage
+      const lastPageResult = await apikeyApi.list((lastPage - 1) * PAGE_SIZE, PAGE_SIZE)
+      if (requestId !== latestListRequest) return
+      apiKeys.value = lastPageResult.api_keys || []
+      total.value = lastPageResult.total || 0
+    }
   } catch (e) {
-    error.value = e.message || '加载失败'
+    if (requestId === latestListRequest) error.value = e.message || '加载失败'
   } finally {
-    loading.value = false
+    if (requestId === latestListRequest) loading.value = false
   }
+}
+
+const handlePageChange = async (page) => {
+  currentPage.value = page
+  await loadApiKeys()
 }
 
 // 刷新 API Key 列表
@@ -252,6 +283,7 @@ const handleCreate = async () => {
     createdSecret.value = res.secret
     createModalVisible.value = false
     secretModalVisible.value = true
+    currentPage.value = 1
     await loadApiKeys()
   } catch (e) {
     message.error(e.message || '创建失败')
@@ -328,6 +360,12 @@ onMounted(() => {
       align-items: center;
       gap: 8px;
 
+      .total-count {
+        color: var(--gray-500);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
       .refresh-btn {
         display: flex;
         align-items: center;
@@ -349,6 +387,11 @@ onMounted(() => {
   }
 
   .content-section {
+    .list-pagination {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 16px;
+    }
     .error-message {
       margin-bottom: 16px;
     }

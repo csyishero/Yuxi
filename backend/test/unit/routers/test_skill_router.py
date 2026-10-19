@@ -66,17 +66,18 @@ def _skill(
 
 
 def test_list_visible_skills_route_returns_allowed_levels_and_can_manage(monkeypatch):
-    async def fake_list_visible_skills_for_management(_db, user):
+    async def fake_page(_db, user, *, limit, offset, search):
         assert user.uid == "admin"
-        return [_skill()]
+        assert (limit, offset, search) == (30, 0, "")
+        return [_skill()], 1
 
     monkeypatch.setattr(
-        "server.routers.skill_router.list_visible_skills_for_management",
-        fake_list_visible_skills_for_management,
+        "server.routers.skill_router.page_visible_skills_for_management",
+        fake_page,
     )
 
     client = TestClient(_build_app())
-    resp = client.get("/api/system/skills")
+    resp = client.get("/api/system/skills?limit=30")
 
     assert resp.status_code == 200, resp.text
     payload = resp.json()
@@ -87,20 +88,21 @@ def test_list_visible_skills_route_returns_allowed_levels_and_can_manage(monkeyp
 
 
 def test_list_visible_skills_route_allows_normal_user_readonly_items(monkeypatch):
-    async def fake_list_visible_skills_for_management(_db, user):
+    async def fake_page(_db, user, *, limit, offset, search):
         assert user.uid == "user"
+        assert (limit, offset, search) == (30, 0, "")
         return [
             _skill(slug="owned-disabled", created_by="user", enabled=False),
             _skill(slug="shared", created_by="other", user_uids=["user"]),
-        ]
+        ], 2
 
     monkeypatch.setattr(
-        "server.routers.skill_router.list_visible_skills_for_management",
-        fake_list_visible_skills_for_management,
+        "server.routers.skill_router.page_visible_skills_for_management",
+        fake_page,
     )
 
     client = TestClient(_build_app(role="user"))
-    resp = client.get("/api/system/skills")
+    resp = client.get("/api/system/skills?limit=30")
 
     assert resp.status_code == 200, resp.text
     payload = resp.json()
@@ -132,21 +134,134 @@ def test_list_accessible_skills_route(monkeypatch):
 def test_list_skill_cards_route_scans_personal_source(monkeypatch):
     captured = {}
 
-    async def fake_list_skill_cards(_db, user, *, audience_search=None, audience_department_id=None):
+    async def fake_page(_db, user, *, source, limit, offset, search, audience_search=None, audience_department_id=None):
         captured["uid"] = user.uid
+        assert (source, limit, offset, search) == ("all", 30, 0, "")
         assert audience_search is None
         assert audience_department_id is None
         item = _skill(source_type="personal", created_by="user")
-        return [item]
+        return [item], 1, False
 
-    monkeypatch.setattr("server.routers.skill_router.list_skill_cards_for_user", fake_list_skill_cards)
+    monkeypatch.setattr("server.routers.skill_router.page_skill_cards_for_user", fake_page)
 
     client = TestClient(_build_app(role="user"))
-    resp = client.get("/api/skills")
+    resp = client.get("/api/skills?limit=30")
 
     assert resp.status_code == 200, resp.text
     assert "personal_cache" not in resp.json()
     assert captured == {"uid": "user"}
+
+
+def test_legacy_skill_cards_without_limit_keep_all_records(monkeypatch):
+    """旧客户端不传 limit 时仍能取到超过一页的技能。"""
+    all_items = [_skill(slug=f"legacy-{index:02d}") for index in range(40)]
+
+    async def fake_full(_db, user, *, audience_search=None, audience_department_id=None):
+        assert user.uid == "admin"
+        assert audience_search is None and audience_department_id is None
+        return all_items
+
+    async def fake_page(*_args, **_kwargs):
+        return all_items[:30], 40, True
+
+    monkeypatch.setattr("server.routers.skill_router.list_skill_cards_for_user", fake_full, raising=False)
+    monkeypatch.setattr("server.routers.skill_router.page_skill_cards_for_user", fake_page)
+
+    response = TestClient(_build_app()).get("/api/skills")
+
+    assert response.status_code == 200, response.text
+    assert len(response.json()["data"]) == 40
+    assert response.json()["data"][-1]["slug"] == "legacy-39"
+    assert response.json()["allowed_access_levels"] == ["global", "department", "user"]
+
+
+def test_legacy_system_skills_without_limit_keep_all_records(monkeypatch):
+    """旧管理客户端不传 limit 时仍能取到超过一页的技能。"""
+    all_items = [_skill(slug=f"system-{index:02d}") for index in range(40)]
+
+    async def fake_full(_db, user):
+        assert user.uid == "user"
+        return all_items
+
+    async def fake_page(*_args, **_kwargs):
+        return all_items[:30], 40
+
+    monkeypatch.setattr("server.routers.skill_router.list_visible_skills_for_management", fake_full, raising=False)
+    monkeypatch.setattr("server.routers.skill_router.page_visible_skills_for_management", fake_page)
+
+    response = TestClient(_build_app(role="user")).get("/api/system/skills")
+
+    assert response.status_code == 200, response.text
+    assert len(response.json()["data"]) == 40
+    assert response.json()["data"][-1]["slug"] == "system-39"
+    assert response.json()["allowed_access_levels"] == ["user"]
+
+
+def test_shared_skill_page_limits_response_and_preserves_total(monkeypatch):
+    """共享技能分页参数应到达查询层，响应保留总数。"""
+
+    async def fake_page(_db, user, *, limit, offset, search):
+        assert user.uid == "admin"
+        assert (limit, offset, search) == (1, 2, "report")
+        return [_skill("report-3")], 8
+
+    monkeypatch.setattr("server.routers.skill_router.page_visible_skills_for_management", fake_page)
+    client = TestClient(_build_app())
+    resp = client.get("/api/system/skills?limit=1&offset=2&search=report")
+
+    assert resp.status_code == 200, resp.text
+    assert [item["slug"] for item in resp.json()["data"]] == ["report-3"]
+    assert resp.json()["total"] == 8
+
+
+def test_skill_detail_resolves_one_authorized_slug(monkeypatch):
+    """详情入口直接授权读取指定 slug，不依赖列表当前页。"""
+
+    async def fake_get(_db, user, slug):
+        assert (user.uid, slug) == ("user", "later-skill")
+        return _skill("later-skill", created_by="user")
+
+    monkeypatch.setattr("server.routers.skill_router.get_management_readable_skill_or_raise", fake_get)
+    client = TestClient(_build_app(role="user"))
+    resp = client.get("/api/system/skills/later-skill/details")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["slug"] == "later-skill"
+
+
+def test_personal_skill_detail_reads_named_directory_only(monkeypatch):
+    """个人详情可以定位后续页的技能，且只读取本人目录。"""
+
+    async def fake_personal(uid, slug):
+        assert (uid, slug) == ("user", "later-personal")
+        return _skill("later-personal", source_type="personal", created_by="user")
+
+    monkeypatch.setattr("server.routers.skill_router.get_personal_skill", fake_personal)
+    client = TestClient(_build_app(role="user"))
+    resp = client.get("/api/skills/personal/later-personal")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["slug"] == "later-personal"
+
+
+def test_skill_cards_page_separates_personal_and_shared_sources(monkeypatch):
+    """技能卡片按来源翻页，不能只返回第一页而没有后续入口。"""
+
+    async def fake_page(_db, user, *, source, limit, offset, search, audience_search, audience_department_id):
+        assert user.uid == "user"
+        assert (source, limit, offset, search) == ("personal", 1, 1, "later")
+        assert audience_search is None and audience_department_id is None
+        return [_skill("later-personal", source_type="personal", created_by="user")], None, True
+
+    monkeypatch.setattr("server.routers.skill_router.page_skill_cards_for_user", fake_page)
+    client = TestClient(_build_app(role="user"))
+    resp = client.get("/api/skills?source=personal&limit=1&offset=1&search=later")
+
+    assert resp.status_code == 200, resp.text
+    assert [item["slug"] for item in resp.json()["data"]] == ["later-personal"]
+    assert resp.json()["total"] is None
+    assert resp.json()["has_more"] is True
+    assert resp.json()["offset"] == 1
 
 
 def test_personal_skill_confirm_and_delete_routes(monkeypatch):

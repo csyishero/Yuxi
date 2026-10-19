@@ -644,9 +644,9 @@ class DashboardRepository:
         }
 
     async def list_feedbacks(
-        self, *, rating: str | None, agent_id: str | None
-    ) -> list[tuple[MessageFeedback, Message, Conversation, User | None]]:
-        """按可选评分和智能体过滤反馈关联数据。"""
+        self, *, rating: str | None, agent_id: str | None, limit: int | None, offset: int
+    ) -> tuple[list[tuple[MessageFeedback, Message, Conversation, User | None]], int]:
+        """按相同的授权与筛选条件统计并读取一页反馈。"""
         query = (
             select(MessageFeedback, Message, Conversation, User)
             .join(Message, MessageFeedback.message_id == Message.id)
@@ -665,9 +665,14 @@ class DashboardRepository:
             query = query.where(MessageFeedback.rating == rating)
         if agent_id:
             query = query.where(Conversation.agent_id == agent_id)
-        query = query.order_by(MessageFeedback.created_at.desc())
-        result = await self.db_session.execute(query)
-        return list(result.all())
+        total = await self.db_session.scalar(
+            select(func.count()).select_from(query.with_only_columns(MessageFeedback.id).subquery())
+        )
+        page_query = query.order_by(MessageFeedback.created_at.desc(), MessageFeedback.id.desc())
+        if limit is not None:
+            page_query = page_query.offset(offset).limit(limit)
+        result = await self.db_session.execute(page_query)
+        return list(result.all()), int(total or 0)
 
     async def get_call_timeseries(
         self, *, metric_type: str, time_range: str, now: datetime | None = None, local_now: datetime | None = None

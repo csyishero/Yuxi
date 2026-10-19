@@ -27,7 +27,7 @@ export const deleteViewerFile = (threadId, path) => {
   return apiDelete(`/api/viewer/filesystem/file?${query}`)
 }
 
-export const searchViewerFiles = (threadId, query) => {
-  const queryStr = buildQuery({ thread_id: threadId, query })
+export const searchViewerFiles = (threadId, query, { offset = 0, limit = 50 } = {}) => {
+  const queryStr = buildQuery({ thread_id: threadId, query, offset, limit })
   return apiGet(`/api/viewer/filesystem/search?${queryStr}`)
 }

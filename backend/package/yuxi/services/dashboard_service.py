@@ -36,10 +36,12 @@ class DashboardService:
         """汇总智能体对话、满意度与工具使用情况。"""
         return await self.repo.get_agent_analytics()
 
-    async def get_feedbacks(self, *, rating: str | None = None, agent_id: str | None = None) -> list[dict[str, Any]]:
-        """按可选评分和智能体过滤并装配用户反馈列表。"""
-        rows = await self.repo.list_feedbacks(rating=rating, agent_id=agent_id)
-        return [
+    async def get_feedbacks(
+        self, *, rating: str | None = None, agent_id: str | None = None, limit: int | None = 20, offset: int = 0
+    ) -> dict[str, Any]:
+        """按可选评分和智能体过滤并装配一页用户反馈。"""
+        rows, total = await self.repo.list_feedbacks(rating=rating, agent_id=agent_id, limit=limit, offset=offset)
+        items = [
             {
                 "id": feedback.id,
                 "message_id": feedback.message_id,
@@ -55,6 +57,7 @@ class DashboardService:
             }
             for feedback, message, conversation, user in rows
         ]
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
 
     async def get_call_timeseries(self, *, metric_type: str, time_range: str = "14days") -> dict[str, Any]:
         """查询调用分析时间序列。"""
@@ -115,8 +118,10 @@ class DashboardService:
             offset=offset,
         )
 
-    async def get_conversation_detail(self, thread_id: str) -> dict[str, Any] | None:
-        """获取指定会话完整消息流水与统计。"""
+    async def get_conversation_detail(
+        self, thread_id: str, *, limit: int | None = None, offset: int | None = None
+    ) -> dict[str, Any] | None:
+        """获取指定会话元数据和一页可见消息，默认从最近一页开始。"""
         conversation = await self.conv_repo.get_conversation_by_thread_id(thread_id)
         if not conversation:
             return None
@@ -124,7 +129,9 @@ class DashboardService:
         audit_metadata = await self.repo.get_conversation_audit_metadata(conversation)
         if audit_metadata is None:
             return None
-        messages = await self.conv_repo.get_messages(conversation.id)
+        message_count = await self.conv_repo.count_messages(conversation.id)
+        messages_offset = max(0, message_count - limit) if limit is not None and offset is None else offset or 0
+        messages = await self.conv_repo.get_messages(conversation.id, limit=limit, offset=messages_offset)
         message_list = []
         for message in messages:
             message_data = {
@@ -162,7 +169,9 @@ class DashboardService:
             "title": conversation.title,
             "status": conversation.status,
             "is_pinned": bool(conversation.is_pinned),
-            "message_count": len(message_list),
+            "message_count": message_count,
+            "messages_offset": messages_offset,
+            "has_older_messages": messages_offset > 0,
             "project_id": audit_metadata["project_id"],
             "project_name": audit_metadata["project_name"],
             "project_deleted": audit_metadata["project_deleted"],

@@ -248,7 +248,7 @@ const activeSourceKey = ref('personal')
 const currentPath = ref('/')
 const fileSearchOpen = ref(false)
 
-const searchWorkspace = (query) => searchWorkspaceFiles(query)
+const searchWorkspace = (query, page) => searchWorkspaceFiles(query, page)
 
 // 搜索命中后切到文件所在目录并打开预览
 const handleFileSearchSelect = async (entry) => {

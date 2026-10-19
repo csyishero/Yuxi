@@ -43,9 +43,7 @@ async def test_personal_skill_catalog_scopes_department_admin_and_reads_selected
     for index, (uid, content) in enumerate(content_by_uid.items(), start=1):
         source = service.get_personal_skills_root_dir(uid) / "same-skill"
         source.mkdir(parents=True)
-        (source / "SKILL.md").write_text(
-            f"---\nname: same-skill\ndescription: {uid}\n---\n{content}", encoding="utf-8"
-        )
+        (source / "SKILL.md").write_text(f"---\nname: same-skill\ndescription: {uid}\n---\n{content}", encoding="utf-8")
         owners.append(User(id=index, uid=uid, username=uid, department_id=index, is_deleted=0))
 
     async def list_page(self, *, offset, limit, department_id=None, role=None, search=None):
@@ -123,3 +121,106 @@ async def test_personal_skill_catalog_scopes_department_admin_and_reads_selected
         assert hidden.json()["data"]["items"] == []
         deleted = await client.get("/api/skills/personal-catalog/bob/same-skill/file", params={"path": "SKILL.md"})
         assert deleted.status_code == 404
+
+
+async def test_personal_skill_catalog_pages_cards_across_owners_and_filters_before_paging(monkeypatch, tmp_path: Path):
+    """同一人的后续技能继续占用下一页，搜索和部门限制先于卡片偏移生效。"""
+    monkeypatch.setattr(workspace_paths, "get_user_data_dir", lambda: tmp_path / "user-data")
+    owners = [
+        User(id=1, uid="alice", username="alice", department_id=1, is_deleted=0),
+        User(id=2, uid="bob", username="bob", department_id=2, is_deleted=0),
+    ]
+    for owner, slugs in [(owners[0], ["alpha", "beta", "charlie"]), (owners[1], ["delta"])]:
+        for slug in slugs:
+            source = service.get_personal_skills_root_dir(str(owner.uid)) / slug
+            source.mkdir(parents=True)
+            (source / "SKILL.md").write_text(
+                f"---\nname: {slug}\ndescription: {slug} example\n---\n# {slug}\n", encoding="utf-8"
+            )
+
+    async def list_page(self, *, offset, limit, department_id=None, role=None, search=None):
+        """按固定的有效用户顺序返回一页。"""
+        filtered = [
+            owner
+            for owner in owners
+            if (department_id is None or owner.department_id == department_id)
+            and (not search or search in owner.username)
+        ]
+        return [(owner, f"部门{owner.department_id}") for owner in filtered[offset : offset + limit]], len(filtered)
+
+    monkeypatch.setattr(UserRepository, "list_page_with_department", list_page)
+    current = User(uid="viewer", username="viewer", role="superadmin")
+    app = FastAPI()
+    app.include_router(user_skills, prefix="/api")
+
+    async def provide_user():
+        """在测试中固定管理员身份。"""
+        return current
+
+    async def provide_db():
+        """用户目录由本测试的仓储替身提供。"""
+        yield object()
+
+    app.dependency_overrides[get_required_user] = provide_user
+    app.dependency_overrides[get_db] = provide_db
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        original_parser = service.parse_skill_dir_metadata
+        parsed_slugs = []
+
+        def counted_parser(path):
+            """记录首页实际解析的个人技能。"""
+            parsed_slugs.append(path.name)
+            return original_parser(path)
+
+        monkeypatch.setattr(service, "parse_skill_dir_metadata", counted_parser)
+        legacy_explicit = await client.get("/api/skills/personal-catalog", params={"limit": 1})
+        assert [item["slug"] for item in legacy_explicit.json()["data"]["items"]] == ["alpha", "beta", "charlie"]
+        assert legacy_explicit.json()["data"]["next_offset"] == 1
+        legacy_next = await client.get("/api/skills/personal-catalog", params={"limit": 1, "offset": 1})
+        assert [item["slug"] for item in legacy_next.json()["data"]["items"]] == ["delta"]
+        assert legacy_next.json()["data"]["next_offset"] is None
+        parsed_slugs.clear()
+
+        first = await client.get("/api/skills/personal-catalog", params={"card_page": True, "limit": 2})
+        assert parsed_slugs == ["alpha", "beta", "charlie"]
+        second = await client.get("/api/skills/personal-catalog", params={"card_page": True, "limit": 2, "offset": 2})
+        assert [(item["owner_uid"], item["slug"]) for item in first.json()["data"]["items"]] == [
+            ("alice", "alpha"),
+            ("alice", "beta"),
+        ]
+        assert first.json()["data"]["next_offset"] == 2
+        assert [(item["owner_uid"], item["slug"]) for item in second.json()["data"]["items"]] == [
+            ("alice", "charlie"),
+            ("bob", "delta"),
+        ]
+        assert second.json()["data"]["next_offset"] is None
+
+        filtered = await client.get(
+            "/api/skills/personal-catalog", params={"card_page": True, "limit": 1, "search": "delta"}
+        )
+        assert [(item["owner_uid"], item["slug"]) for item in filtered.json()["data"]["items"]] == [("bob", "delta")]
+        assert filtered.json()["data"]["next_offset"] is None
+
+        owner_match = await client.get(
+            "/api/skills/personal-catalog", params={"card_page": True, "limit": 2, "search": "alice"}
+        )
+        assert [item["slug"] for item in owner_match.json()["data"]["items"]] == ["alpha", "beta"]
+        assert owner_match.json()["data"]["next_offset"] == 2
+
+        current.uid = "alice"
+        others_only = await client.get(
+            "/api/skills/personal-catalog", params={"card_page": True, "limit": 2, "exclude_own": True}
+        )
+        assert [(item["owner_uid"], item["slug"]) for item in others_only.json()["data"]["items"]] == [("bob", "delta")]
+        assert others_only.json()["data"]["next_offset"] is None
+        current.uid = "viewer"
+
+        current.role = "admin"
+        current.department_id = 1
+        own_department = await client.get(
+            "/api/skills/personal-catalog", params={"card_page": True, "limit": 2, "offset": 2}
+        )
+        assert [item["slug"] for item in own_department.json()["data"]["items"]] == ["charlie"]
+
+        legacy = await client.get("/api/skills/personal-catalog")
+        assert [item["slug"] for item in legacy.json()["data"]["items"]] == ["alpha", "beta", "charlie"]

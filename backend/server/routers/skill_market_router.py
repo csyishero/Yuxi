@@ -1,5 +1,7 @@
 """内部 Skill 市场的 HTTP 入口。"""
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +14,7 @@ from yuxi.agents.skills.market import (
     list_market_requests,
     list_market_skills,
     list_user_market_installs,
+    page_user_market_installs,
     market_skill_file,
     market_skill_tree,
     review_market_skill,
@@ -84,18 +87,50 @@ async def list_market_route(
 
 @market_router.get("/requests")
 async def list_market_requests_route(
-    mine_only: bool = Query(False), user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)
+    mine_only: bool = Query(False),
+    status: Literal["pending", "approved", "rejected"] | None = Query(None),
+    slug: str | None = Query(None, max_length=128),
+    offset: int = Query(0, ge=0),
+    limit: int | None = Query(None, ge=1, le=100),
+    user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """查看本人或授权范围内的市场审核申请。"""
-    return {"success": True, "data": await list_market_requests(db, operator=user, mine_only=mine_only)}
+    """旧客户端返回完整数组；显式传 limit 时分页查看授权市场申请。"""
+    page = await list_market_requests(
+        db,
+        operator=user,
+        mine_only=mine_only,
+        status=status,
+        slug=slug,
+        offset=offset if limit is not None else 0,
+        limit=limit,
+    )
+    return {
+        "success": True,
+        "data": page if limit is not None else page["items"],
+    }
 
 
 @market_router.get("/-/installs")
 async def list_user_market_installs_route(
-    user: User = Depends(get_market_install_user), db: AsyncSession = Depends(get_db)
+    offset: int = Query(0, ge=0),
+    limit: int | None = Query(None, ge=1, le=100),
+    search: str = Query("", max_length=100),
+    user: User = Depends(get_market_install_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """查看本人安装版本的摘要与当前可见状态。"""
-    return {"success": True, "data": await list_user_market_installs(db, user=user)}
+    """分页查看本人安装；旧客户端不传 limit 时保留完整摘要。"""
+    if limit is None:
+        return {"success": True, "data": await list_user_market_installs(db, user=user)}
+    items, total = await page_user_market_installs(db, user=user, offset=offset, limit=limit, search=search)
+    return {
+        "success": True,
+        "data": items,
+        "total": total,
+        "has_more": offset + limit < total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @market_router.get("/-/rankings")

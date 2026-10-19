@@ -416,6 +416,40 @@ async def test_search_workspace_files_matches_filenames(tmp_path: Path, monkeypa
     assert empty["entries"] == []
 
 
+@pytest.mark.asyncio
+async def test_search_workspace_files_loads_matches_beyond_first_hundred(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("YUXI_USER_DATA_DIR", str(tmp_path / "threads"))
+    root = _workspace_root(_user())
+    for index in range(105):
+        (root / f"report-{index:03}.txt").write_text(str(index), encoding="utf-8")
+
+    first = await svc.search_workspace_files(query="report", offset=0, limit=100, current_user=_user())
+    second = await svc.search_workspace_files(query="report", offset=100, limit=100, current_user=_user())
+
+    assert len(first["entries"]) == 100
+    assert first["has_more"] is True
+    assert [item["name"] for item in second["entries"]] == [
+        "report-100.txt",
+        "report-101.txt",
+        "report-102.txt",
+        "report-103.txt",
+        "report-104.txt",
+    ]
+    assert second["has_more"] is False
+    assert second["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_search_workspace_files_exact_path_preserves_filename_case(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("YUXI_USER_DATA_DIR", str(tmp_path / "threads"))
+    root = _workspace_root(_user())
+    (root / "Target.txt").write_text("content", encoding="utf-8")
+
+    response = await svc.search_workspace_files(query="path:/Target.txt", current_user=_user())
+
+    assert [entry["path"] for entry in response["entries"]] == ["/Target.txt"]
+
+
 def test_workspace_entry_preserves_v071_virtual_path_contract() -> None:
     metadata = {"is_dir": True, "size": 0, "modified_at": 0}
 

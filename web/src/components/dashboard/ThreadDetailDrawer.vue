@@ -18,7 +18,7 @@
       <a-spin size="large" tip="正在加载会话流水..." />
     </div>
 
-    <div v-else-if="detail" class="drawer-content">
+    <div v-else-if="detail" ref="drawerContentRef" class="drawer-content">
       <!-- 顶部会话元数据摘要 -->
       <div class="thread-meta-banner">
         <div class="meta-main-title">
@@ -79,8 +79,15 @@
       <!-- 消息流水列表 -->
       <div class="messages-timeline-container">
         <div class="timeline-header">
-          <span class="timeline-title">消息时间线 ({{ detail.messages?.length || 0 }})</span>
-          <span class="timeline-hint">按交互顺序完整记录请求与工具调用</span>
+          <span class="timeline-title"
+            >消息时间线 (已加载 {{ detail.messages?.length || 0 }} /
+            {{ detail.message_count }})</span
+          >
+          <span class="timeline-hint">按交互顺序记录请求与工具调用</span>
+        </div>
+
+        <div v-if="detail.has_older_messages" class="older-messages-control">
+          <a-button :loading="loadingOlder" @click="loadOlder">加载更早的消息</a-button>
         </div>
 
         <div v-if="!detail.messages || detail.messages.length === 0" class="empty-messages">
@@ -199,7 +206,7 @@
 <script setup>
 const props = defineProps({ scope: { type: String, default: 'all' } })
 import { formatTokenUsage } from '@/utils/dashboard'
-import { ref, onUnmounted } from 'vue'
+import { nextTick, ref, onUnmounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { User, Bot, Wrench, Cpu } from '@lucide/vue'
 import { dashboardApi } from '@/apis/dashboard_api'
@@ -207,39 +214,85 @@ import { formatFullDateTime } from '@/utils/time'
 
 const visible = ref(false)
 const loading = ref(false)
+const loadingOlder = ref(false)
 const detail = ref(null)
+const drawerContentRef = ref(null)
 const expandedTools = ref(new Set())
 
 const drawerWidth = 'min(720px, 100vw)'
 
 let disposed = false
+let latestDrawerRequest = 0
+let openedThreadId = null
 onUnmounted(() => {
   disposed = true
+  latestDrawerRequest += 1
 })
 
 const open = async (threadId) => {
   if (!threadId) return
+  const requestId = ++latestDrawerRequest
+  openedThreadId = threadId
   visible.value = true
   loading.value = true
+  loadingOlder.value = false
   detail.value = null
   expandedTools.value.clear()
 
   try {
-    const data = await dashboardApi.getConversationDetail(threadId, props.scope)
-    if (disposed) return
+    const data = await dashboardApi.getConversationDetail(threadId, props.scope, { limit: 50 })
+    if (disposed || requestId !== latestDrawerRequest) return
     detail.value = data
   } catch (err) {
-    if (disposed) return
+    if (disposed || requestId !== latestDrawerRequest) return
     console.error('获取会话详情失败:', err)
     message.error('获取会话详情失败')
     visible.value = false
   } finally {
-    if (!disposed) loading.value = false
+    if (!disposed && requestId === latestDrawerRequest) loading.value = false
+  }
+}
+
+const loadOlder = async () => {
+  if (loadingOlder.value || !detail.value?.has_older_messages || !openedThreadId) return
+  const requestId = latestDrawerRequest
+  const offset = Math.max(0, detail.value.messages_offset - 50)
+  const limit = detail.value.messages_offset - offset
+  const scrollContainer = drawerContentRef.value
+  const previousHeight = scrollContainer?.scrollHeight || 0
+  const previousTop = scrollContainer?.scrollTop || 0
+  loadingOlder.value = true
+  try {
+    const older = await dashboardApi.getConversationDetail(openedThreadId, props.scope, {
+      limit,
+      offset
+    })
+    if (disposed || requestId !== latestDrawerRequest || !detail.value) return
+    const seen = new Set(detail.value.messages.map((item) => item.id))
+    detail.value = {
+      ...detail.value,
+      messages_offset: older.messages_offset,
+      has_older_messages: older.has_older_messages,
+      messages: [...older.messages.filter((item) => !seen.has(item.id)), ...detail.value.messages]
+    }
+    await nextTick()
+    if (scrollContainer && requestId === latestDrawerRequest) {
+      scrollContainer.scrollTop = previousTop + scrollContainer.scrollHeight - previousHeight
+    }
+  } catch (err) {
+    if (disposed || requestId !== latestDrawerRequest) return
+    console.error('获取更早消息失败:', err)
+    message.error('获取更早消息失败，请重试')
+  } finally {
+    if (!disposed && requestId === latestDrawerRequest) loadingOlder.value = false
   }
 }
 
 const handleClose = () => {
+  latestDrawerRequest += 1
+  openedThreadId = null
   visible.value = false
+  loadingOlder.value = false
   detail.value = null
   expandedTools.value.clear()
 }
@@ -396,6 +449,12 @@ defineExpose({
     padding: 40px 0;
     text-align: center;
   }
+}
+
+.older-messages-control {
+  display: flex;
+  justify-content: center;
+  margin: 0 0 16px;
 }
 
 .messages-list {

@@ -47,8 +47,9 @@ export const databaseApi = {
     return apiGet(`/api/knowledge/databases/${kbId}`)
   },
 
-  getPermissionOptions: async (kbId) => {
-    return apiGet(`/api/knowledge/databases/${kbId}/permission-options`)
+  getPermissionOptions: async (kbId, { offset, limit, search } = {}) => {
+    const query = buildQuery({ offset, limit, search })
+    return apiGet(`/api/knowledge/databases/${kbId}/permission-options${query ? `?${query}` : ''}`)
   },
 
   /**
@@ -622,8 +623,13 @@ export const evaluationApi = {
     return apiAdminPost(`/api/evaluation/databases/${kbId}/datasets/upload`, formData)
   },
 
-  listDatasets: async (kbId) => {
-    return apiAdminGet(`/api/evaluation/databases/${kbId}/datasets`)
+  listDatasets: async (kbId, params = {}) => {
+    const query = new URLSearchParams()
+    if (params.limit) query.set('limit', String(params.limit))
+    if (params.offset !== undefined) query.set('offset', String(params.offset))
+    if (params.status) query.set('status', params.status)
+    if (params.search) query.set('search', params.search)
+    return apiAdminGet(`/api/evaluation/databases/${kbId}/datasets?${query}`)
   },
 
   getDataset: async (kbId, datasetId, page = 1, pageSize = 50) => {
@@ -658,8 +664,14 @@ export const evaluationApi = {
     return apiAdminPost(`/api/evaluation/databases/${kbId}/runs`, params)
   },
 
-  listRuns: async (kbId) => {
-    return apiAdminGet(`/api/evaluation/databases/${kbId}/runs`)
+  listRuns: async (kbId, params = {}) => {
+    const query = new URLSearchParams()
+    if (params.limit) query.set('limit', String(params.limit))
+    if (params.offset !== undefined) query.set('offset', String(params.offset))
+    if (params.datasetId) query.set('dataset_id', params.datasetId)
+    if (params.runId) query.set('run_id', params.runId)
+    if (params.beforeId) query.set('before_id', String(params.beforeId))
+    return apiAdminGet(`/api/evaluation/databases/${kbId}/runs?${query}`)
   },
 
   getRunResults: async (kbId, runId, params = {}) => {

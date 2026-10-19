@@ -452,7 +452,6 @@ const treeVisible = ref(false)
 const publishOpen = ref(false)
 const filePreviewRef = ref(null)
 
-const skills = ref([])
 const createModalVisible = ref(false)
 const createForm = reactive({ path: '', isDir: false, content: '' })
 const allowedSkillAccessLevels = ref(['user'])
@@ -636,15 +635,12 @@ const fetchSkillDetail = async () => {
   loading.value = true
   try {
     const skillResult = requestedPersonal
-      ? await skillApi.listSkillCards({ refreshPersonal: true })
-      : await skillApi.listSkills()
+      ? await skillApi.getPersonalSkillDetail(requestedSlug)
+      : await skillApi.getSkillDetail(requestedSlug)
     if (!isCurrent()) return
-    skills.value = skillResult?.data || []
     allowedSkillAccessLevels.value = skillResult?.allowed_access_levels || ['user']
 
-    const found = skills.value.find(
-      (s) => s.slug === requestedSlug && (requestedPersonal ? s.source_scope === 'personal' : s.source_scope !== 'personal')
-    )
+    const found = skillResult?.data
     if (found) {
       currentSkill.value = found
       syncDependencyFormFromSkill(found)

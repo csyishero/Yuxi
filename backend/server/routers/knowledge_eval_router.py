@@ -1,7 +1,7 @@
 from typing import Any, Literal
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from server.utils.auth_middleware import get_admin_user
@@ -114,13 +114,33 @@ async def upload_evaluation_dataset(
 @evaluation.get("/databases/{kb_id}/datasets")
 async def list_evaluation_datasets(
     kb_id: str,
+    limit: int | None = Query(default=None, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    status: Literal["pending", "running", "completed", "failed"] | None = None,
+    search: str | None = Query(default=None, max_length=100),
     current_user: User = Depends(require_knowledge_base_view),
 ):
-    """获取知识库的评估数据集列表"""
+    """获取评估数据集；显式指定 limit 时返回分页结果。"""
     try:
         service = EvaluationService()
-        datasets = await service.list_datasets(kb_id)
-        return {"message": "success", "data": datasets}
+        normalized_search = search.strip() if search else None
+        if limit is None:
+            filters = {}
+            if offset:
+                filters["offset"] = offset
+            if status:
+                filters["status"] = status
+            if normalized_search:
+                filters["search"] = normalized_search
+            return {"message": "success", "data": await service.list_datasets(kb_id, **filters)}
+        page = await service.list_datasets_page(
+            kb_id, limit=limit, offset=offset, status=status, search=normalized_search
+        )
+        return {
+            "message": "success",
+            "data": page["items"],
+            "pagination": {k: v for k, v in page.items() if k != "items"},
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -317,13 +337,35 @@ async def run_evaluation(
 @evaluation.get("/databases/{kb_id}/runs")
 async def list_evaluation_runs(
     kb_id: str,
+    limit: int | None = Query(default=None, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    dataset_id: str | None = Query(default=None, max_length=64),
+    run_id: str | None = Query(default=None, max_length=64),
+    before_id: int | None = Query(default=None, ge=1),
     current_user: User = Depends(require_knowledge_base_view),
 ):
-    """获取知识库评估运行历史"""
+    """获取评估运行历史；显式指定 limit 时返回分页结果。"""
     try:
         service = EvaluationService()
-        runs = await service.list_runs(kb_id)
-        return {"message": "success", "data": runs}
+        if limit is None:
+            filters = {}
+            if offset:
+                filters["offset"] = offset
+            if dataset_id:
+                filters["dataset_id"] = dataset_id
+            if run_id:
+                filters["run_id"] = run_id
+            if before_id is not None:
+                filters["before_id"] = before_id
+            return {"message": "success", "data": await service.list_runs(kb_id, **filters)}
+        page = await service.list_runs_page(
+            kb_id, limit=limit, offset=offset, dataset_id=dataset_id, run_id=run_id, before_id=before_id
+        )
+        return {
+            "message": "success",
+            "data": page["items"],
+            "pagination": {k: v for k, v in page.items() if k != "items"},
+        }
     except HTTPException:
         raise
     except Exception as e:

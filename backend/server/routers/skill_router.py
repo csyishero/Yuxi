@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
@@ -25,6 +26,8 @@ from yuxi.agents.skills.service import (
     export_personal_skill_zip,
     get_allowed_skill_access_levels,
     get_manageable_personal_skill_owner,
+    get_management_readable_skill_or_raise,
+    get_personal_skill,
     get_manageable_skill_or_raise,
     get_skill_dependency_options,
     get_skill_tree,
@@ -33,9 +36,11 @@ from yuxi.agents.skills.service import (
     is_builtin_skill,
     list_accessible_skills,
     list_skill_cards_for_user,
+    page_skill_cards_for_user,
     list_personal_skill_catalog,
     list_skills,
     list_visible_skills_for_management,
+    page_visible_skills_for_management,
     prepare_remote_skill_install,
     prepare_skill_upload,
     read_personal_skill_file,
@@ -58,6 +63,7 @@ from yuxi.agents.skills.sharing import (
     publish_personal_skill_directly,
     submit_skill_share_request,
 )
+from yuxi.agents.skills.market import list_personal_publication_records
 from yuxi.permissions import (
     SKILL_PERMISSION_POLICY,
     ResourcePermission,
@@ -184,18 +190,42 @@ def _serialize_skill_for_user(item, user: User, visible_mcp_slugs: set[str] | No
 
 @user_skills.get("")
 async def list_skill_cards_route(
+    source: Literal["all", "shared", "personal"] = Query("all"),
+    limit: int | None = Query(None, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    search: str = Query("", max_length=100),
     audience_search: str | None = Query(None, max_length=100),
     audience_department_id: int | None = Query(None, ge=1),
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        items = await list_skill_cards_for_user(
-            db,
-            current_user,
-            audience_search=audience_search,
-            audience_department_id=audience_department_id,
-        )
+        if limit is None:
+            items = await list_skill_cards_for_user(
+                db,
+                current_user,
+                audience_search=audience_search,
+                audience_department_id=audience_department_id,
+            )
+            if source != "all":
+                items = [item for item in items if (item.source_scope == "personal") == (source == "personal")]
+            if search.strip():
+                needle = search.strip().casefold()
+                items = [item for item in items if needle in f"{item.slug} {item.name} {item.description}".casefold()]
+            total = len(items)
+            items = items[offset:]
+            has_more = False
+        else:
+            items, total, has_more = await page_skill_cards_for_user(
+                db,
+                current_user,
+                source=source,
+                limit=limit,
+                offset=offset,
+                search=search,
+                audience_search=audience_search,
+                audience_department_id=audience_department_id,
+            )
         visible_mcp_slugs = (
             await get_visible_mcp_reference_slugs(db, current_user)
             if any(item.mcp_dependencies for item in items)
@@ -204,6 +234,10 @@ async def list_skill_cards_route(
         return {
             "success": True,
             "data": [_serialize_skill_for_user(item, current_user, visible_mcp_slugs) for item in items],
+            "total": total,
+            "has_more": has_more,
+            "limit": limit,
+            "offset": offset,
             "allowed_access_levels": get_allowed_skill_access_levels(current_user),
         }
     except HTTPException:
@@ -221,6 +255,9 @@ async def list_personal_skill_catalog_route(
     owner_search: str | None = Query(None, max_length=100),
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
+    card_page: bool = Query(False),
+    search: str = Query("", max_length=100),
+    exclude_own: bool = Query(False),
     current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -233,6 +270,9 @@ async def list_personal_skill_catalog_route(
             owner_search=owner_search,
             offset=offset,
             limit=limit,
+            card_page=card_page,
+            search=search,
+            exclude_own=exclude_own,
         )
         return {"success": True, "data": data}
     except ValueError as exc:
@@ -301,6 +341,25 @@ async def list_accessible_skills_route(
     except Exception as e:
         logger.error(f"Failed to list accessible skills: {e}")
         raise HTTPException(status_code=500, detail="获取可访问 Skills 失败")
+
+
+@user_skills.get("/personal/{slug}")
+async def get_personal_skill_detail_route(
+    slug: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """按 slug 读取本人单个个人 Skill。"""
+    try:
+        item = await get_personal_skill(str(current_user.uid), slug)
+        visible_mcp_slugs = await get_visible_mcp_reference_slugs(db, current_user) if item.mcp_dependencies else None
+        return {
+            "success": True,
+            "data": _serialize_skill_for_user(item, current_user, visible_mcp_slugs),
+            "allowed_access_levels": get_allowed_skill_access_levels(current_user),
+        }
+    except ValueError as exc:
+        _raise_from_value_error(exc)
 
 
 @user_skills.post("/import/prepare")
@@ -456,12 +515,36 @@ async def submit_skill_share_request_route(
 @user_skills.get("/share-requests")
 async def list_skill_share_requests_route(
     mine_only: bool = Query(False),
+    status: Literal["pending", "approved", "rejected"] | None = Query(None),
+    slug: str | None = Query(None, max_length=128),
+    offset: int = Query(0, ge=0),
+    limit: int | None = Query(None, ge=1, le=100),
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """列出当前用户可见的共享申请。"""
-    items = await list_skill_share_requests(db, operator=current_user, mine_only=mine_only)
-    return {"success": True, "data": items}
+    """旧客户端返回完整数组；显式传 limit 时分页列出授权共享申请。"""
+    page = await list_skill_share_requests(
+        db,
+        operator=current_user,
+        mine_only=mine_only,
+        status=status,
+        slug=slug,
+        offset=offset if limit is not None else 0,
+        limit=limit,
+    )
+    return {"success": True, "data": page if limit is not None else page["items"]}
+
+
+@user_skills.get("/publication-records")
+async def list_personal_publication_records_route(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=20),
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """按个人技能分页列出两个渠道的发布状态。"""
+    page = await list_personal_publication_records(db, operator=current_user, offset=offset, limit=limit)
+    return {"success": True, "data": page}
 
 
 @user_skills.get("/share-requests/{request_id}/snapshot")
@@ -698,11 +781,24 @@ async def discard_skill_install_draft_route(draft_id: str, current_user: User = 
 
 @skills.get("")
 async def list_skills_route(
+    limit: int | None = Query(None, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    search: str = Query("", max_length=100),
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        items = await list_visible_skills_for_management(db, current_user)
+        if limit is None:
+            items = await list_visible_skills_for_management(db, current_user)
+            if search.strip():
+                needle = search.strip().casefold()
+                items = [item for item in items if needle in f"{item.slug} {item.name} {item.description}".casefold()]
+            total = len(items)
+            items = items[offset:]
+        else:
+            items, total = await page_visible_skills_for_management(
+                db, current_user, limit=limit, offset=offset, search=search
+            )
         visible_mcp_slugs = (
             await get_visible_mcp_reference_slugs(db, current_user)
             if any(item.mcp_dependencies for item in items)
@@ -711,6 +807,9 @@ async def list_skills_route(
         return {
             "success": True,
             "data": [_serialize_skill_for_user(item, current_user, visible_mcp_slugs) for item in items],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
             "allowed_access_levels": get_allowed_skill_access_levels(current_user),
         }
     except HTTPException:
@@ -718,6 +817,25 @@ async def list_skills_route(
     except Exception as e:
         logger.error(f"Failed to list manageable skills: {e}")
         raise HTTPException(status_code=500, detail="获取技能列表失败")
+
+
+@skills.get("/{slug}/details")
+async def get_skill_detail_route(
+    slug: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """按 slug 读取单个有权查看的共享 Skill。"""
+    try:
+        item = await get_management_readable_skill_or_raise(db, current_user, slug)
+        visible_mcp_slugs = await get_visible_mcp_reference_slugs(db, current_user) if item.mcp_dependencies else None
+        return {
+            "success": True,
+            "data": _serialize_skill_for_user(item, current_user, visible_mcp_slugs),
+            "allowed_access_levels": get_allowed_skill_access_levels(current_user),
+        }
+    except ValueError as exc:
+        _raise_from_value_error(exc)
 
 
 @skills.get("/dependency-options")

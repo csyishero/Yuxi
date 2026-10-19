@@ -29,7 +29,7 @@ class Workspace:
     def list_authorized_directory(self, path: str, *, root: str, max_entries: int | None = None) -> list[dict]:
         """列出 Workdir 内的普通文件与真实目录。"""
         if max_entries is not None:
-            entries, examined = self._list_authorized_directory_limited(path, root=root, max_entries=max_entries + 1)
+            entries, examined, _ = self._list_authorized_directory_limited(path, root=root, max_entries=max_entries + 1)
             if examined > max_entries:
                 raise ValueError("directory entry limit exceeded")
             return entries
@@ -62,21 +62,98 @@ class Workspace:
         max_scanned_entries: int = 10_000,
     ) -> list[dict]:
         """在授权根内执行有界实时扫描并返回文件名或路径匹配项。"""
+        entries, _ = self._search_authorized_tree(
+            root,
+            query,
+            include_directories=include_directories,
+            exclude_directories=exclude_directories,
+            exclude_hidden=exclude_hidden,
+            max_results=max_results,
+            max_directories=max_directories,
+            max_depth=max_depth,
+            max_entries_per_directory=max_entries_per_directory,
+            max_scanned_entries=max_scanned_entries,
+        )
+        return entries
+
+    def search_authorized_tree_page(
+        self,
+        root: str,
+        query: str,
+        *,
+        offset: int,
+        limit: int,
+        include_directories: bool = True,
+        max_directories: int = 600,
+        max_depth: int = 15,
+        max_entries_per_directory: int = 10_000,
+        max_scanned_entries: int = 10_000,
+    ) -> dict:
+        """在原授权根和扫描预算内，按匹配顺序读取一页并报告未扫描区域。"""
+        if offset < 0 or limit <= 0:
+            raise ValueError("invalid search page")
+        normalized_query = str(query or "").strip()
+        if normalized_query.startswith("path:/"):
+            relative_path = normalized_query[len("path:") :]
+            if relative_path == "/":
+                return {"entries": [], "has_more": False, "truncated": False}
+            exact_path = f"{root.rstrip('/')}{relative_path}"
+            try:
+                metadata = self.stat_authorized_path(exact_path, root=root)
+            except (FileNotFoundError, NotADirectoryError, PermissionError, ValueError):
+                return {"entries": [], "has_more": False, "truncated": False}
+            item = {"path": exact_path, "name": PurePosixPath(exact_path).name, **metadata}
+            entries = [item] if include_directories or not metadata["is_dir"] else []
+            return {"entries": entries[offset : offset + limit], "has_more": False, "truncated": False}
+        entries, truncated = self._search_authorized_tree(
+            root,
+            query,
+            include_directories=include_directories,
+            max_results=offset + limit + 1,
+            max_directories=max_directories,
+            max_depth=max_depth,
+            max_entries_per_directory=max_entries_per_directory,
+            max_scanned_entries=max_scanned_entries,
+        )
+        return {
+            "entries": entries[offset : offset + limit],
+            "has_more": len(entries) > offset + limit,
+            "truncated": truncated,
+        }
+
+    def _search_authorized_tree(
+        self,
+        root: str,
+        query: str,
+        *,
+        include_directories: bool,
+        exclude_directories: frozenset[str] = frozenset(),
+        exclude_hidden: bool = False,
+        max_results: int,
+        max_directories: int,
+        max_depth: int,
+        max_entries_per_directory: int,
+        max_scanned_entries: int,
+    ) -> tuple[list[dict], bool]:
+        """执行实时扫描，并区分结果上限与目录/条目预算导致的截断。"""
         normalized_query = str(query or "").strip().lower()
         pending: list[tuple[str, int]] = [(root, 0)]
         results: list[dict] = []
         visited_directories = 0
         scanned_entries = 0
+        truncated = False
 
         while pending and visited_directories < max_directories and scanned_entries < max_scanned_entries:
             directory, depth = pending.pop(0)
             visited_directories += 1
             remaining_entries = max_scanned_entries - scanned_entries
-            entries, examined_entries = self._list_authorized_directory_limited(
+            entries, examined_entries, has_unscanned_entries = self._list_authorized_directory_limited(
                 directory,
                 root=root,
                 max_entries=min(max_entries_per_directory, remaining_entries),
             )
+            if has_unscanned_entries:
+                truncated = True
             scanned_entries += examined_entries
             for item in entries:
                 name = str(item["name"])
@@ -85,13 +162,15 @@ class Workspace:
                 excluded = is_dir and (name in exclude_directories or (exclude_hidden and name.startswith(".")))
                 if is_dir and not excluded and depth < max_depth:
                     pending.append((path, depth + 1))
+                elif is_dir and not excluded:
+                    truncated = True
 
                 matched = not normalized_query or normalized_query in name.lower() or normalized_query in path.lower()
                 if matched and not excluded and (include_directories or not is_dir):
                     results.append({"path": path, **item})
                     if len(results) >= max_results:
-                        return results
-        return results
+                        return results, truncated
+        return results, truncated or bool(pending)
 
     def _list_authorized_directory_limited(
         self,
@@ -99,7 +178,7 @@ class Workspace:
         *,
         root: str,
         max_entries: int,
-    ) -> tuple[list[dict], int]:
+    ) -> tuple[list[dict], int, bool]:
         """最多检查指定数量的目录项，避免宽目录触发全量 I/O。"""
         if max_entries < 0:
             raise ValueError("directory entry limit must be non-negative")
@@ -108,6 +187,7 @@ class Workspace:
         directory_fd = self._open_directory(base, parts)
         entries: list[dict] = []
         examined_entries = 0
+        has_unscanned_entries = False
         try:
             with os.scandir(directory_fd) as iterator:
                 for entry in itertools.islice(iterator, max_entries):
@@ -116,10 +196,11 @@ class Workspace:
                     if not (stat.S_ISDIR(item_stat.st_mode) or stat.S_ISREG(item_stat.st_mode)):
                         continue
                     entries.append({"name": entry.name, **self._metadata_from_stat(item_stat)})
+                has_unscanned_entries = next(iterator, None) is not None
         finally:
             os.close(directory_fd)
         entries.sort(key=lambda item: str(item["name"]).lower())
-        return entries, examined_entries
+        return entries, examined_entries, has_unscanned_entries
 
     def download_authorized_file_to_path(self, path: str, target_path: str, max_bytes: int) -> int:
         """把授权普通文件有界复制到服务临时文件。"""

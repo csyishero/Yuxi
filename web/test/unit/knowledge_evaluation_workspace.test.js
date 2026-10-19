@@ -17,7 +17,7 @@ test('知识库详情将评估基准和近期评估收敛到同一个评估工�
   assert.match(detailSource, /key: 'evaluation', label: '评估', icon: BarChart3/)
   assert.match(detailSource, /<KnowledgeEvaluationWorkspace/)
   assert.match(detailSource, /route\.query\.section/)
-  assert.match(detailSource, /:can-manage="canManageDatabase"/)
+  assert.match(detailSource, /:can-manage="canConfigureDatabase"/)
   assert.match(extensionsSource, /<router-view v-else :key="route\.path" \/>/)
   assert.match(
     apiSource,
@@ -29,7 +29,9 @@ test('知识库详情将评估基准和近期评估收敛到同一个评估工�
   assert.match(workspaceSource, />创建基准</)
   assert.match(workspaceSource, />新建评估</)
   assert.match(workspaceSource, /Promise\.all\(\[\s*evaluationApi\.listDatasets/)
-  assert.match(workspaceSource, /evaluationApi\.listRuns\(props\.kbId\)/)
+  assert.match(workspaceSource, /evaluationApi\.listRuns\(props\.kbId, \{/)
+  assert.match(workspaceSource, /:total="datasetTotal"/)
+  assert.match(workspaceSource, /:total="runTotal"/)
 })
 
 test('评估基准和近期评估使用语义按钮导航到可深链接三级页面', () => {
@@ -86,7 +88,9 @@ test('评估基准三级页包含题目和评估结果 Tab 并按当前基准过
     source,
     /const getResultRowKey = \(record\) => `\$\{selectedRunId\.value\}:\$\{record\.item_index\}`/
   )
-  assert.match(source, /response\.data\.filter\(\(run\) => run\.dataset_id === datasetId\.value\)/)
+  assert.match(source, /datasetId: datasetId\.value/)
+  assert.match(source, /runId: requestedRunId/)
+  assert.match(source, /@popupScroll="loadMoreRuns"/)
   assert.match(source, /evaluationApi\.getDataset\(kbId\.value, datasetId\.value, page, pageSize\)/)
   assert.match(source, /evaluationApi\.updateDatasetItem\(/)
   assert.match(source, /title="编辑评估问答"/)
@@ -117,7 +121,7 @@ test('评估详情源码包含所选运行的串行轮询与迟到响应守卫',
   assert.match(source, /if \(disposed\) return/)
   assert.match(
     source,
-    /const requestedRunId = silent \? selectedRunId\.value : String\(route\.query\.run \|\| ''\)/
+    /const requestedRunId = silent \? selectedRunIdBeforeRefresh : String\(route\.query\.run \|\| ''\)/
   )
   assert.match(
     source,
@@ -140,13 +144,16 @@ test('评估详情源码包含所选运行的串行轮询与迟到响应守卫',
   )
 })
 
-test('新建评估在没有已完成基准时禁用且不伪造成功', () => {
+test('新建评估远程查找已完成基准且不伪造成功', () => {
   const workspaceSource = readSource(
     '../../src/components/evaluation/KnowledgeEvaluationWorkspace.vue'
   )
   const modalSource = readSource('../../src/components/evaluation/EvaluationRunCreateModal.vue')
 
-  assert.match(workspaceSource, /:disabled="completedDatasets\.length === 0"/)
+  assert.match(workspaceSource, /@click="runModalOpen = true"/)
+  assert.match(modalSource, /status: 'completed'/)
+  assert.match(modalSource, /@popupScroll="loadMoreDatasets"/)
+  assert.match(modalSource, /:disabled="!form\.datasetId"/)
   assert.match(modalSource, /await evaluationApi\.runEvaluation\(props\.kbId/)
   assert.match(modalSource, /if \(response\?\.message !== 'success'\)/)
   assert.match(modalSource, /message\.error\(error\.message \|\| '启动评估失败'\)/)
