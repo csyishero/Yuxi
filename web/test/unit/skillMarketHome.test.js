@@ -54,11 +54,12 @@ const stub = (name) => ({
   }
 })
 
-async function withHome({ role = 'user', query = {}, shares = [], hiddenOwn = false, marketFailure = false, personalFailure = false } = {}, verify) {
+async function withHome({ role = 'user', query = {}, shares = [], mineShares = [], mineMarket = [], extraPersonal = [], snapshots = {}, hiddenOwn = false, marketFailure = false, personalFailure = false, historyFailureOnce = false } = {}, verify) {
   const componentDir = new URL('../../src/components/extensions/', import.meta.url)
   const sharedDir = new URL('../../src/components/shared/', import.meta.url)
   const compiledPath = fileURLToPath(new URL(`.skill-market-home-${pid}.mjs`, componentDir))
   const compiledListPath = fileURLToPath(new URL(`.skill-market-home-list-${pid}.mjs`, componentDir))
+  const compiledRecordsPath = fileURLToPath(new URL(`.skill-market-home-records-${pid}.mjs`, componentDir))
   const compiledGridPath = fileURLToPath(new URL(`.skill-market-home-grid-${pid}.mjs`, componentDir))
   const compiledShoulderPath = fileURLToPath(new URL(`.skill-market-home-shoulder-${pid}.mjs`, sharedDir))
   const compiledCardPath = fileURLToPath(new URL(`.skill-market-home-card-${pid}.mjs`, sharedDir))
@@ -68,12 +69,15 @@ async function withHome({ role = 'user', query = {}, shares = [], hiddenOwn = fa
   const originalMessages = Object.fromEntries(['success', 'info', 'error', 'warning'].map((name) => [name, message[name]]))
   const requested = []
   const confirms = []
+  let historyAttempts = 0
   let app, server
   try {
     const { descriptor } = parse(readFileSync(new URL('SkillMarket.vue', componentDir), 'utf8'))
     writeFileSync(compiledPath, compileScript(descriptor, { id: 'skill-market-home', inlineTemplate: true }).content)
     const { descriptor: listDescriptor } = parse(readFileSync(new URL('SkillCardList.vue', componentDir), 'utf8'))
     writeFileSync(compiledListPath, compileScript(listDescriptor, { id: 'skill-market-home-list', inlineTemplate: true }).content.replace("'./ExtensionCardGrid.vue'", `'./.skill-market-home-grid-${pid}.mjs'`))
+    const { descriptor: recordsDescriptor } = parse(readFileSync(new URL('PublicationRecords.vue', componentDir), 'utf8'))
+    writeFileSync(compiledRecordsPath, compileScript(recordsDescriptor, { id: 'skill-market-home-records', inlineTemplate: true }).content)
     for (const [sourceFile, outputPath, id] of [
       [new URL('ExtensionCardGrid.vue', componentDir), compiledGridPath, 'skill-market-home-grid'],
       [new URL('PageShoulder.vue', sharedDir), compiledShoulderPath, 'skill-market-home-shoulder'],
@@ -105,11 +109,26 @@ async function withHome({ role = 'user', query = {}, shares = [], hiddenOwn = fa
         ? Response.json({ detail: '个人技能暂不可用' }, { status: 503 })
         : Response.json({ data: [
         { slug: 'my-skill', name: '我创建的技能', source_scope: 'personal', source_type: 'upload', owner_uid: 'alice', category: 'other' },
+        ...extraPersonal,
         { slug: 'team-skill', name: '团队共享技能', source_scope: 'shared', source_type: 'upload', enabled: true, category: 'other', can_manage: role !== 'user' },
         { slug: 'builtin-skill', name: '内置技能', source_scope: 'builtin', source_type: 'builtin', enabled: true, category: 'other' }
         ] })
       if (path === '/api/skill-market/requests') return Response.json({ data: [] })
       if (path === '/api/skills/share-requests') return Response.json({ data: shares })
+      if (path === '/api/skills/share-requests?mine_only=true') {
+        historyAttempts++
+        return historyFailureOnce && historyAttempts === 1
+          ? Response.json({ detail: '发布记录暂不可用' }, { status: 503 })
+          : Response.json({ data: mineShares })
+      }
+      if (path === '/api/skill-market/requests?mine_only=true') return Response.json({ data: mineMarket })
+      const snapshotMatch = path.match(/^\/api\/skills\/share-requests\/([^/]+)\/(tree|snapshot)(?:\?path=(.*))?$/)
+      if (snapshotMatch) {
+        const [, id, endpoint] = snapshotMatch
+        const snapshot = snapshots[id]
+        if (!snapshot) return Response.json({ detail: '未找到快照' }, { status: 404 })
+        return Response.json({ data: endpoint === 'tree' ? snapshot.tree : { content: snapshot.content } })
+      }
       if (path.startsWith('/api/skills/personal-catalog?')) return Response.json({ data: { items: [
         { slug: 'my-skill', name: '我创建的技能', owner_uid: 'alice', category: 'other' },
         { slug: 'bob-skill', name: '他人个人技能', owner_uid: 'bob', category: 'other' }
@@ -123,6 +142,7 @@ async function withHome({ role = 'user', query = {}, shares = [], hiddenOwn = fa
       plugins: [vue()],
       resolve: { alias: [
         { find: '@/components/extensions/SkillCardList.vue', replacement: compiledListPath },
+        { find: '@/components/extensions/PublicationRecords.vue', replacement: compiledRecordsPath },
         { find: '@/components/shared/PageShoulder.vue', replacement: compiledShoulderPath },
         { find: '@/components/shared/InfoCard.vue', replacement: compiledCardPath },
         { find: '@', replacement: fileURLToPath(new URL('../../src', import.meta.url)) }
@@ -168,6 +188,7 @@ async function withHome({ role = 'user', query = {}, shares = [], hiddenOwn = fa
     await server?.close()
     if (existsSync(compiledPath)) unlinkSync(compiledPath)
     if (existsSync(compiledListPath)) unlinkSync(compiledListPath)
+    if (existsSync(compiledRecordsPath)) unlinkSync(compiledRecordsPath)
     if (existsSync(compiledGridPath)) unlinkSync(compiledGridPath)
     if (existsSync(compiledShoulderPath)) unlinkSync(compiledShoulderPath)
     if (existsSync(compiledCardPath)) unlinkSync(compiledCardPath)
@@ -300,15 +321,164 @@ test('市场读取失败只在市场提示，个人读取失败只在首页提�
 })
 
 test('个人读取失败时发布记录仍显示可重试错误，不误报空记录或概况', async () => {
-  await withHome({ personalFailure: true }, async ({ host, tick }) => {
+  const history = { id: 'archive-1', owner_uid: 'alice', personal_slug: 'old-skill', name: '归档技能', status: 'approved', published_version: 1, created_at: '2026-10-14T08:00:00Z' }
+  await withHome({ personalFailure: true, mineShares: [history] }, async ({ host, tick }) => {
     let home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
     assert.equal(findAll(home, (item) => item.props.class === 'skill-overview').length, 0)
     findAll(home, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
     await tick()
     home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
     assert.equal(findAll(home, (item) => item.type === 'a-alert').length, 1)
-    assert.ok(findAll(home, (item) => item.type === 'a-button' && visibleText(item) === '重试').length)
-    assert.doesNotMatch(visibleText(home), /还没有可发布的个人技能|这里还没有技能/)
+    assert.match(visibleText(home), /归档技能/)
+    assert.doesNotMatch(visibleText(home), /原件已删除|还没有可发布的个人技能|这里还没有技能/)
+  })
+})
+
+test('发布记录仅列真实申请，按技能合并两个渠道并保留已删除原件', async () => {
+  const own = { owner_uid: 'alice', personal_slug: 'my-skill', name: '我创建的技能' }
+  const archived = { owner_uid: 'alice', personal_slug: 'old-skill', name: '已删除原件的技能' }
+  const mineShares = [
+    { ...own, id: 'share-1', status: 'approved', published_version: 2, created_at: '2026-10-12T08:00:00Z', read_scope: { access_level: 'department', department_ids: [3] } },
+    { ...archived, id: 'share-old', status: 'approved', published_version: 1, created_at: '2026-10-11T08:00:00Z' },
+    { owner_uid: 'bob', personal_slug: 'bob-skill', name: '他人技能', id: 'share-bob', status: 'approved', created_at: '2026-10-14T08:00:00Z' }
+  ]
+  const mineMarket = [
+    { ...own, id: 'market-2', status: 'pending', created_at: '2026-10-14T08:00:00Z', current_market_version: 1, existing_market_scope: 'global' },
+    { ...own, id: 'market-1', status: 'approved', created_at: '2026-10-13T08:00:00Z', current_market_version: 1, existing_market_scope: 'global' }
+  ]
+  await withHome({ mineShares, mineMarket, extraPersonal: [{ slug: 'draft-only', name: '从未发布的草稿', owner_uid: 'alice', source_scope: 'personal', source_type: 'upload' }] }, async ({ host, requested, tick }) => {
+    const open = findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0]
+    open.props.onClick()
+    await tick()
+    const records = findAll(host, (item) => item.props['aria-label'] === '发布与审核记录')[0]
+    assert.ok(records)
+    const text = visibleText(records)
+    for (const label of ['我创建的技能', '已删除原件的技能', '直接共享', '上架市场', '已上架', '待审核', '全公司', '本部门', '原件已删除']) assert.match(text, new RegExp(label))
+    assert.doesNotMatch(text, /从未发布的草稿|他人技能/)
+    assert.equal(findAll(records, (item) => item.props['data-skill-slug'] === 'my-skill').length, 1)
+    assert.ok(requested.some((request) => request.path === '/api/skills/share-requests?mine_only=true'))
+    assert.ok(requested.some((request) => request.path === '/api/skill-market/requests?mine_only=true'))
+  })
+})
+
+test('归档技能的完整审核历程和旧提交快照仍可按申请查看', async () => {
+  const source = { owner_uid: 'alice', personal_slug: 'old-skill', name: '已删除原件的技能' }
+  const mineShares = [
+    { ...source, id: 'share-new', status: 'rejected', review_note: '请补充说明', application_reason: '再次共享', created_at: '2026-10-14T08:00:00Z', reviewed_at: '2026-10-14T09:00:00Z' },
+    { ...source, id: 'share-old', status: 'approved', published_version: 1, application_reason: '首次共享', created_at: '2026-10-11T08:00:00Z', reviewed_at: '2026-10-11T09:00:00Z' }
+  ]
+  const mineMarket = [{ ...source, id: 'market-1', status: 'pending', application_reason: '上架试用', created_at: '2026-10-12T08:00:00Z' }]
+  const snapshots = { 'share-old': { tree: [{ path: 'SKILL.md', name: 'SKILL.md', is_dir: false }], content: '# 首次提交的内容' } }
+  await withHome({ mineShares, mineMarket, snapshots }, async ({ host, requested, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
+    await tick()
+    const row = findAll(host, (item) => item.props['data-skill-slug'] === 'old-skill')[0]
+    findAll(row, (item) => item.type === 'a-button' && visibleText(item) === '查看记录')[0].props.onClick()
+    await tick()
+    const history = findAll(host, (item) => item.props['aria-label'] === '技能审核历程')[0]
+    assert.ok(history)
+    const items = findAll(history, (item) => item.props['data-request-id'])
+    assert.deepEqual(items.map((item) => item.props['data-request-id']), ['share-new', 'share-old', 'market-1'])
+    assert.match(visibleText(history), /请补充说明|再次共享|首次共享|上架试用/)
+    const old = items.find((item) => item.props['data-request-id'] === 'share-old')
+    findAll(old, (item) => item.type === 'a-button' && visibleText(item) === '查看提交快照')[0].props.onClick()
+    await tick()
+    const snapshot = findAll(host, (item) => item.props['aria-label'] === '历史提交快照')[0]
+    assert.match(visibleText(snapshot), /首次提交的内容/)
+    assert.ok(requested.some((request) => request.path === '/api/skills/share-requests/share-old/tree'))
+    assert.ok(requested.some((request) => request.path === '/api/skills/share-requests/share-old/snapshot?path=SKILL.md'))
+    assert.equal(requested.some((request) => request.path.includes('/api/skills/personal/old-skill')), false)
+  })
+})
+
+test('发布记录读取失败时给出重试，不把失败显示为空记录', async () => {
+  const mineShares = [{ id: 'share-1', owner_uid: 'alice', personal_slug: 'my-skill', name: '我创建的技能', status: 'pending', created_at: '2026-10-14T08:00:00Z' }]
+  await withHome({ mineShares, historyFailureOnce: true }, async ({ host, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
+    await tick()
+    let records = findAll(host, (item) => item.props['aria-label'] === '发布与审核记录')[0]
+    assert.match(visibleText(records), /发布记录读取失败/)
+    assert.doesNotMatch(visibleText(records), /还没有发布申请记录/)
+    findAll(records, (item) => item.type === 'a-button' && visibleText(item) === '重试')[0].props.onClick()
+    await tick()
+    records = findAll(host, (item) => item.props['aria-label'] === '发布与审核记录')[0]
+    assert.match(visibleText(records), /我创建的技能/)
+    assert.doesNotMatch(visibleText(records), /发布记录读取失败/)
+  })
+})
+
+test('共享副本和指定成员范围按每次批准分别显示，不误判整个渠道已停用', async () => {
+  const source = { owner_uid: 'alice', personal_slug: 'my-skill', name: '我创建的技能' }
+  const mineShares = [
+    { ...source, id: 'share-v2', status: 'approved', published_version: 2, published_copy_status: 'disabled', read_scope: { access_level: 'user', user_uids: ['bob', 'cara'] }, created_at: '2026-10-15T08:00:00Z' },
+    { ...source, id: 'share-v1', status: 'approved', published_version: 1, published_copy_status: 'enabled', read_scope: { access_level: 'user', user_uids: ['dana'] }, created_at: '2026-10-11T08:00:00Z' }
+  ]
+  await withHome({ mineShares }, async ({ host, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
+    await tick()
+    const row = findAll(host, (item) => item.props['data-skill-slug'] === 'my-skill')[0]
+    assert.match(visibleText(row), /最近发布副本已停用|指定成员（2 人）/)
+    assert.doesNotMatch(visibleText(row), /共享已停用/)
+    findAll(row, (item) => item.type === 'a-button' && visibleText(item) === '查看记录')[0].props.onClick()
+    await tick()
+    const history = findAll(host, (item) => item.props['aria-label'] === '技能审核历程')[0]
+    assert.match(visibleText(history), /指定成员：bob、cara|指定成员：dana|共享副本当前已启用|共享副本当前已停用/)
+  })
+})
+
+test('旧共享记录无法核对副本时，摘要仍显示审核结果，详情解释历史限制', async () => {
+  const mineShares = [{
+    id: 'share-legacy', owner_uid: 'alice', personal_slug: 'reading', name: '阅读技能',
+    status: 'approved', published_version: '2.0.0', published_copy_status: 'unknown',
+    created_at: '2026-10-15T08:00:00Z'
+  }]
+  await withHome({ mineShares }, async ({ host, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
+    await tick()
+    const row = findAll(host, (item) => item.props['data-skill-slug'] === 'reading')[0]
+    assert.match(visibleText(row), /直接共享.*审核通过/s)
+    assert.doesNotMatch(visibleText(row), /状态未确认|已启用|已停用|已失效/)
+    findAll(row, (item) => item.type === 'a-button' && visibleText(item) === '查看记录')[0].props.onClick()
+    await tick()
+    const history = findAll(host, (item) => item.props['aria-label'] === '技能审核历程')[0]
+    assert.match(visibleText(history), /旧发布记录无法核对当前共享副本/)
+  })
+})
+
+test('市场历史按审核确定的部门范围展示，而非申请人后来所属部门', async () => {
+  const mineMarket = [{
+    id: 'market-dept', owner_uid: 'alice', personal_slug: 'my-skill', name: '我创建的技能', status: 'approved',
+    published_version: 2, current_market_version: 2, existing_market_scope: 'department', existing_market_department_id: 3,
+    owner_department_id: 7, read_scope: { access_level: 'department', department_ids: [3] }, created_at: '2026-10-15T08:00:00Z'
+  }]
+  await withHome({ mineMarket }, async ({ host, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
+    await tick()
+    const row = findAll(host, (item) => item.props['data-skill-slug'] === 'my-skill')[0]
+    assert.match(visibleText(row), /当前范围：本部门/)
+    findAll(row, (item) => item.type === 'a-button' && visibleText(item) === '查看记录')[0].props.onClick()
+    await tick()
+    const history = findAll(host, (item) => item.props['aria-label'] === '技能审核历程')[0]
+    assert.match(visibleText(history), /发布范围：本部门/)
+    assert.doesNotMatch(visibleText(history), /部门 7/)
+  })
+})
+
+test('旧市场申请缺少发布版本时不把当前市场版本写成当次审核版本', async () => {
+  const mineMarket = [{
+    id: 'market-legacy', owner_uid: 'alice', personal_slug: 'my-skill', name: '我创建的技能', status: 'approved',
+    current_market_version: 4, existing_market_scope: 'global', created_at: '2026-10-15T08:00:00Z'
+  }]
+  await withHome({ mineMarket }, async ({ host, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
+    await tick()
+    const row = findAll(host, (item) => item.props['data-skill-slug'] === 'my-skill')[0]
+    assert.match(visibleText(row), /v4/)
+    findAll(row, (item) => item.type === 'a-button' && visibleText(item) === '查看记录')[0].props.onClick()
+    await tick()
+    const event = findAll(host, (item) => item.props['data-request-id'] === 'market-legacy')[0]
+    assert.match(visibleText(event), /审核通过/)
+    assert.doesNotMatch(visibleText(event), /v4/)
   })
 })
 

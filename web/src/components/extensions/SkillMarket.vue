@@ -31,20 +31,10 @@
           <div v-if="pendingRequestCount"><strong>{{ pendingRequestCount }}</strong><span>市场待审核</span></div>
         </div>
         <div class="skill-list-heading">
-          <div><h3>{{ releaseView ? '发布记录' : '技能列表' }}</h3><p>{{ releaseView ? '选择本人技能查看共享与市场的申请、范围和版本。' : '直接查看、发布和管理技能。' }}</p></div>
+          <div><h3>{{ releaseView ? '发布与审核记录' : '技能列表' }}</h3><p>{{ releaseView ? '查看已提交的共享与市场申请、审核结果和当时的文件快照。' : '直接查看、发布和管理技能。' }}</p></div>
           <a-button type="link" @click="releaseView = !releaseView">{{ releaseView ? '返回技能列表' : '查看发布记录' }}</a-button>
         </div>
-        <template v-if="releaseView">
-          <div v-if="!ownedSkills.length && !legacyLoading && !personalError" class="personal-empty">还没有可发布的个人技能。</div>
-          <div v-else-if="ownedSkills.length" class="skill-list">
-            <div v-for="item in ownedSkills" :key="item.slug" class="skill-row release-row">
-              <div class="skill-row-name"><span class="skill-row-icon"><Sparkles :size="18" /></span><span><strong>{{ item.name }}</strong><small>{{ item.slug }}</small></span></div>
-              <div class="skill-row-origin">我创建的</div>
-              <div class="skill-row-status">个人原件</div>
-              <div class="skill-row-actions"><a-button @click="openPublish(item)">查看发布与审核</a-button></div>
-            </div>
-          </div>
-        </template>
+        <PublicationRecords v-if="releaseView" :personal-skills="personalError || legacyLoading ? null : ownedSkills" />
         <template v-else>
           <div class="skill-list-toolbar">
             <nav class="personal-source-filters" aria-label="我的技能来源">
@@ -216,6 +206,7 @@ import { message, Modal } from 'ant-design-vue'
 import { Blocks, BookOpen, ChartNoAxesColumn, Download, Heart, Sparkles, Store } from '@lucide/vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import PersonalSkillPublish from '@/components/extensions/PersonalSkillPublish.vue'
+import PublicationRecords from '@/components/extensions/PublicationRecords.vue'
 import SkillCardList from '@/components/extensions/SkillCardList.vue'
 import { canManageSkillRecord } from '@/components/extensions/skillManagementAccess'
 import { combineSkillCards, filterSkillCards, marketInstallManagementItems, ownPersonalSkill, personalSpaceSkillGroups, searchPersonalSpaceSkillGroups, skillDetailRoute } from '@/components/extensions/skillHubCatalog'

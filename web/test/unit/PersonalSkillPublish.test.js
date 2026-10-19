@@ -276,7 +276,7 @@ test('旧共享记录没有可核验副本身份时保留发布历史但不推�
   await withPanel({ shares: [{ ...shareRecords[1], published_copy_status: null, read_scope: null, department_ids: [] }], market: [] }, async ({ host }) => {
     const shared = findAll(host, (item) => item.props['data-channel'] === 'shared')[0]
     assert.match(visibleText(shared), /最近发布 v2/)
-    assert.match(visibleText(shared), /共享副本当前状态未确认/)
+    assert.match(visibleText(shared), /旧发布记录无法核对当前共享副本/)
     assert.match(visibleText(shared), /审核发布时范围：范围未确认/)
     assert.doesNotMatch(visibleText(shared), /共享副本当前已启用/)
   })
