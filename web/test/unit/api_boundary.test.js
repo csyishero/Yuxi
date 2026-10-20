@@ -259,6 +259,32 @@ test('市场审批只展示允许的范围冲突文案，其他响应仍脱敏',
   })
 })
 
+test('市场安装只展示已知同名冲突文案，其他 400 响应仍脱敏', async () => {
+  await withServer(async (server) => {
+    storageValues.set('user_token', 'test-token')
+    setActivePinia(createPinia())
+    const { apiPost } = await server.ssrLoadModule('/src/apis/base.js')
+
+    for (const detail of [
+      '已有同名个人技能，无法安装市场版',
+      '技能标识已被占用，无法安装市场版',
+      '个人原件已可使用，无需安装自己发布的市场 Skill'
+    ]) {
+      globalThis.fetch = async () => Response.json({ detail }, { status: 400 })
+      await assert.rejects(
+        apiPost('/api/skill-market/local-pptx/install'),
+        (error) => error.message === detail && error.response.data.detail === detail
+      )
+    }
+
+    globalThis.fetch = async () => Response.json({ detail: 'secret server context' }, { status: 400 })
+    await assert.rejects(
+      apiPost('/api/skill-market/local-pptx/install'),
+      (error) => error.message === '请求参数错误' && error.response.data.detail === '请求参数错误'
+    )
+  })
+})
+
 test('用户管理分页 API 只请求当前页并编码服务端筛选条件', async () => {
   await withServer(async (server) => {
     storageValues.set('user_token', 'test-token')

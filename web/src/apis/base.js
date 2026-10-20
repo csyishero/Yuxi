@@ -115,6 +115,11 @@ const PROJECT_MOVE_ERRORS = new Set([
 ])
 
 const MARKET_APPROVAL_ERRORS = new Set(['已有市场条目的发布范围不可在新版本中修改'])
+const MARKET_INSTALL_ERRORS = new Set([
+  '已有同名个人技能，无法安装市场版',
+  '技能标识已被占用，无法安装市场版',
+  '个人原件已可使用，无需安装自己发布的市场 Skill'
+])
 
 function publicErrorMessage(url, status, headers, requiresAuth, options, errorData) {
   const path = safeRequestMetadata(url, {}).path
@@ -152,6 +157,13 @@ function publicErrorMessage(url, status, headers, requiresAuth, options, errorDa
     /^\/api\/skill-market\/requests\/[^/]+\/approve\/?$/.test(path) &&
     status === 400 &&
     MARKET_APPROVAL_ERRORS.has(errorData?.detail)
+  )
+    return errorData.detail
+  if (
+    options?.method?.toUpperCase() === 'POST' &&
+    /^\/api\/skill-market\/[^/]+\/install\/?$/.test(path) &&
+    status === 400 &&
+    MARKET_INSTALL_ERRORS.has(errorData?.detail)
   )
     return errorData.detail
   if (status === 400) return '请求参数错误'

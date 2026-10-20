@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.agents.skills import market
 from yuxi.services import mcp_reference_service as references
+from yuxi.workspace import paths as workspace_paths
 from yuxi.storage.postgres.models_business import (
     Base,
     Department,
@@ -43,6 +44,7 @@ async def market_case(monkeypatch, tmp_path):
         )
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(market, "get_skill_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(workspace_paths, "get_user_data_dir", lambda: tmp_path)
 
     originals = {}
     for slug in ("one", "two"):
@@ -154,6 +156,103 @@ async def test_market_cards_hide_private_mcp_across_list_detail_and_rankings(mar
     assert calls["count"] == 3
     release = await db.get(MarketSkillRelease, "release-one")
     assert release.mcp_dependencies == ["visible-mcp", "private-mcp"]
+
+
+@pytest.mark.asyncio
+async def test_market_list_and_detail_report_install_conflict_without_exposing_reserved_skill(
+    market_case, monkeypatch, tmp_path
+):
+    """安装前区分本人的同名技能和数据库保留标识，不暴露隐藏共享技能内容。"""
+    db, viewer, _admin, _calls, _originals, _root = market_case
+    personal_dir = workspace_paths.user_workspace_dir("viewer") / "agents" / "skills" / "one"
+    personal_dir.mkdir(parents=True)
+    (personal_dir / "SKILL.md").write_text(
+        "---\nname: one\ndescription: viewer's private skill\n---\n# One\n", encoding="utf-8"
+    )
+    db.add_all(
+        [
+            Skill(
+                slug=slug,
+                name="Hidden shared secret",
+                description="CLASSIFIED RESERVED SKILL",
+                source_type="personal_share",
+                dir_path=f"shared/{slug}",
+                share_config={"version": 2, "read_scope": None, "edit_scope": None, "manage_scope": None},
+                enabled=False,
+            )
+            for slug in ("one", "two")
+        ]
+    )
+    db.add(
+        MarketSkill(
+            id="listing-clear",
+            slug="clear",
+            owner_uid="author",
+            personal_slug="clear",
+            scope="global",
+            latest_release_id="release-clear",
+        )
+    )
+    db.add(
+        MarketSkillRelease(
+            id="release-clear",
+            market_skill_id="listing-clear",
+            version=1,
+            name="clear",
+            description="clear listing",
+            category="other",
+            dir_path="market_releases/clear",
+            content_hash="hash",
+            tool_dependencies=[],
+            mcp_dependencies=[],
+            skill_dependencies=[],
+            request_id="request-clear",
+        )
+    )
+    await db.commit()
+
+    cards = {card["slug"]: card for card in await market.list_market_skills(db, user=viewer)}
+    assert {slug: card["install_conflict"] for slug, card in cards.items()} == {
+        "one": "personal",
+        "two": "reserved",
+        "clear": None,
+    }
+    assert "CLASSIFIED RESERVED SKILL" not in str(cards)
+    assert (await market.get_market_skill(db, slug="one", user=viewer))["install_conflict"] == "personal"
+    assert (await market.get_market_skill(db, slug="two", user=viewer))["install_conflict"] == "reserved"
+    assert (await market.get_market_skill(db, slug="clear", user=viewer))["install_conflict"] is None
+
+
+@pytest.mark.asyncio
+async def test_market_install_conflicts_return_distinct_actionable_errors(market_case, monkeypatch, tmp_path):
+    """点击安装时与卡片冲突提示保持一致，个人标识优先。"""
+    db, viewer, _admin, _calls, _originals, _root = market_case
+    personal_dir = workspace_paths.user_workspace_dir("viewer") / "agents" / "skills" / "one"
+    personal_dir.mkdir(parents=True)
+    (personal_dir / "SKILL.md").write_text("---\nname: one\ndescription: private\n---\n# One\n", encoding="utf-8")
+    db.add_all(
+        [
+            Skill(
+                slug=slug,
+                name=slug,
+                description="hidden",
+                source_type="personal_share",
+                dir_path=f"shared/{slug}",
+                share_config={},
+                enabled=False,
+            )
+            for slug in ("one", "two")
+        ]
+    )
+    for release_id in ("release-one", "release-two"):
+        release = await db.get(MarketSkillRelease, release_id)
+        release.mcp_dependencies = []
+    await db.commit()
+
+    with pytest.raises(ValueError, match="^已有同名个人技能，无法安装市场版$"):
+        await market.install_market_skill(db, slug="one", user=viewer)
+    with pytest.raises(ValueError, match="^技能标识已被占用，无法安装市场版$"):
+        await market.install_market_skill(db, slug="two", user=viewer)
 
 
 @pytest.mark.asyncio

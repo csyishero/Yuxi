@@ -406,6 +406,7 @@ async def list_market_skills(
         user, query=query, sort=sort, installed_only=installed_only, offset=offset, limit=limit, category=category
     )
     shared_by_source = await _available_shared_slugs_by_source(db, user=user, listings=listings)
+    install_conflicts = await _market_install_conflicts(db, user=user, listings=listings)
     visible_mcps = await get_visible_mcp_reference_slugs(db, user) if listings else None
     cards = []
     for listing in listings:
@@ -417,6 +418,7 @@ async def list_market_skills(
                 user,
                 visible_mcp_slugs=visible_mcps,
                 shared_available_slug=shared_by_source.get((listing.owner_uid, listing.personal_slug)),
+                install_conflict=install_conflicts[listing.slug],
             )
         )
     return cards
@@ -563,9 +565,18 @@ async def list_market_rankings(
 
     repo = MarketSkillRepository(db)
     ranked = await repo.ranked_visible(user, metric=metric, department_id=department_id, offset=offset, limit=limit)
+    install_conflicts = await _market_install_conflicts(db, user=user, listings=[item for item, _, _ in ranked])
     visible_mcps = await get_visible_mcp_reference_slugs(db, user) if ranked else None
     return [
-        await _market_card(db, repo, listing, user, visible_mcp_slugs=visible_mcps, metrics=(install_count, like_count))
+        await _market_card(
+            db,
+            repo,
+            listing,
+            user,
+            visible_mcp_slugs=visible_mcps,
+            metrics=(install_count, like_count),
+            install_conflict=install_conflicts[listing.slug],
+        )
         for listing, install_count, like_count in ranked
     ]
 
@@ -578,6 +589,7 @@ async def get_market_skill(db: AsyncSession, *, slug: str, user: User) -> dict:
         raise ValueError("市场 Skill 不存在")
     visible_mcps = await get_visible_mcp_reference_slugs(db, user)
     shared_by_source = await _available_shared_slugs_by_source(db, user=user, listings=[listing])
+    install_conflicts = await _market_install_conflicts(db, user=user, listings=[listing])
     card = await _market_card(
         db,
         repo,
@@ -585,6 +597,7 @@ async def get_market_skill(db: AsyncSession, *, slug: str, user: User) -> dict:
         user,
         visible_mcp_slugs=visible_mcps,
         shared_available_slug=shared_by_source.get((listing.owner_uid, listing.personal_slug)),
+        install_conflict=install_conflicts[listing.slug],
     )
     card["releases"] = [
         {"version": release.version, "created_at": format_utc_datetime(release.created_at)}
@@ -633,6 +646,26 @@ async def _available_shared_slugs_by_source(
     return {source: skill.slug for source, skill in latest.items()}
 
 
+async def _market_install_conflicts(
+    db: AsyncSession, *, user: User, listings: list[MarketSkill]
+) -> dict[str, str | None]:
+    """按当前市场页标识区分个人同名和数据库保留标识，不读取共享技能内容。"""
+    slugs = {item.slug for item in listings}
+    if not slugs:
+        return {}
+    reserved = set((await db.scalars(select(Skill.slug).where(Skill.slug.in_(slugs)))).all())
+
+    async def personal_exists(slug: str) -> bool:
+        try:
+            await get_personal_skill(str(user.uid), slug)
+        except ValueError:
+            return False
+        return True
+
+    personal = dict(zip(slugs, await asyncio.gather(*(personal_exists(slug) for slug in slugs)), strict=True))
+    return {slug: "personal" if personal[slug] else "reserved" if slug in reserved else None for slug in slugs}
+
+
 async def _market_card(
     db: AsyncSession,
     repo: MarketSkillRepository,
@@ -642,6 +675,7 @@ async def _market_card(
     visible_mcp_slugs: set[str] | None,
     metrics: tuple[int, int] | None = None,
     shared_available_slug: str | None = None,
+    install_conflict: str | None,
 ) -> dict:
     """组合当前版本、作者、指标和用户安装状态。"""
     release = await repo.release(listing.latest_release_id)
@@ -658,6 +692,7 @@ async def _market_card(
         "owner_name": owner or listing.owner_uid,
         "own_personal_slug": listing.personal_slug if listing.owner_uid == str(user.uid) else None,
         "shared_available_slug": shared_available_slug,
+        "install_conflict": install_conflict,
         "scope": listing.scope,
         "department_id": listing.department_id,
         "latest_version": release.version,
@@ -706,10 +741,10 @@ async def install_market_skill(db: AsyncSession, *, slug: str, user: User, upgra
             check_scope=False,
         )
     if current is None:
-        if await SkillRepository(db).get_by_slug(slug) is not None or any(
-            personal.slug == slug for personal in await list_personal_skills(str(user.uid))
-        ):
-            raise ValueError("已有同名 Skill，无法安装")
+        if any(personal.slug == slug for personal in await list_personal_skills(str(user.uid))):
+            raise ValueError("已有同名个人技能，无法安装市场版")
+        if await SkillRepository(db).get_by_slug(slug) is not None:
+            raise ValueError("技能标识已被占用，无法安装市场版")
         current = MarketSkillInstall(
             uid=str(user.uid),
             market_skill_id=listing.id,

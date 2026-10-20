@@ -783,6 +783,108 @@ test('本人原件位于后续页时，市场操作定向核验并打开个人�
   })
 })
 
+test('同名个人技能即使位于后续页，市场卡也不再误导用户安装', async () => {
+  const extraPersonal = Array.from({ length: 30 }, (_, index) => ({
+    slug: index === 29 ? 'same-slug' : `personal-${index}`,
+    name: `个人技能 ${index}`,
+    source_scope: 'personal', source_type: 'upload', owner_uid: 'alice', category: 'other'
+  }))
+  const extraMarket = [{
+    slug: 'same-slug', name: '他人发布的同名市场技能', owner_uid: 'bob', owner_name: 'Bob',
+    latest_version: 1, install_count: 0, likes_count: 0, category: 'other', scope: 'global',
+    install_conflict: 'personal'
+  }]
+  await withHome({ extraPersonal, extraMarket }, async ({ host, requested, router, tick }) => {
+    findAll(host, (item) => item.props.role === 'tab' && visibleText(item) === '技能市场')[0].props.onClick()
+    await tick()
+    const card = findAll(host, (item) => item.props.class === 'market-card' && visibleText(item).includes('他人发布的同名市场技能'))[0]
+    assert.match(visibleText(card), /已有同名个人技能/)
+    const action = findAll(card, (item) => item.type === 'a-button' && visibleText(item) === '查看已有技能')[0]
+    assert.ok(action)
+    action.props.onClick()
+    await tick()
+    assert.equal(router.currentRoute.value.fullPath, '/extensions/skill/same-slug?scope=personal')
+    assert.equal(requested.some((request) => request.path === '/api/skill-market/same-slug/install'), false)
+  })
+})
+
+test('技能标识被占用时市场卡显示原因且不提供安装操作', async () => {
+  const extraMarket = [{
+    slug: 'reserved-market', name: '标识冲突的市场技能', owner_uid: 'bob', owner_name: 'Bob',
+    latest_version: 1, install_count: 0, likes_count: 0, category: 'other', scope: 'global',
+    install_conflict: 'reserved'
+  }]
+  await withHome({ extraMarket }, async ({ host, requested, tick }) => {
+    findAll(host, (item) => item.props.role === 'tab' && visibleText(item) === '技能市场')[0].props.onClick()
+    await tick()
+    const card = findAll(host, (item) => item.props.class === 'market-card' && visibleText(item).includes('标识冲突的市场技能'))[0]
+    assert.match(visibleText(card), /技能标识已被占用/)
+    assert.equal(findAll(card, (item) => item.type === 'a-button' && visibleText(item) === '安装').length, 0)
+    assert.equal(requested.some((request) => request.path === '/api/skill-market/reserved-market/install'), false)
+  })
+})
+
+test('作者原件可用时即使市场标识被占用仍能查看原件', async () => {
+  const extraMarket = [{
+    slug: 'reserved-market', name: '本人发布的市场技能', owner_uid: 'alice', owner_name: 'Alice',
+    own_personal_slug: 'my-skill', latest_version: 1, install_count: 0, likes_count: 0,
+    category: 'other', scope: 'global', install_conflict: 'reserved'
+  }]
+  await withHome({ extraMarket }, async ({ host, requested, router, tick }) => {
+    findAll(host, (item) => item.props.role === 'tab' && visibleText(item) === '技能市场')[0].props.onClick()
+    await tick()
+    const card = findAll(host, (item) => item.props.class === 'market-card' && visibleText(item).includes('本人发布的市场技能'))[0]
+    const action = findAll(card, (item) => item.type === 'a-button' && visibleText(item) === '查看个人技能')[0]
+    assert.ok(action)
+    action.props.onClick()
+    await tick()
+    assert.equal(router.currentRoute.value.fullPath, '/extensions/skill/my-skill?scope=personal')
+    assert.equal(requested.some((request) => request.path === '/api/skill-market/reserved-market/install'), false)
+  })
+})
+
+test('作者另有与市场标识同名的个人技能时优先打开同名技能', async () => {
+  const extraPersonal = [{ slug: 'published-2', name: '实际同名个人技能', source_scope: 'personal', source_type: 'upload', owner_uid: 'alice', category: 'other' }]
+  const extraMarket = [{
+    slug: 'published-2', name: '本人发布的市场技能', owner_uid: 'alice', owner_name: 'Alice',
+    own_personal_slug: 'my-skill', latest_version: 1, install_count: 0, likes_count: 0,
+    category: 'other', scope: 'global', install_conflict: 'personal'
+  }]
+  await withHome({ extraPersonal, extraMarket }, async ({ host, requested, router, tick }) => {
+    findAll(host, (item) => item.props.role === 'tab' && visibleText(item) === '技能市场')[0].props.onClick()
+    await tick()
+    const card = findAll(host, (item) => item.props.class === 'market-card' && visibleText(item).includes('本人发布的市场技能'))[0]
+    assert.match(visibleText(card), /已有同名个人技能/)
+    const action = findAll(card, (item) => item.type === 'a-button' && visibleText(item) === '查看已有技能')[0]
+    assert.ok(action)
+    action.props.onClick()
+    await tick()
+    assert.equal(router.currentRoute.value.fullPath, '/extensions/skill/published-2?scope=personal')
+    assert.equal(requested.some((request) => request.path === '/api/skill-market/published-2/install'), false)
+  })
+})
+
+test('作者原件已删除时仍提前显示市场标识占用', async () => {
+  const extraMarket = [{
+    slug: 'reserved-market', name: '原件已删除的市场技能', owner_uid: 'alice', owner_name: 'Alice',
+    own_personal_slug: 'deleted-source', latest_version: 1, install_count: 0, likes_count: 0,
+    category: 'other', scope: 'global', install_conflict: 'reserved'
+  }]
+  await withHome({ extraMarket }, async ({ host, requested, tick }) => {
+    findAll(host, (item) => item.props.role === 'tab' && visibleText(item) === '技能市场')[0].props.onClick()
+    await tick()
+    const card = findAll(host, (item) => item.props.class === 'market-card' && visibleText(item).includes('原件已删除的市场技能'))[0]
+    assert.match(visibleText(card), /技能标识已被占用/)
+    assert.doesNotMatch(visibleText(card), /个人技能已可用/)
+    const action = findAll(card, (item) => item.type === 'a-button' && visibleText(item) === '查看个人技能')[0]
+    assert.ok(action)
+    action.props.onClick()
+    await tick()
+    assert.equal(requested.some((request) => request.path === '/api/skill-market/reserved-market/install'), false)
+    assert.equal(findAll(card, (item) => item.type === 'a-button' && visibleText(item) === '查看个人技能').length, 0)
+  })
+})
+
 test('搜索个人技能时由服务器查询后续页，描述命中仍显示结果', async () => {
   const extraPersonal = Array.from({ length: 30 }, (_, index) => ({
     slug: `personal-${index}`, name: `个人技能 ${index}`, source_scope: 'personal', source_type: 'upload', owner_uid: 'alice', category: 'other',
