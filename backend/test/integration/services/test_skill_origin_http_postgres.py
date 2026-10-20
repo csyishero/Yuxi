@@ -195,6 +195,59 @@ async def test_shared_market_origin_is_visible_only_with_permission_and_owner_ca
             assert cards[shared_slug]["related_market_slug"] == market_slug
             assert cards[second_shared_slug]["related_market_slug"] == market_slug
             assert "related_market_slug" not in cards[other_slug]
+            catalog_pages = []
+            for offset in (0, 1):
+                catalog = await client.get(
+                    "/api/skills",
+                    params={
+                        "source": "shared",
+                        "shared_kind": "shared",
+                        "catalog_all": True,
+                        "limit": 1,
+                        "offset": offset,
+                    },
+                )
+                assert catalog.status_code == 200, catalog.text
+                assert catalog.json()["total"] == 2
+                assert len(catalog.json()["data"]) == 1
+                catalog_pages.extend(item["slug"] for item in catalog.json()["data"])
+            assert set(catalog_pages) == {second_shared_slug, other_slug}
+
+            ordinary_shared = await client.get(
+                "/api/skills", params={"source": "shared", "shared_kind": "shared", "limit": 10}
+            )
+            assert {item["slug"] for item in ordinary_shared.json()["data"]} == {
+                shared_slug,
+                second_shared_slug,
+                other_slug,
+            }
+            assert ordinary_shared.json()["total"] == 3
+            async with sessions() as db:
+                first_shared = await db.scalar(select(Skill).where(Skill.slug == shared_slug))
+                persisted_request = await db.get(SkillShareRequest, shared_request.id)
+                original_description = first_shared.description
+                first_shared.description = "only-older-version"
+                persisted_request.description = "only-older-version"
+                await db.commit()
+            searched_catalog = await client.get(
+                "/api/skills",
+                params={
+                    "source": "shared",
+                    "shared_kind": "shared",
+                    "catalog_all": True,
+                    "search": "only-older-version",
+                    "limit": 1,
+                },
+            )
+            assert searched_catalog.status_code == 200, searched_catalog.text
+            assert searched_catalog.json()["total"] == 1
+            assert [item["slug"] for item in searched_catalog.json()["data"]] == [shared_slug]
+            async with sessions() as db:
+                first_shared = await db.scalar(select(Skill).where(Skill.slug == shared_slug))
+                persisted_request = await db.get(SkillShareRequest, shared_request.id)
+                first_shared.description = original_description
+                persisted_request.description = original_description
+                await db.commit()
             visible_listing = (await client.get("/api/skill-market?limit=1")).json()["data"][0]
             assert visible_listing["slug"] == market_slug
             assert visible_listing["own_personal_slug"] is None
@@ -213,6 +266,17 @@ async def test_shared_market_origin_is_visible_only_with_permission_and_owner_ca
             stale = {item["slug"]: item for item in (await client.get("/api/skills")).json()["data"]}
             assert "related_market_slug" not in stale[shared_slug]
             assert stale[second_shared_slug]["related_market_slug"] == market_slug
+            stale_catalog = await client.get(
+                "/api/skills",
+                params={"source": "shared", "shared_kind": "shared", "catalog_all": True, "limit": 10},
+            )
+            assert stale_catalog.status_code == 200, stale_catalog.text
+            assert stale_catalog.json()["total"] == 3
+            assert {item["slug"] for item in stale_catalog.json()["data"]} == {
+                shared_slug,
+                second_shared_slug,
+                other_slug,
+            }
             async with sessions() as db:
                 first_shared = await db.scalar(select(Skill).where(Skill.slug == shared_slug))
                 first_shared.created_at = original_created_at
@@ -224,6 +288,17 @@ async def test_shared_market_origin_is_visible_only_with_permission_and_owner_ca
             assert shared_slug in hidden_cards
             assert "related_market_slug" not in hidden_cards[shared_slug]
             assert "related_market_slug" not in hidden_cards[second_shared_slug]
+            hidden_catalog = await client.get(
+                "/api/skills",
+                params={"source": "shared", "shared_kind": "shared", "catalog_all": True, "limit": 10},
+            )
+            assert hidden_catalog.status_code == 200, hidden_catalog.text
+            assert hidden_catalog.json()["total"] == 3
+            assert {item["slug"] for item in hidden_catalog.json()["data"]} == {
+                shared_slug,
+                second_shared_slug,
+                other_slug,
+            }
 
             current = users["root"]
             root_cards = {item["slug"]: item for item in (await client.get("/api/skills")).json()["data"]}
@@ -242,6 +317,19 @@ async def test_shared_market_origin_is_visible_only_with_permission_and_owner_ca
             shutil.rmtree(personal_root / "author" / "local-pptx")
             installed = await client.post(f"/api/skill-market/{market_slug}/install")
             assert installed.status_code == 200, installed.text
+            unshadowed_install = await client.get(
+                "/api/skill-market/-/installs", params={"catalog_all": True, "limit": 1}
+            )
+            assert unshadowed_install.status_code == 200, unshadowed_install.text
+            assert unshadowed_install.json()["total"] == 1
+            assert [item["slug"] for item in unshadowed_install.json()["data"]] == [market_slug]
+            installed_catalog = await client.get(
+                "/api/skills",
+                params={"source": "shared", "shared_kind": "shared", "catalog_all": True, "limit": 1},
+            )
+            assert installed_catalog.status_code == 200, installed_catalog.text
+            assert installed_catalog.json()["total"] == 1
+            assert [item["slug"] for item in installed_catalog.json()["data"]] == [other_slug]
             async with sessions() as db:
                 installs = (await db.scalars(select(MarketSkillInstall))).all()
                 assert len(installs) == 1 and installs[0].uid == "author"
@@ -254,6 +342,20 @@ async def test_shared_market_origin_is_visible_only_with_permission_and_owner_ca
                 "---\nname: local-pptx\ndescription: 本地生成演示文稿\n---\n# Skill\n", encoding="utf-8"
             )
             assert (await client.post(f"/api/skill-market/{market_slug}/install")).status_code == 200
+            folded_install = await client.get("/api/skill-market/-/installs", params={"catalog_all": True, "limit": 1})
+            assert folded_install.status_code == 200, folded_install.text
+            assert folded_install.json()["total"] == 0
+            assert folded_install.json()["data"] == []
+            ordinary_install = await client.get("/api/skill-market/-/installs", params={"limit": 1})
+            assert ordinary_install.status_code == 200, ordinary_install.text
+            assert ordinary_install.json()["total"] == 1
+            assert [item["slug"] for item in ordinary_install.json()["data"]] == [market_slug]
+            market_only_search = await client.get(
+                "/api/skill-market/-/installs",
+                params={"catalog_all": True, "limit": 1, "search": market_slug},
+            )
+            assert market_only_search.status_code == 200, market_only_search.text
+            assert market_only_search.json()["total"] == 1
             async with sessions() as db:
                 default_slugs = await select_default_skill_slugs(db, current)
                 assert shared_slug in default_slugs  # 与个人原件同 slug，现由个人原件生效
@@ -283,6 +385,92 @@ async def test_shared_market_origin_is_visible_only_with_permission_and_owner_ca
             current = users["credit-viewer"]
             ambiguous = {item["slug"]: item for item in (await client.get("/api/skills")).json()["data"]}
             assert "related_market_slug" not in ambiguous[shared_slug]
+            ambiguous_catalog = await client.get(
+                "/api/skills",
+                params={"source": "shared", "shared_kind": "shared", "catalog_all": True, "limit": 10},
+            )
+            assert ambiguous_catalog.status_code == 200, ambiguous_catalog.text
+            assert ambiguous_catalog.json()["total"] == 3
+            assert {item["slug"] for item in ambiguous_catalog.json()["data"]} == {
+                shared_slug,
+                second_shared_slug,
+                other_slug,
+            }
+
+            unrelated_market_id = str(uuid.uuid4())
+            unrelated_release_id = str(uuid.uuid4())
+            async with sessions() as db:
+                db.add(
+                    MarketSkill(
+                        id=unrelated_market_id,
+                        slug=other_slug,
+                        owner_uid="credit-viewer",
+                        personal_slug="deleted-source",
+                        scope="global",
+                        latest_release_id=unrelated_release_id,
+                    )
+                )
+                db.add(
+                    MarketSkillRelease(
+                        id=unrelated_release_id,
+                        market_skill_id=unrelated_market_id,
+                        version=1,
+                        name=other_slug,
+                        description="unrelated listing",
+                        dir_path="market_releases/unrelated",
+                        content_hash="unrelated",
+                        request_id=str(uuid.uuid4()),
+                    )
+                )
+                db.add(
+                    MarketSkillInstall(
+                        uid="credit-viewer", market_skill_id=unrelated_market_id, release_id=unrelated_release_id
+                    )
+                )
+                await db.commit()
+            same_slug_catalog = await client.get(
+                "/api/skills",
+                params={"source": "shared", "shared_kind": "shared", "catalog_all": True, "limit": 10},
+            )
+            assert same_slug_catalog.status_code == 200, same_slug_catalog.text
+            assert same_slug_catalog.json()["total"] == 2
+            assert {item["slug"] for item in same_slug_catalog.json()["data"]} == {
+                shared_slug,
+                second_shared_slug,
+            }
+
+            async with sessions() as db:
+                db.add(
+                    Skill(
+                        slug=market_slug,
+                        name=market_slug,
+                        description="builtin catalog collision",
+                        source_type="builtin",
+                        dir_path=f"shared/{market_slug}",
+                        share_config={
+                            "version": 2,
+                            "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []},
+                            "manage_scope": None,
+                        },
+                        enabled=True,
+                        created_by="root",
+                    )
+                )
+                await db.commit()
+            current = users["author"]
+            ordinary_builtin = await client.get(
+                "/api/skills", params={"source": "shared", "shared_kind": "builtin", "limit": 1}
+            )
+            assert ordinary_builtin.status_code == 200, ordinary_builtin.text
+            assert ordinary_builtin.json()["total"] == 1
+            assert [item["slug"] for item in ordinary_builtin.json()["data"]] == [market_slug]
+            all_builtin = await client.get(
+                "/api/skills",
+                params={"source": "shared", "shared_kind": "builtin", "catalog_all": True, "limit": 1},
+            )
+            assert all_builtin.status_code == 200, all_builtin.text
+            assert all_builtin.json()["total"] == 0
+            assert all_builtin.json()["data"] == []
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:

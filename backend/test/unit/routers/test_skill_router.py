@@ -152,6 +152,20 @@ def test_list_skill_cards_route_scans_personal_source(monkeypatch):
     assert captured == {"uid": "user"}
 
 
+def test_skill_summary_route_returns_exact_counts_for_authenticated_user(monkeypatch):
+    async def fake_summary(_db, user, *, search):
+        assert user.uid == "user"
+        assert search == "年度"
+        return {"created_total": 2, "all_total": 5}
+
+    monkeypatch.setattr("server.routers.skill_router.personal_space_skill_counts", fake_summary)
+
+    response = TestClient(_build_app(role="user")).get("/api/skills/summary?search=年度")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"success": True, "data": {"created_total": 2, "all_total": 5}}
+
+
 def test_legacy_skill_cards_without_limit_keep_all_records(monkeypatch):
     """旧客户端不传 limit 时仍能取到超过一页的技能。"""
     all_items = [_skill(slug=f"legacy-{index:02d}") for index in range(40)]
@@ -298,6 +312,50 @@ def test_shared_kind_reaches_shared_skill_page(monkeypatch):
     assert response.status_code == 200
     assert [item["slug"] for item in response.json()["data"]] == ["builtin-example"]
     assert response.json()["total"] == 1
+
+
+def test_catalog_all_only_selects_paginated_shared_catalog(monkeypatch):
+    """全部视图标记只进入共享目录的专用分页模式。"""
+
+    async def fake_page(_db, _user, **kwargs):
+        assert kwargs["catalog_all"] is True
+        assert kwargs["shared_kind"] == "shared"
+        return [_skill("shared-one")], 1, False
+
+    monkeypatch.setattr("server.routers.skill_router.page_skill_cards_for_user", fake_page)
+    client = TestClient(_build_app(role="user"))
+
+    response = client.get("/api/skills?source=shared&shared_kind=shared&catalog_all=true&limit=1")
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 1
+    assert [item["slug"] for item in response.json()["data"]] == ["shared-one"]
+
+    for query in (
+        "source=all&catalog_all=true&limit=1",
+        "source=shared&shared_kind=shared&catalog_all=true",
+    ):
+        assert client.get(f"/api/skills?{query}").status_code == 422
+
+
+def test_catalog_all_accepts_paginated_builtin_without_changing_ordinary_builtin(monkeypatch):
+    """全部视图的内置目录启用遮盖过滤，普通内置页仍保持原参数。"""
+    calls = []
+
+    async def fake_page(_db, _user, **kwargs):
+        calls.append(kwargs)
+        return [_skill("builtin-example", source_type="builtin")], 1, False
+
+    monkeypatch.setattr("server.routers.skill_router.page_skill_cards_for_user", fake_page)
+    client = TestClient(_build_app(role="user"))
+
+    catalog = client.get("/api/skills?source=shared&shared_kind=builtin&catalog_all=true&limit=1")
+    ordinary = client.get("/api/skills?source=shared&shared_kind=builtin&limit=1")
+
+    assert catalog.status_code == 200, catalog.text
+    assert ordinary.status_code == 200, ordinary.text
+    assert calls[0]["catalog_all"] is True
+    assert calls[0]["shared_kind"] == "builtin"
+    assert "catalog_all" not in calls[1]
 
 
 def test_unpaged_shared_kind_hides_retired_and_disabled_but_governance_keeps_them(monkeypatch):

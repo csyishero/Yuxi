@@ -240,8 +240,17 @@ class MarketSkillRepository:
         """列出用户所有安装。"""
         return list((await self.db.scalars(select(MarketSkillInstall).where(MarketSkillInstall.uid == uid))).all())
 
-    async def installed_releases_for_user(self, uid: str) -> list[tuple[MarketSkill, MarketSkillRelease]]:
-        """只读取本人安装对应的市场身份和不可变版本。"""
+    async def installed_personal_slugs_for_user(self, uid: str) -> set[str]:
+        """读取本人已安装市场条目对应的个人原件标识。"""
+        rows = await self.db.scalars(
+            select(MarketSkill.personal_slug)
+            .join(MarketSkillInstall, MarketSkillInstall.market_skill_id == MarketSkill.id)
+            .where(MarketSkillInstall.uid == uid, MarketSkill.owner_uid == uid)
+        )
+        return set(rows.all())
+
+    def _installed_releases_statement(self, uid: str, *, user: User | None = None, search: str = ""):
+        """复用安装列表与摘要的搜索及可见性条件。"""
         statement = (
             select(MarketSkill, MarketSkillRelease)
             .select_from(MarketSkillInstall)
@@ -252,7 +261,31 @@ class MarketSkillRepository:
                 & (MarketSkillRelease.market_skill_id == MarketSkill.id),
             )
             .where(MarketSkillInstall.uid == uid)
-            .order_by(MarketSkillInstall.updated_at.desc(), MarketSkill.id.desc())
+        )
+        if search.strip():
+            if user is None:
+                raise ValueError("搜索安装技能需要当前用户")
+            needle = search.strip()
+            visible_release = and_(
+                MarketSkill.latest_release_id.is_not(None),
+                self._visible_filter(user),
+                or_(
+                    MarketSkillRelease.name.icontains(needle, autoescape=True),
+                    MarketSkillRelease.description.icontains(needle, autoescape=True),
+                ),
+            )
+            if user.department_id is None:
+                statement = statement.where(MarketSkill.slug.icontains(needle, autoescape=True))
+            else:
+                statement = statement.where(or_(MarketSkill.slug.icontains(needle, autoescape=True), visible_release))
+        return statement
+
+    async def installed_releases_for_user(
+        self, uid: str, *, user: User | None = None, search: str = ""
+    ) -> list[tuple[MarketSkill, MarketSkillRelease]]:
+        """只读取本人安装对应的市场身份和不可变版本。"""
+        statement = self._installed_releases_statement(uid, user=user, search=search).order_by(
+            MarketSkillInstall.updated_at.desc(), MarketSkill.id.desc()
         )
         return [(listing, release) for listing, release in (await self.db.execute(statement)).all()]
 
@@ -280,40 +313,24 @@ class MarketSkillRepository:
         return [(listing, release) for listing, release in (await self.db.execute(statement)).all()]
 
     async def page_installed_releases_for_user(
-        self, uid: str, *, user: User, offset: int, limit: int, search: str = ""
+        self,
+        uid: str,
+        *,
+        user: User,
+        offset: int,
+        limit: int,
+        search: str = "",
+        exclude_own_personal_slugs: set[str] | None = None,
     ) -> tuple[list[tuple[MarketSkill, MarketSkillRelease]], int]:
         """只取本人当前页的安装版本，并计算精确总数。"""
-        joined = (
-            select(MarketSkillInstall.uid)
-            .select_from(MarketSkillInstall)
-            .join(MarketSkill, MarketSkill.id == MarketSkillInstall.market_skill_id)
-            .join(
-                MarketSkillRelease,
-                (MarketSkillRelease.id == MarketSkillInstall.release_id)
-                & (MarketSkillRelease.market_skill_id == MarketSkill.id),
+        joined = self._installed_releases_statement(uid, user=user, search=search)
+        if exclude_own_personal_slugs:
+            joined = joined.where(
+                or_(MarketSkill.owner_uid != uid, MarketSkill.personal_slug.notin_(exclude_own_personal_slugs))
             )
-            .where(MarketSkillInstall.uid == uid)
-        )
-        if search.strip():
-            needle = search.strip()
-            visible_release = and_(
-                MarketSkill.latest_release_id.is_not(None),
-                self._visible_filter(user),
-                or_(
-                    MarketSkillRelease.name.icontains(needle, autoescape=True),
-                    MarketSkillRelease.description.icontains(needle, autoescape=True),
-                ),
-            )
-            if user.department_id is None:
-                joined = joined.where(MarketSkill.slug.icontains(needle, autoescape=True))
-            else:
-                joined = joined.where(or_(MarketSkill.slug.icontains(needle, autoescape=True), visible_release))
         total = await self.db.scalar(joined.with_only_columns(func.count()))
         statement = (
-            joined.with_only_columns(MarketSkill, MarketSkillRelease)
-            .order_by(MarketSkillInstall.updated_at.desc(), MarketSkill.id.desc())
-            .offset(offset)
-            .limit(limit)
+            joined.order_by(MarketSkillInstall.updated_at.desc(), MarketSkill.id.desc()).offset(offset).limit(limit)
         )
         rows = await self.db.execute(statement)
         return [(listing, release) for listing, release in rows.all()], int(total or 0)

@@ -176,3 +176,81 @@ async def test_governance_filter_excludes_disabled_builtin_for_demoted_creator()
     for statement in (session.count_statement, session.page_statement):
         sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
         assert "skills.source_type != 'builtin' OR skills.enabled IS true" in sql
+
+
+@pytest.mark.asyncio
+async def test_catalog_all_filters_and_ranks_origins_before_count_and_offset():
+    """全部共享目录的授权、搜索、原件与安装遮盖均在数据库分页前执行。"""
+    session = _PageSession()
+    user = User(uid="member", username="member", password_hash="x", role="user", department_id=7)
+
+    await SkillRepository(session).page_visible(
+        user,
+        limit=1,
+        offset=1,
+        search="budget",
+        shared_kind="shared",
+        catalog_all=True,
+        shadowed_personal_slugs={"mine"},
+        installed_market_slugs={"installed"},
+    )
+
+    count = session.count_statement.compile(dialect=postgresql.dialect())
+    page = session.page_statement.compile(dialect=postgresql.dialect())
+    count_sql = str(count)
+    page_sql = str(page)
+    for sql in (count_sql, page_sql):
+        assert "row_number() OVER" in sql
+        assert "catalog_available.id DESC" in sql
+        assert "skill_share_requests" in sql
+        assert "market_skills" in sql
+        assert "coalesce(catalog_filtered.related_market_slug, catalog_filtered.slug) NOT IN" in sql
+        assert "skills.slug NOT IN" in sql
+        assert "skills.enabled IS true" in sql
+        assert "skills.slug ILIKE" in sql
+    assert "LIMIT" in page_sql and "OFFSET" in page_sql
+    assert "mine" in count.params.values() or ["mine"] in count.params.values()
+
+
+@pytest.mark.asyncio
+async def test_catalog_all_builtin_excludes_personal_and_installed_slugs_before_count_and_offset():
+    """内置技能的全部视图在数据库计数与分页前去掉个人原件和可见安装遮盖。"""
+    session = _PageSession()
+    user = User(uid="member", username="member", password_hash="x", role="user", department_id=7)
+
+    await SkillRepository(session).page_visible(
+        user,
+        limit=1,
+        offset=1,
+        shared_kind="builtin",
+        catalog_all=True,
+        shadowed_personal_slugs={"personal-builtin"},
+        installed_market_slugs={"market-builtin"},
+    )
+
+    count = session.count_statement.compile(dialect=postgresql.dialect())
+    page = session.page_statement.compile(dialect=postgresql.dialect())
+    for compiled in (count, page):
+        sql = str(compiled)
+        assert "skills.source_type =" in sql
+        assert "skills.slug NOT IN" in sql
+        assert "skills.enabled IS true" in sql
+        assert "row_number()" not in sql
+        assert any("personal-builtin" in value for value in compiled.params.values() if isinstance(value, list))
+        assert any("market-builtin" in value for value in compiled.params.values() if isinstance(value, list))
+    assert "LIMIT" in str(page) and "OFFSET" in str(page)
+
+
+@pytest.mark.asyncio
+async def test_matching_shared_slugs_only_queries_candidate_names_and_search():
+    """个人文件定点校验只从可能同名的共享技能取候选。"""
+    session = _PageSession()
+
+    await SkillRepository(session).matching_shared_slugs({"one", "two"}, search="budget")
+
+    compiled = session.page_statement.compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+    assert "skills.slug IN" in sql
+    assert "skills.source_type !=" in sql
+    assert "skills.enabled IS true" in sql
+    assert "skills.description ILIKE" in sql

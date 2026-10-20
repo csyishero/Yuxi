@@ -65,6 +65,7 @@ from yuxi.agents.skills.sharing import (
     submit_skill_share_request,
 )
 from yuxi.agents.skills.market import list_personal_publication_records, personal_market_install_summaries
+from yuxi.services.skill_catalog_summary_service import personal_space_skill_counts
 from yuxi.permissions import (
     SKILL_PERMISSION_POLICY,
     ResourcePermission,
@@ -193,6 +194,7 @@ def _serialize_skill_for_user(item, user: User, visible_mcp_slugs: set[str] | No
 async def list_skill_cards_route(
     source: Literal["all", "shared", "personal"] = Query("all"),
     shared_kind: Literal["shared", "builtin"] | None = Query(None),
+    catalog_all: bool = Query(False),
     exclude_retired_builtin: bool = Query(False),
     limit: int | None = Query(None, ge=1, le=100),
     offset: int = Query(0, ge=0),
@@ -206,6 +208,8 @@ async def list_skill_cards_route(
         raise HTTPException(status_code=422, detail="shared_kind 仅适用于共享 Skill 来源")
     if exclude_retired_builtin and source != "shared":
         raise HTTPException(status_code=422, detail="exclude_retired_builtin 仅适用于共享 Skill 来源")
+    if catalog_all and (source != "shared" or shared_kind is None or limit is None):
+        raise HTTPException(status_code=422, detail="catalog_all 仅适用于分页的共享 Skill 目录")
     try:
         if limit is None:
             items = await list_skill_cards_for_user(
@@ -248,6 +252,7 @@ async def list_skill_cards_route(
                 audience_department_id=audience_department_id,
                 **({"shared_kind": shared_kind} if shared_kind is not None else {}),
                 **({"exclude_retired_builtin": True} if exclude_retired_builtin else {}),
+                **({"catalog_all": True} if catalog_all else {}),
             )
         visible_mcp_slugs = (
             await get_visible_mcp_reference_slugs(db, current_user)
@@ -277,6 +282,16 @@ async def list_skill_cards_route(
     except Exception as e:
         logger.error(f"Failed to list Skill cards: {e}")
         raise HTTPException(status_code=500, detail="获取 Skill 列表失败")
+
+
+@user_skills.get("/summary")
+async def personal_skill_summary_route(
+    search: str = Query("", max_length=100),
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """返回个人空间各来源折叠后的精确总数。"""
+    return {"success": True, "data": await personal_space_skill_counts(db, current_user, search=search)}
 
 
 @user_skills.get("/personal-catalog")

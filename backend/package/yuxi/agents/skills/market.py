@@ -451,9 +451,9 @@ async def page_market_skills(
     return cards, total
 
 
-async def list_user_market_installs(db: AsyncSession, *, user: User) -> list[dict]:
+async def list_user_market_installs(db: AsyncSession, *, user: User, search: str = "") -> list[dict]:
     """列出本人已安装版本的安全摘要，包括现时可见状态。"""
-    items = await MarketSkillRepository(db).installed_releases_for_user(str(user.uid))
+    items = await MarketSkillRepository(db).installed_releases_for_user(str(user.uid), user=user, search=search)
     return _market_install_summaries(items, user=user)
 
 
@@ -470,11 +470,25 @@ async def personal_market_install_summaries(
 
 
 async def page_user_market_installs(
-    db: AsyncSession, *, user: User, offset: int, limit: int, search: str = ""
+    db: AsyncSession, *, user: User, offset: int, limit: int, search: str = "", catalog_all: bool = False
 ) -> tuple[list[dict], int]:
     """按页返回本人已安装版本，并保持隐藏条目的安全摘要。"""
+    catalog_filters = {}
+    if catalog_all:
+        own_slugs = await MarketSkillRepository(db).installed_personal_slugs_for_user(str(user.uid))
+        needle = search.strip().casefold()
+        matching_originals = set()
+        for slug in own_slugs:
+            try:
+                personal = await get_personal_skill(str(user.uid), slug)
+            except ValueError:
+                continue
+            if not needle or needle in f"{personal.slug} {personal.name} {personal.description}".casefold():
+                matching_originals.add(slug)
+        catalog_filters = {"exclude_own_personal_slugs": matching_originals}
+
     items, total = await MarketSkillRepository(db).page_installed_releases_for_user(
-        str(user.uid), user=user, offset=offset, limit=limit, search=search
+        str(user.uid), user=user, offset=offset, limit=limit, search=search, **catalog_filters
     )
     cards = _market_install_summaries(items, user=user)
     for card in cards:

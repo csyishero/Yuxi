@@ -7,6 +7,7 @@
 
     <section v-if="activeView === 'personal'" id="skill-personal-view" role="tabpanel" class="skill-view-content">
       <a-alert v-if="personalError" type="error" :message="personalError" show-icon class="market-error"><template #action><a-button size="small" @click="refresh">重试</a-button></template></a-alert>
+      <a-alert v-if="skillSummaryError && !managementOpen" type="warning" message="技能数量暂不可用" show-icon class="market-error"><template #action><a-button size="small" @click="fetchSkillSummary">重试统计</a-button></template></a-alert>
       <template v-if="managementOpen">
         <div class="skill-page-heading">
           <div class="skill-page-title"><div class="skill-page-icon"><Blocks :size="25" /></div><div><h2>技能治理</h2><p>管理共享技能、人员技能与批量操作。</p></div></div>
@@ -25,7 +26,7 @@
           </div>
         </div>
         <div v-if="!personalError && !legacyLoading && !installedLoading" class="skill-overview" aria-label="我的技能概况">
-          <div><strong>{{ ownedCount }}{{ legacyHasMore.personal ? '+' : '' }}</strong><span>我创建的 · 第 {{ legacyPages.personal }} 页</span></div>
+          <div><strong>{{ skillSummaryError ? '—' : skillSummary?.created_total ?? '…' }}</strong><span>我创建的</span></div>
           <div><strong>{{ installedTotal }}</strong><span>市场已安装</span></div>
           <div><strong>{{ legacyTotals.shared + legacyTotals.builtin }}</strong><span>团队与系统可用</span></div>
           <div v-if="pendingRequestCount"><strong>{{ pendingRequestCount }}</strong><span>市场待审核</span></div>
@@ -38,7 +39,9 @@
         <template v-else>
           <div class="skill-list-toolbar">
             <nav class="personal-source-filters" aria-label="我的技能来源">
-              <button v-for="filter in personalSourceFilters" :key="filter.key" type="button" :class="{ active: personalSource === filter.key }" :aria-current="personalSource === filter.key ? 'page' : undefined" @click="selectPersonalSource(filter.key)">{{ filter.label }}<span v-if="filter.key === 'installed'">{{ installedTotal }}</span><span v-else-if="filter.key === 'shared'">{{ legacyTotals.shared }}</span><span v-else-if="filter.key === 'system'">{{ legacyTotals.builtin }}</span></button>
+              <button v-for="filter in personalSourceFilters" :key="filter.key" type="button" :class="{ active: personalSource === filter.key }" :aria-current="personalSource === filter.key ? 'page' : undefined" @click="selectPersonalSource(filter.key)">
+                {{ filter.label }}<span :title="['all', 'created'].includes(filter.key) ? skillSummaryError || undefined : undefined">{{ personalFilterCount(filter.key) }}</span>
+              </button>
             </nav>
             <a-input v-model:value="personalQuery" allow-clear aria-label="搜索我的技能" placeholder="搜索我的技能" class="personal-search" />
           </div>
@@ -63,17 +66,17 @@
                 <a-button size="small" :disabled="legacyPages.personal === 1" @click="changeLegacyPage('personal', legacyPages.personal - 1)">上一页</a-button>
                 <a-button size="small" :disabled="!legacyHasMore.personal" @click="changeLegacyPage('personal', legacyPages.personal + 1)">下一页</a-button>
               </div>
-              <div v-if="['all', 'installed'].includes(personalSource) && installedTotal > installedPageSize" class="personal-page-group" aria-label="市场已安装技能分页">
-                <span>市场已安装 · 共 {{ installedTotal }} 项</span>
-                <a-pagination :current="installedPage" :page-size="installedPageSize" :total="installedTotal" :page-size-options="['20', '30', '50']" show-size-changer size="small" @change="changeInstalledPage" />
+              <div v-if="['all', 'installed'].includes(personalSource) && (personalSource === 'all' ? allInstalledTotal : installedTotal) > installedPageSize" class="personal-page-group" aria-label="市场已安装技能分页">
+                <span>市场已安装 · 共 {{ personalSource === 'all' ? allInstalledTotal : installedTotal }} 项</span>
+                <a-pagination :current="personalSource === 'all' ? allInstalledPage : installedPage" :page-size="installedPageSize" :total="personalSource === 'all' ? allInstalledTotal : installedTotal" :page-size-options="['20', '30', '50']" show-size-changer size="small" @change="changeInstalledPage" />
               </div>
-              <div v-if="['all', 'shared'].includes(personalSource) && legacyTotals.shared > legacyPageSizes.shared" class="personal-page-group" aria-label="团队共享技能分页">
-                <span>团队共享 · 共 {{ legacyTotals.shared }} 项</span>
-                <a-pagination :current="legacyPages.shared" :page-size="legacyPageSizes.shared" :total="legacyTotals.shared" :page-size-options="['20', '30', '50']" show-size-changer size="small" @change="(page, size) => changeLegacyPage('shared', page, size)" />
+              <div v-if="['all', 'shared'].includes(personalSource) && (personalSource === 'all' ? legacyTotals.allShared : legacyTotals.shared) > legacyPageSizes.shared" class="personal-page-group" aria-label="团队共享技能分页">
+                <span>团队共享 · 共 {{ personalSource === 'all' ? legacyTotals.allShared : legacyTotals.shared }} 项</span>
+                <a-pagination :current="legacyPages[personalSource === 'all' ? 'allShared' : 'shared']" :page-size="legacyPageSizes.shared" :total="personalSource === 'all' ? legacyTotals.allShared : legacyTotals.shared" :page-size-options="['20', '30', '50']" show-size-changer size="small" @change="(page, size) => changeLegacyPage(personalSource === 'all' ? 'allShared' : 'shared', page, size)" />
               </div>
-              <div v-if="['all', 'system'].includes(personalSource) && legacyTotals.builtin > legacyPageSizes.builtin" class="personal-page-group" aria-label="系统内置技能分页">
-                <span>系统内置 · 共 {{ legacyTotals.builtin }} 项</span>
-                <a-pagination :current="legacyPages.builtin" :page-size="legacyPageSizes.builtin" :total="legacyTotals.builtin" :page-size-options="['20', '30', '50']" show-size-changer size="small" @change="(page, size) => changeLegacyPage('builtin', page, size)" />
+              <div v-if="['all', 'system'].includes(personalSource) && (personalSource === 'all' ? legacyTotals.allBuiltin : legacyTotals.builtin) > legacyPageSizes.builtin" class="personal-page-group" aria-label="系统内置技能分页">
+                <span>系统内置 · 共 {{ personalSource === 'all' ? legacyTotals.allBuiltin : legacyTotals.builtin }} 项</span>
+                <a-pagination :current="legacyPages[personalSource === 'all' ? 'allBuiltin' : 'builtin']" :page-size="legacyPageSizes.builtin" :total="personalSource === 'all' ? legacyTotals.allBuiltin : legacyTotals.builtin" :page-size-options="['20', '30', '50']" show-size-changer size="small" @change="(page, size) => changeLegacyPage(personalSource === 'all' ? 'allBuiltin' : 'builtin', page, size)" />
               </div>
             </div>
           </a-spin>
@@ -246,6 +249,7 @@ import {
   getMarketSkill,
   getMarketSkillFile,
   getMarketSkillTree,
+  getPersonalSkillSummary,
   installMarketSkill,
   listMarketInstalls,
   uninstallMarketSkill,
@@ -276,6 +280,15 @@ const personalSourceFilters = [
   { key: 'shared', label: '团队共享' },
   { key: 'system', label: '系统内置' }
 ]
+/** 前两个来源由独立统计请求提供完整去重总数，其余来源沿用数据库总数。 */
+function personalFilterCount(source) {
+  if (source === 'all' || source === 'created') {
+    if (skillSummaryLoading.value) return '…'
+    return skillSummary.value?.[source === 'all' ? 'all_total' : 'created_total'] ?? '—'
+  }
+  if (source === 'installed') return installedTotal.value
+  return source === 'shared' ? legacyTotals.value.shared : legacyTotals.value.builtin
+}
 const query = ref('')
 const selectedCategory = ref('all')
 const activeView = ref(route.query.view === 'market' || route.query.tab === 'market' ? 'market' : 'personal')
@@ -314,32 +327,47 @@ const rankingError = ref('')
 let rankingRequestSequence = 0
 const cards = ref([])
 const installedCards = ref([])
+const allInstalledCards = ref([])
 const legacyPersonalCards = ref([])
 const legacySharedCards = ref([])
+const legacyAllSharedCards = ref([])
 const legacyBuiltinCards = ref([])
-const legacyCards = computed(() => [...legacyPersonalCards.value, ...legacySharedCards.value, ...legacyBuiltinCards.value])
+const legacyAllBuiltinCards = ref([])
+const legacyCards = computed(() => [
+  ...legacyPersonalCards.value,
+  ...(personalSource.value === 'all' ? legacyAllSharedCards.value : legacySharedCards.value),
+  ...(personalSource.value === 'all' ? legacyAllBuiltinCards.value : legacyBuiltinCards.value)
+])
 const loading = ref(false)
 const legacyLoading = ref(false)
 const installedLoading = ref(false)
+const allInstalledLoading = ref(false)
 const legacyHasMore = ref({ personal: false })
-const legacyPageLoading = ref({ personal: false, shared: false, builtin: false })
-const legacyPages = ref({ personal: 1, shared: 1, builtin: 1 })
+const legacyPageLoading = ref({ personal: false, shared: false, allShared: false, builtin: false, allBuiltin: false })
+const legacyPages = ref({ personal: 1, shared: 1, allShared: 1, builtin: 1, allBuiltin: 1 })
 const legacyPageSizes = ref({ shared: 30, builtin: 30 })
-const legacyTotals = ref({ shared: 0, builtin: 0 })
+const legacyTotals = ref({ shared: 0, allShared: 0, builtin: 0, allBuiltin: 0 })
 const installedPage = ref(1)
+const allInstalledPage = ref(1)
 const installedPageSize = ref(30)
 const installedTotal = ref(0)
+const allInstalledTotal = ref(0)
 const marketPage = ref(1)
 const marketPageSize = ref(24)
 const marketTotal = ref(0)
 const appliedMarketQuery = ref('')
 const personalPageSize = 30
 let requestSequence = 0
-const legacyRequestSequence = { personal: 0, shared: 0, builtin: 0 }
+const legacyRequestSequence = { personal: 0, shared: 0, allShared: 0, builtin: 0, allBuiltin: 0 }
 let legacyRefreshSequence = 0
 let installedRequestSequence = 0
+let allInstalledRequestSequence = 0
 let personalSearchTimer
 const personalError = ref('')
+const skillSummary = ref(null)
+const skillSummaryLoading = ref(true)
+const skillSummaryError = ref('')
+let skillSummaryRequestSequence = 0
 const missingPersonalSlugs = ref(new Set())
 const marketError = ref('')
 const busySlug = ref('')
@@ -369,7 +397,7 @@ function safePersonalItem(item) {
   return item
 }
 const personalSpaceGroups = computed(() => {
-  const groups = personalSpaceSkillGroups(legacyCards.value, installedCards.value, userStore.uid)
+  const groups = personalSpaceSkillGroups(legacyCards.value, personalSource.value === 'all' ? allInstalledCards.value : installedCards.value, userStore.uid)
   return Object.fromEntries(Object.entries(groups).map(([source, items]) => [source, items.map(safePersonalItem)]))
 })
 const personalSourceGroups = computed(() => {
@@ -383,9 +411,8 @@ const personalSourceGroups = computed(() => {
 })
 const filteredPersonalItems = computed(() => personalSourceGroups.value[personalSource.value])
 const ownedSkills = computed(() => personalSourceGroups.value.created)
-const ownedCount = computed(() => ownedSkills.value.length)
-const personalBusy = computed(() => legacyLoading.value || installedLoading.value || Object.values(legacyPageLoading.value).some(Boolean))
-const hasManageableSharedSkills = computed(() => legacyCards.value.some((item) => item.source_scope !== 'personal' && canManageSkillRecord(item)))
+const personalBusy = computed(() => legacyLoading.value || installedLoading.value || allInstalledLoading.value || Object.values(legacyPageLoading.value).some(Boolean))
+const hasManageableSharedSkills = computed(() => legacySharedCards.value.some((item) => canManageSkillRecord(item)))
 const pendingRequestCount = ref(0)
 const detailOpen = ref(false)
 const detailLoading = ref(false)
@@ -593,13 +620,14 @@ async function fetchRankings() {
 async function fetchLegacySource(source, page = legacyPages.value[source]) {
   const requestId = ++legacyRequestSequence[source]
   const search = appliedPersonalQuery.value
-  const limit = source === 'personal' ? personalPageSize : legacyPageSizes.value[source]
+  const limit = source === 'personal' ? personalPageSize : legacyPageSizes.value[source === 'allShared' ? 'shared' : source === 'allBuiltin' ? 'builtin' : source]
   legacyPages.value[source] = page
   legacyPageLoading.value[source] = true
   try {
     const response = await listSkillCards({
       source: source === 'personal' ? 'personal' : 'shared',
-      sharedKind: source === 'personal' ? undefined : source,
+      sharedKind: source === 'personal' ? undefined : source === 'allShared' ? 'shared' : source === 'allBuiltin' ? 'builtin' : source,
+      catalogAll: source === 'allShared' || source === 'allBuiltin',
       limit,
       offset: (page - 1) * limit,
       search
@@ -618,6 +646,8 @@ async function fetchLegacySource(source, page = legacyPages.value[source]) {
       missingPersonalSlugs.value = new Set()
     } else {
       if (source === 'shared') legacySharedCards.value = items
+      else if (source === 'allShared') legacyAllSharedCards.value = items
+      else if (source === 'allBuiltin') legacyAllBuiltinCards.value = items
       else legacyBuiltinCards.value = items
       legacyTotals.value[source] = total
     }
@@ -633,7 +663,7 @@ async function fetchLegacy() {
   legacyLoading.value = true
   personalError.value = ''
   try {
-    await Promise.all(['personal', 'shared', 'builtin'].map((source) => fetchLegacySource(source)))
+    await Promise.all(['personal', 'shared', 'allShared', 'builtin', 'allBuiltin'].map((source) => fetchLegacySource(source)))
   } finally {
     if (refreshId === legacyRefreshSequence) legacyLoading.value = false
   }
@@ -641,9 +671,14 @@ async function fetchLegacy() {
 
 /** 页码变化只重新请求对应来源，改变每页数量时回到第一页。 */
 function changeLegacyPage(source, page, size) {
-  if (source !== 'personal' && size !== legacyPageSizes.value[source]) {
-    legacyPageSizes.value[source] = size
+  const sizeKey = source === 'allShared' ? 'shared' : source === 'allBuiltin' ? 'builtin' : source
+  if (source !== 'personal' && size !== legacyPageSizes.value[sizeKey]) {
+    legacyPageSizes.value[sizeKey] = size
     page = 1
+    if (source === 'allShared') legacyPages.value.shared = 1
+    if (source === 'shared') legacyPages.value.allShared = 1
+    if (source === 'allBuiltin') legacyPages.value.builtin = 1
+    if (source === 'builtin') legacyPages.value.allBuiltin = 1
   }
   fetchLegacySource(source, page)
 }
@@ -679,20 +714,59 @@ async function fetchInstalled(page = installedPage.value) {
   }
 }
 
+/** “全部”单独分页本人安装，在服务端先折叠跨页存在的个人原件。 */
+async function fetchAllInstalled(page = allInstalledPage.value) {
+  const requestId = ++allInstalledRequestSequence
+  const search = appliedPersonalQuery.value
+  allInstalledPage.value = page
+  allInstalledLoading.value = true
+  try {
+    while (true) {
+      const response = await listMarketInstalls({
+        limit: installedPageSize.value,
+        offset: (page - 1) * installedPageSize.value,
+        search,
+        catalogAll: true
+      })
+      if (requestId !== allInstalledRequestSequence || search !== appliedPersonalQuery.value) return
+      const items = response?.data || []
+      const total = Number(response?.total || 0)
+      if (page > 1 && !items.length) {
+        page = Math.max(1, Math.min(page - 1, Math.ceil(total / installedPageSize.value)))
+        allInstalledPage.value = page
+        continue
+      }
+      allInstalledCards.value = items
+      allInstalledTotal.value = total
+      return
+    }
+  } catch (failure) {
+    if (requestId === allInstalledRequestSequence && search === appliedPersonalQuery.value) throw failure
+  } finally {
+    if (requestId === allInstalledRequestSequence) allInstalledLoading.value = false
+  }
+}
+
 function changeInstalledPage(page, size) {
   if (size !== installedPageSize.value) {
     installedPageSize.value = size
     page = 1
+    installedPage.value = 1
+    allInstalledPage.value = 1
   }
-  fetchInstalled(page).catch((failure) => { personalError.value = errorText(failure) })
+  const request = personalSource.value === 'all' ? fetchAllInstalled(page) : fetchInstalled(page)
+  request.catch((failure) => { personalError.value = errorText(failure) })
 }
 
 /** 来源切换重新从各来源第一页查询，避免“全部”的旧页被误当总数。 */
 function resetPersonalPages(source = 'all') {
   if (source === 'all' || source === 'created' || source === 'installed') legacyPages.value.personal = 1
+  if (source === 'all') legacyPages.value.allShared = 1
   if (source === 'all' || source === 'shared') legacyPages.value.shared = 1
+  if (source === 'all') legacyPages.value.allBuiltin = 1
   if (source === 'all' || source === 'system') legacyPages.value.builtin = 1
   if (source === 'all' || source === 'installed') installedPage.value = 1
+  if (source === 'all') allInstalledPage.value = 1
 }
 
 function selectPersonalSource(source) {
@@ -702,10 +776,10 @@ function selectPersonalSource(source) {
   personalError.value = ''
   ++legacyRefreshSequence
   legacyLoading.value = false
-  const needed = source === 'all' ? ['personal', 'shared', 'builtin']
+  const needed = source === 'all' ? ['personal', 'shared', 'allShared', 'builtin', 'allBuiltin']
     : source === 'installed' ? ['personal']
       : [source === 'created' ? 'personal' : source === 'system' ? 'builtin' : 'shared']
-  for (const candidate of ['personal', 'shared', 'builtin']) {
+  for (const candidate of ['personal', 'shared', 'allShared', 'builtin', 'allBuiltin']) {
     if (needed.includes(candidate)) continue
     ++legacyRequestSequence[candidate]
     legacyPageLoading.value[candidate] = false
@@ -714,9 +788,16 @@ function selectPersonalSource(source) {
   else needed.forEach((candidate) => fetchLegacySource(candidate))
   if (source === 'all' || source === 'installed') {
     fetchInstalled().catch((failure) => { personalError.value = errorText(failure) })
+    if (source === 'all') fetchAllInstalled().catch((failure) => { personalError.value = errorText(failure) })
+    else {
+      ++allInstalledRequestSequence
+      allInstalledLoading.value = false
+    }
   } else {
     ++installedRequestSequence
     installedLoading.value = false
+    ++allInstalledRequestSequence
+    allInstalledLoading.value = false
   }
 }
 
@@ -802,11 +883,32 @@ async function fetchMarketPage(page) {
 async function refresh() {
   personalError.value = ''
   appliedMarketQuery.value = query.value.trim()
+  fetchSkillSummary()
   await Promise.all([
     fetchMarketPage(1),
     fetchLegacy(),
-    fetchInstalled().catch((failure) => { personalError.value = errorText(failure) })
+    fetchInstalled().catch((failure) => { personalError.value = errorText(failure) }),
+    fetchAllInstalled().catch((failure) => { personalError.value = errorText(failure) })
   ])
+}
+
+/** 总量单独查询，避免个人技能翻页时反复扫描完整目录。 */
+async function fetchSkillSummary() {
+  const requestId = ++skillSummaryRequestSequence
+  const search = appliedPersonalQuery.value
+  skillSummary.value = null
+  skillSummaryLoading.value = true
+  skillSummaryError.value = ''
+  try {
+    const result = await getPersonalSkillSummary({ search })
+    if (requestId === skillSummaryRequestSequence && search === appliedPersonalQuery.value) {
+      skillSummary.value = result?.data || null
+    }
+  } catch (failure) {
+    if (requestId === skillSummaryRequestSequence) skillSummaryError.value = errorText(failure)
+  } finally {
+    if (requestId === skillSummaryRequestSequence) skillSummaryLoading.value = false
+  }
 }
 
 async function refreshHome() {
@@ -880,7 +982,11 @@ async function act(item) {
     const result = item.installed_version ? await upgradeMarketSkill(item.slug) : await installMarketSkill(item.slug)
     cards.value = cards.value.map((card) => card.slug === item.slug ? result.data : card)
     installedCards.value = installedCards.value.filter((card) => card.slug !== item.slug).concat(result.data)
-    fetchInstalled().catch(() => message.warning('已安装，个人列表刷新失败，请稍后重试'))
+    resetPersonalPages()
+    fetchLegacy()
+    fetchInstalled(1).catch(() => message.warning('已安装，个人列表刷新失败，请稍后重试'))
+    fetchAllInstalled(1).catch(() => message.warning('已安装，个人列表刷新失败，请稍后重试'))
+    fetchSkillSummary()
     if (rankingsOpen.value) fetchRankings()
     if (detail.value?.slug === item.slug) detail.value = marketCardWithSharedStatus(result.data)
     message.success(item.installed_version ? '已升级到最新审核版本' : '已安装，可在 Agent 中使用')
@@ -1034,8 +1140,10 @@ watch(personalQuery, () => {
   personalSearchTimer = setTimeout(() => {
     appliedPersonalQuery.value = personalQuery.value.trim()
     resetPersonalPages()
+    fetchSkillSummary()
     fetchLegacy()
     fetchInstalled().catch((failure) => { personalError.value = errorText(failure) })
+    fetchAllInstalled().catch((failure) => { personalError.value = errorText(failure) })
   }, 220)
 })
 watch(() => route.query.view, (view, previousView) => {
@@ -1046,8 +1154,8 @@ watch(() => route.query.view, (view, previousView) => {
   }
 })
 onMounted(() => { refresh(); fetchRequests(); fetchDepartmentNames() })
-onUnmounted(() => clearTimeout(personalSearchTimer))
-defineExpose({ loading: computed(() => activeView.value === 'market' ? loading.value : legacyLoading.value || installedLoading.value) })
+onUnmounted(() => { clearTimeout(personalSearchTimer); ++skillSummaryRequestSequence })
+defineExpose({ loading: computed(() => activeView.value === 'market' ? loading.value : legacyLoading.value || installedLoading.value || allInstalledLoading.value) })
 </script>
 
 <style scoped lang="less">

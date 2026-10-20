@@ -121,13 +121,18 @@ async def list_user_market_installs_route(
     offset: int = Query(0, ge=0),
     limit: int | None = Query(None, ge=1, le=100),
     search: str = Query("", max_length=100),
+    catalog_all: bool = Query(False),
     user: User = Depends(get_market_install_user),
     db: AsyncSession = Depends(get_db),
 ):
     """分页查看本人安装；旧客户端不传 limit 时保留完整摘要。"""
     if limit is None:
+        if catalog_all:
+            raise HTTPException(status_code=422, detail="catalog_all 仅适用于分页安装目录")
         return {"success": True, "data": await list_user_market_installs(db, user=user)}
-    items, total = await page_user_market_installs(db, user=user, offset=offset, limit=limit, search=search)
+    items, total = await page_user_market_installs(
+        db, user=user, offset=offset, limit=limit, search=search, **({"catalog_all": True} if catalog_all else {})
+    )
     return {
         "success": True,
         "data": items,

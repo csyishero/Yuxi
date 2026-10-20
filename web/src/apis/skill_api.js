@@ -19,11 +19,12 @@ export const listMarketRankings = async ({ metric = 'installs', scope = 'company
 }
 
 export const getMarketSkill = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}`)
-export const listMarketInstalls = async ({ limit, offset, search } = {}) => {
+export const listMarketInstalls = async ({ limit, offset, search, catalogAll = false } = {}) => {
   const params = new URLSearchParams()
   if (limit !== undefined) params.set('limit', String(limit))
   if (offset !== undefined) params.set('offset', String(offset))
   if (search?.trim()) params.set('search', search.trim())
+  if (catalogAll) params.set('catalog_all', 'true')
   return apiGet(`${MARKET_BASE_URL}/-/installs${params.size ? `?${params}` : ''}`)
 }
 export const getMarketSkillTree = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/tree`)
@@ -61,12 +62,13 @@ export const getPersonalSkillDetail = async (slug) => apiGet(`${USER_BASE_URL}/p
 
 export const listSkillCards = async ({
   source, sharedKind, limit, offset, search, refreshPersonal = false, audienceSearch, audienceDepartmentId,
-  excludeRetiredBuiltin = false
+  excludeRetiredBuiltin = false, catalogAll = false
 } = {}) => {
   const params = new URLSearchParams()
   if (source) params.set('source', source)
   if (sharedKind) params.set('shared_kind', sharedKind)
   if (excludeRetiredBuiltin) params.set('exclude_retired_builtin', 'true')
+  if (catalogAll) params.set('catalog_all', 'true')
   if (limit !== undefined) params.set('limit', String(limit))
   if (offset !== undefined) params.set('offset', String(offset))
   if (search?.trim()) params.set('search', search.trim())
@@ -74,6 +76,12 @@ export const listSkillCards = async ({
   if (audienceSearch?.trim()) params.set('audience_search', audienceSearch.trim())
   if (audienceDepartmentId) params.set('audience_department_id', String(audienceDepartmentId))
   return apiGet(`${USER_BASE_URL}${params.size ? `?${params}` : ''}`)
+}
+
+export const getPersonalSkillSummary = async ({ search = '' } = {}) => {
+  const params = new URLSearchParams()
+  if (search.trim()) params.set('search', search.trim())
+  return apiGet(`${USER_BASE_URL}/summary${params.size ? `?${params}` : ''}`)
 }
 
 export const listPersonalSkillCatalog = async ({ departmentId, ownerSearch, offset = 0, limit, search, excludeOwn = false, cardPage = false } = {}) => {
@@ -292,6 +300,7 @@ export const skillApi = {
   getSkillDetail,
   getPersonalSkillDetail,
   listSkillCards,
+  getPersonalSkillSummary,
   listPersonalSkillCatalog,
   getPersonalSkillCatalogFile,
   publishPersonalSkillDirectly,

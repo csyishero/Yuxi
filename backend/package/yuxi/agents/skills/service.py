@@ -1015,6 +1015,7 @@ async def page_skill_cards_for_user(
     audience_department_id: int | None = None,
     shared_kind: str | None = None,
     exclude_retired_builtin: bool = False,
+    catalog_all: bool = False,
 ) -> tuple[list[ResolvedSkill], int | None, bool]:
     """按个人或共享来源分页管理卡片，并保持原有卡片授权与标记。"""
     needle = search.strip().casefold()
@@ -1027,6 +1028,56 @@ async def page_skill_cards_for_user(
             audience_department_id = user.department_id
 
     if source == "shared":
+        catalog_filters = {}
+        if catalog_all:
+            from yuxi.agents.skills.market import list_user_market_installs, personal_market_install_summaries
+
+            def personal_directory_names() -> set[str]:
+                """只枚举本人直接子目录，不逐个解析 SKILL.md。"""
+                root = personal_skills_root(str(user.uid))
+                if not root.is_dir():
+                    return set()
+                return {
+                    entry.name
+                    for entry in root.iterdir()
+                    if not entry.is_symlink() and entry.is_dir() and is_valid_skill_slug(entry.name)
+                }
+
+            candidate_names = await asyncio.to_thread(personal_directory_names)
+            matching_slugs = await SkillRepository(db).matching_shared_slugs(
+                candidate_names,
+                search=search,
+                **({"shared_kind": "builtin"} if shared_kind == "builtin" else {}),
+            )
+            shadowed_personal_slugs = set()
+            for slug in matching_slugs:
+                try:
+                    await get_personal_skill(str(user.uid), slug)
+                except ValueError:
+                    continue
+                shadowed_personal_slugs.add(slug)
+
+            installs = await list_user_market_installs(db, user=user, search=search)
+            installed_market_slugs = {item["slug"] for item in installs if item["visible"]}
+            if search.strip():
+                own_slugs = await MarketSkillRepository(db).installed_personal_slugs_for_user(str(user.uid))
+                matched_own_slugs = set()
+                needle = search.strip().casefold()
+                for slug in own_slugs:
+                    try:
+                        personal = await get_personal_skill(str(user.uid), slug)
+                    except ValueError:
+                        continue
+                    if needle in f"{personal.slug} {personal.name} {personal.description}".casefold():
+                        matched_own_slugs.add(slug)
+                own_installs = await personal_market_install_summaries(db, user=user, personal_slugs=matched_own_slugs)
+                installed_market_slugs.update(item["slug"] for item in own_installs.values() if item["visible"])
+            catalog_filters = {
+                "catalog_all": True,
+                "shadowed_personal_slugs": shadowed_personal_slugs,
+                "installed_market_slugs": installed_market_slugs,
+            }
+
         shared, total = await page_visible_skills_for_management(
             db,
             user,
@@ -1037,13 +1088,15 @@ async def page_skill_cards_for_user(
             audience_department_id=audience_department_id,
             **({"shared_kind": shared_kind} if shared_kind is not None else {}),
             **({"exclude_retired_builtin": True} if exclude_retired_builtin else {}),
+            **catalog_filters,
         )
         matching_personal = []
-        for item in shared:
-            try:
-                matching_personal.append(await get_personal_skill(str(user.uid), item.slug))
-            except ValueError:
-                pass
+        if not catalog_all:
+            for item in shared:
+                try:
+                    matching_personal.append(await get_personal_skill(str(user.uid), item.slug))
+                except ValueError:
+                    pass
         cards = await list_skill_cards_for_user(
             db,
             user,
@@ -1270,6 +1323,9 @@ async def page_visible_skills_for_management(
     audience_department_id: int | None = None,
     shared_kind: str | None = None,
     exclude_retired_builtin: bool = False,
+    catalog_all: bool = False,
+    shadowed_personal_slugs: set[str] | None = None,
+    installed_market_slugs: set[str] | None = None,
 ) -> tuple[list[Skill], int]:
     """以数据库授权条件分页读取管理页可见的共享 Skill。"""
     query_filters = {}
@@ -1282,6 +1338,12 @@ async def page_visible_skills_for_management(
         query_filters["shared_kind"] = shared_kind
     if exclude_retired_builtin:
         query_filters["exclude_retired_builtin"] = True
+    if catalog_all:
+        query_filters.update(
+            catalog_all=True,
+            shadowed_personal_slugs=shadowed_personal_slugs,
+            installed_market_slugs=installed_market_slugs,
+        )
     items, total = await SkillRepository(db).page_visible(
         user, limit=limit, offset=offset, search=search, **query_filters
     )

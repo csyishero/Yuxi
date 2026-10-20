@@ -76,3 +76,47 @@ async def test_install_search_treats_sql_wildcards_as_literal_characters():
     compiled = session.count_statement.compile(dialect=postgresql.dialect())
     assert "ESCAPE" in str(compiled)
     assert any("/%/_" in value for value in compiled.params.values() if isinstance(value, str))
+
+
+@pytest.mark.asyncio
+async def test_unpaged_install_summary_uses_same_hidden_release_boundary_as_page():
+    """精确汇总读取全部安装身份时，不因取消 LIMIT 扩大隐藏版本的搜索范围。"""
+    session = _PageSession()
+    viewer = User(uid="viewer", username="viewer", password_hash="x", role="user", department_id=1)
+
+    rows = await MarketSkillRepository(session).installed_releases_for_user("viewer", user=viewer, search="report")
+
+    assert rows == []
+    summary_sql = str(session.page_statement.compile(dialect=postgresql.dialect()))
+    assert "market_skill_installs.uid" in summary_sql
+    assert "market_skills.latest_release_id IS NOT NULL" in summary_sql
+    assert "market_skills.scope" in summary_sql
+    assert "market_skill_releases.description" in summary_sql
+    assert "market_skills.slug" in summary_sql
+    assert "LIMIT" not in summary_sql
+
+
+@pytest.mark.asyncio
+async def test_catalog_all_install_page_excludes_own_matching_original_before_count_and_offset():
+    """本人有效原件覆盖的安装在数据库计数和分页前排除。"""
+    session = _PageSession()
+    viewer = User(uid="viewer", username="viewer", password_hash="x", role="user", department_id=1)
+
+    await MarketSkillRepository(session).page_installed_releases_for_user(
+        "viewer",
+        user=viewer,
+        offset=1,
+        limit=1,
+        search="report",
+        exclude_own_personal_slugs={"owned-later"},
+    )
+
+    count = session.count_statement.compile(dialect=postgresql.dialect())
+    page = session.page_statement.compile(dialect=postgresql.dialect())
+    for compiled in (count, page):
+        sql = str(compiled)
+        assert "market_skills.owner_uid" in sql
+        assert "market_skills.personal_slug NOT IN" in sql or "NOT (market_skills.owner_uid" in sql
+        assert "market_skill_installs.uid" in sql
+        assert "owned-later" in str(compiled.params.values())
+    assert "LIMIT" in str(page) and "OFFSET" in str(page)

@@ -506,6 +506,174 @@ async def test_skill_audience_page_rejects_out_of_department_before_query(monkey
 
 
 @pytest.mark.asyncio
+async def test_catalog_all_validates_only_overlapping_personal_directories(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """全部共享目录只校验可能遮盖共享的个人原件，损坏或符号链接目录不遮盖。"""
+    from yuxi.agents.skills import market
+
+    for slug, content in {
+        "valid": "---\nname: valid\ndescription: valid skill\n---\n# Skill\n",
+        "broken": "not valid frontmatter\n",
+        "unrelated": "---\nname: unrelated\ndescription: unrelated skill\n---\n# Skill\n",
+    }.items():
+        entry = tmp_path / slug
+        entry.mkdir()
+        (entry / "SKILL.md").write_text(content, encoding="utf-8")
+    (tmp_path / "linked").symlink_to(tmp_path / "valid")
+
+    monkeypatch.setattr(svc, "personal_skills_root", lambda _uid: tmp_path)
+
+    class FakeRepo:
+        def __init__(self, _db):
+            pass
+
+        async def matching_shared_slugs(self, names, *, search):
+            assert names == {"valid", "broken", "unrelated"}
+            assert search == ""
+            return {"valid", "broken"}
+
+    async def fake_page(_db, _user, **kwargs):
+        assert kwargs["catalog_all"] is True
+        assert kwargs["shadowed_personal_slugs"] == {"valid"}
+        assert kwargs["installed_market_slugs"] == set()
+        return [], 0
+
+    async def fake_installs(_db, *, user, search):
+        assert (user.uid, search) == ("user-1", "")
+        return []
+
+    async def fail_full_scan(_uid):
+        raise AssertionError("共享目录翻页不应扫描全部个人 SKILL.md")
+
+    monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
+    monkeypatch.setattr(svc, "page_visible_skills_for_management", fake_page)
+    monkeypatch.setattr(svc, "list_personal_skills", fail_full_scan)
+    monkeypatch.setattr(market, "list_user_market_installs", fake_installs)
+
+    cards, total, has_more = await svc.page_skill_cards_for_user(
+        None, _user("user-1", role="user"), source="shared", shared_kind="shared", catalog_all=True, limit=1, offset=0
+    )
+
+    assert (cards, total, has_more) == ([], 0, False)
+
+
+@pytest.mark.asyncio
+async def test_catalog_all_search_keeps_own_install_covering_matching_personal_original(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """搜索命中个人原件时，即使安装条目未命中，也遮盖其同源共享副本。"""
+    from yuxi.agents.skills import market
+
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    (owned / "SKILL.md").write_text("---\nname: owned\ndescription: budget report\n---\n# Skill\n", encoding="utf-8")
+    monkeypatch.setattr(svc, "personal_skills_root", lambda _uid: tmp_path)
+
+    class FakeSkillRepo:
+        def __init__(self, _db):
+            pass
+
+        async def matching_shared_slugs(self, _names, *, search):
+            assert search == "budget"
+            return set()
+
+    class FakeMarketRepo:
+        def __init__(self, _db):
+            pass
+
+        async def installed_personal_slugs_for_user(self, uid):
+            assert uid == "user-1"
+            return {"owned"}
+
+        async def visible_by_sources(self, _user, _sources):
+            return []
+
+    async def fake_installs(_db, *, user, search):
+        assert (user.uid, search) == ("user-1", "budget")
+        return []
+
+    async def fake_own_installs(_db, *, user, personal_slugs):
+        assert user.uid == "user-1"
+        assert personal_slugs == {"owned"}
+        return {"owned": {"slug": "owned-market", "visible": True}}
+
+    async def fake_page(_db, _user, **kwargs):
+        assert kwargs["installed_market_slugs"] == {"owned-market"}
+        return [], 0
+
+    monkeypatch.setattr(svc, "SkillRepository", FakeSkillRepo)
+    monkeypatch.setattr(svc, "MarketSkillRepository", FakeMarketRepo)
+    monkeypatch.setattr(svc, "page_visible_skills_for_management", fake_page)
+    monkeypatch.setattr(market, "list_user_market_installs", fake_installs)
+    monkeypatch.setattr(market, "personal_market_install_summaries", fake_own_installs)
+
+    cards, total, has_more = await svc.page_skill_cards_for_user(
+        None,
+        _user("user-1", role="user"),
+        source="shared",
+        shared_kind="shared",
+        catalog_all=True,
+        search="budget",
+        limit=1,
+        offset=0,
+    )
+
+    assert (cards, total, has_more) == ([], 0, False)
+
+
+@pytest.mark.asyncio
+async def test_catalog_all_builtin_checks_personal_original_and_all_visible_installs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """内置技能也复用全部目录的个人原件与跨页安装遮盖。"""
+    from yuxi.agents.skills import market
+
+    owned = tmp_path / "builtin-one"
+    owned.mkdir()
+    (owned / "SKILL.md").write_text(
+        "---\nname: builtin-one\ndescription: personal version\n---\n# Skill\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(svc, "personal_skills_root", lambda _uid: tmp_path)
+
+    class FakeRepo:
+        def __init__(self, _db):
+            pass
+
+        async def matching_shared_slugs(self, names, *, search, shared_kind):
+            assert (names, search, shared_kind) == ({"builtin-one"}, "", "builtin")
+            return {"builtin-one"}
+
+    async def fake_installs(_db, *, user, search):
+        assert (user.uid, search) == ("user-1", "")
+        return [
+            {"slug": "builtin-two", "visible": True},
+            {"slug": "hidden-install", "visible": False},
+        ]
+
+    async def fake_page(_db, _user, **kwargs):
+        assert kwargs["shared_kind"] == "builtin"
+        assert kwargs["catalog_all"] is True
+        assert kwargs["shadowed_personal_slugs"] == {"builtin-one"}
+        assert kwargs["installed_market_slugs"] == {"builtin-two"}
+        return [], 0
+
+    monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
+    monkeypatch.setattr(svc, "page_visible_skills_for_management", fake_page)
+    monkeypatch.setattr(market, "list_user_market_installs", fake_installs)
+
+    cards, total, has_more = await svc.page_skill_cards_for_user(
+        None,
+        _user("user-1", role="user"),
+        source="shared",
+        shared_kind="builtin",
+        catalog_all=True,
+        limit=1,
+        offset=0,
+    )
+
+    assert (cards, total, has_more) == ([], 0, False)
+
+
+@pytest.mark.asyncio
 async def test_personal_skill_detail_treats_broken_metadata_as_missing(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """单项详情与列表一致地跳过损坏的个人技能。"""
     root = tmp_path / "skills"

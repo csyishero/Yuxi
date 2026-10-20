@@ -103,6 +103,21 @@ async def test_shared_skill_pages_only_count_authorized_items(test_client, stand
             shared_pages.extend(item["slug"] for item in shared.json()["data"])
         assert set(shared_pages) == {slugs[0], slugs[2]}
 
+        all_catalog = await test_client.get(
+            "/api/skills",
+            headers=headers,
+            params={
+                "source": "shared",
+                "shared_kind": "shared",
+                "catalog_all": True,
+                "search": f"pytest-page-{suffix}",
+                "limit": 1,
+            },
+        )
+        assert all_catalog.status_code == 200, all_catalog.text
+        assert all_catalog.json()["total"] == 1
+        assert [item["slug"] for item in all_catalog.json()["data"]] == [slugs[0]]
+
         denied = await test_client.get(f"/api/system/skills/{slugs[3]}/details", headers=headers)
         assert denied.status_code == 404
         older = await test_client.get(f"/api/system/skills/{slugs[0]}/details", headers=headers)

@@ -24,7 +24,7 @@ Owner：web/src/components/extensions/SkillMarket.vue
 
 ## 后果
 
-市场、共享和安装列表每次翻页会执行授权后的总数查询；个人技能保持文件目录事实来源，无精确总数。跨页关联只查询本人的当前页条目，不为了合并界面扫描全部技能或加载全部安装。旧版无 `limit` 的接口响应保持兼容；没有新增数据库字段或迁移。
+市场、共享和安装列表每次翻页会执行授权后的总数查询；个人技能保持文件目录事实来源，分页接口不计算精确总数。个人空间标签的独立精确计数由[我的技能来源精确总数](./2026-10-20-skill-personal-space-counts.md)记录。跨页关联只查询本人的当前页条目，不为了合并界面扫描全部技能或加载全部安装。旧版无 `limit` 的接口响应保持兼容；没有新增数据库字段或迁移。
 
 ## 验证
 
@@ -35,6 +35,6 @@ Owner：web/src/components/extensions/SkillMarket.vue
 | 治理共享与个人目录分别分页 | 跨来源页码误导 | 技能治理页面及授权查询 | `skillCardPaging.test.js`、`skillPersonalCatalogPaging.test.js`、共享种类 HTTP 测试 | 本部门管理员不能看到其他部门个人技能 | Passed |
 | 我的技能分类不伪造合并总数 | 同一原件及安装重复计数 | 我的技能页面分类 | `skillHubCrossPageOrigin.test.js`、个人安装关联 HTTP 测试 | 同源个人原件与市场安装位于不同页仍只保留一个管理入口 | Passed |
 
-个人文件目录不提供快速精确总数；用户只看到当前页与前后页。并发发布、安装或删除会改变列表长度，客户端对空白尾页作回退。接口总数仅代表本次授权查询时的快照，不承诺跨请求不变。组件测试的完整串行运行曾因本机 Vite 测试运行器的模块请求超时而中断；分页的定向断言和生产构建通过。
+个人文件目录的分页接口不提供快速精确总页数；用户只看到当前页与前后页。并发发布、安装或删除会改变列表长度，客户端对空白尾页作回退。接口总数仅代表本次授权查询时的快照，不承诺跨请求不变。组件测试的完整串行运行曾因本机 Vite 测试运行器的模块请求超时而中断；分页的定向断言和生产构建通过。
 
 隔离 schema 的 PostgreSQL 集成测试未完成：测试在建 schema 前连接现有 PostgreSQL 时返回 `the database system is in recovery mode`，没有读取或修改现有业务表。相关授权与分页场景已由 SQLite ASGI HTTP 测试验证；恢复 PostgreSQL 后应重跑 `test_skill_market_http_postgres.py`。
