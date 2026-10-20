@@ -178,10 +178,10 @@
           <div class="market-files">
             <div class="market-files-list">
               <strong>发布文件</strong>
-              <button v-for="file in files" :key="file.path" type="button" :class="{ active: file.path === selectedFile }" @click="selectFile(file.path)">{{ file.path }}</button>
+              <button v-for="file in files" :key="file.path" type="button" :class="{ active: file.path === selectedFile }" @click="selectFile(file.path)">{{ file.path }}<span v-if="file.previewable === false" class="market-file-unpreviewable"> · 不可预览</span></button>
             </div>
             <div class="market-file-content">
-              <a-spin :spinning="fileLoading"><MarkdownPreview v-if="fileContent && isMarkdownFile(selectedFile)" :content="fileContent" :compact="true" /><pre v-else-if="fileContent" class="market-code-preview"><code>{{ fileContent }}</code></pre><a-empty v-else description="选择文件预览" /></a-spin>
+              <a-spin :spinning="fileLoading"><MarkdownPreview v-if="fileContent && isMarkdownFile(selectedFile)" :content="fileContent" :compact="true" /><pre v-else-if="fileContent" class="market-code-preview"><code>{{ fileContent }}</code></pre><a-empty v-else :description="fileError || '选择文件预览'" /></a-spin>
             </div>
           </div>
           <div class="market-detail-actions">
@@ -221,7 +221,7 @@
 
     <a-modal v-model:open="snapshotOpen" title="提交快照" :footer="null" width="740px" :body-style="{ maxHeight: 'calc(100vh - 160px)', overflowY: 'auto' }">
       <a-button class="market-snapshot-download" @click="downloadSnapshot">下载完整快照（含附件）</a-button>
-      <div class="market-files snapshot-files"><div class="market-files-list"><strong>文件</strong><button v-for="file in snapshotFiles" :key="file.path" type="button" :class="{ active: file.path === snapshotSelected }" @click="selectSnapshotFile(file.path)">{{ file.path }}</button></div><div class="market-file-content"><a-spin :spinning="snapshotLoading"><MarkdownPreview v-if="snapshotContent && isMarkdownFile(snapshotSelected)" :content="snapshotContent" :compact="true" /><pre v-else-if="snapshotContent" class="market-code-preview"><code>{{ snapshotContent }}</code></pre><a-empty v-else :description="snapshotError || '选择文件预览'" /></a-spin></div></div>
+      <div class="market-files snapshot-files"><div class="market-files-list"><strong>文件</strong><button v-for="file in snapshotFiles" :key="file.path" type="button" :class="{ active: file.path === snapshotSelected }" @click="selectSnapshotFile(file.path)">{{ file.path }}<span v-if="file.previewable === false" class="market-file-unpreviewable"> · 不可预览</span></button></div><div class="market-file-content"><a-spin :spinning="snapshotLoading"><MarkdownPreview v-if="snapshotContent && isMarkdownFile(snapshotSelected)" :content="snapshotContent" :compact="true" /><pre v-else-if="snapshotContent" class="market-code-preview"><code>{{ snapshotContent }}</code></pre><a-empty v-else :description="snapshotError || '选择文件预览'" /></a-spin></div></div>
     </a-modal>
 
     <a-modal v-model:open="reviewOpen" :title="reviewApproved ? '批准发布' : '拒绝申请'" :ok-text="reviewApproved ? '确认发布' : '确认拒绝'" :confirm-loading="reviewLoading" @ok="review">
@@ -425,6 +425,7 @@ const files = ref([])
 const selectedFile = ref('')
 const fileContent = ref('')
 const fileLoading = ref(false)
+const fileError = ref('')
 let detailRequestSequence = 0
 let fileRequestSequence = 0
 const dependencyLabels = computed(() => detail.value ? [
@@ -930,6 +931,7 @@ async function openDetail(slug) {
   selectedFile.value = ''
   fileContent.value = ''
   fileLoading.value = false
+  fileError.value = ''
   try {
     const [info, tree] = await Promise.all([getMarketSkill(slug), getMarketSkillTree(slug)])
     if (requestId !== detailRequestSequence) return
@@ -947,6 +949,12 @@ async function selectFile(path) {
   const requestId = ++fileRequestSequence
   selectedFile.value = path
   fileContent.value = ''
+  fileError.value = ''
+  if (files.value.find((file) => file.path === path)?.previewable === false) {
+    fileLoading.value = false
+    fileError.value = '此文件不支持在线预览'
+    return
+  }
   fileLoading.value = true
   try {
     const content = (await getMarketSkillFile(detail.value.slug, path))?.data?.content || ''
@@ -954,7 +962,7 @@ async function selectFile(path) {
   } catch (failure) {
     if (requestId === fileRequestSequence) {
       fileContent.value = ''
-      message.error(errorText(failure))
+      fileError.value = failure?.status === 400 ? '无法在线预览此文件' : errorText(failure)
     }
   } finally {
     if (requestId === fileRequestSequence) fileLoading.value = false
@@ -1085,8 +1093,13 @@ async function selectSnapshotFile(path) {
   const requestId = ++snapshotFileRequestSequence
   snapshotSelected.value = path
   snapshotContent.value = ''
-  snapshotLoading.value = true
   snapshotError.value = ''
+  if (snapshotFiles.value.find((file) => file.path === path)?.previewable === false) {
+    snapshotLoading.value = false
+    snapshotError.value = '此文件不支持在线预览，请下载完整快照检查'
+    return
+  }
+  snapshotLoading.value = true
   try {
     const content = (await getSkillShareSnapshot(snapshotRequestId.value, path))?.data?.content || ''
     if (requestId === snapshotFileRequestSequence) snapshotContent.value = content
@@ -1276,6 +1289,7 @@ defineExpose({ loading: computed(() => activeView.value === 'market' ? loading.v
 .market-files-list strong { padding: 7px; }
 .market-files-list button { border: 0; background: none; text-align: left; padding: 7px; border-radius: 6px; color: var(--color-text-secondary); cursor: pointer; overflow-wrap: anywhere; }
 .market-files-list button.active { color: var(--color-primary-700); background: var(--color-primary-50); }
+.market-file-unpreviewable { color: var(--color-text-tertiary); font-size: 12px; }
 .market-file-content { min-height: 0; overflow: auto; padding: 16px; }
 .market-code-preview { width: max-content; min-width: 100%; margin: 0; white-space: pre; tab-size: 4; font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 .market-detail-actions { justify-content: flex-end; margin-top: 20px; }

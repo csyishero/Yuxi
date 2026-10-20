@@ -277,3 +277,12 @@ async def test_market_skill_file_projects_only_skill_frontmatter_without_changin
     with pytest.raises(ValueError, match="SKILL.md frontmatter 无效") as error:
         await market.market_skill_file(db, slug="one", user=viewer)
     assert "private-mcp" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_market_skill_file_reports_non_utf8_script_as_unsupported_preview(market_case):
+    db, viewer, _admin, _calls, _originals, root = market_case
+    (root / "market_releases/one/run.py").write_bytes(b"\xff\xfe")
+
+    with pytest.raises(ValueError, match="^仅支持预览 UTF-8 文本文件$"):
+        await market.market_skill_file(db, slug="one", user=viewer, path="run.py")

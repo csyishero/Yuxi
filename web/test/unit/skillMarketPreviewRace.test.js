@@ -6,6 +6,7 @@ import { setImmediate } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 
 import vue from '@vitejs/plugin-vue'
+import { message } from 'ant-design-vue'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRenderer, h, nextTick, ssrContextKey } from 'vue'
 import { compileScript, parse } from 'vue/compiler-sfc'
@@ -47,6 +48,7 @@ function findAll(target, predicate) {
 }
 
 function visibleText(target) {
+  if (target.type === 'comment') return ''
   return [target.text, ...(target.children || []).map(visibleText)].join(' ').trim()
 }
 
@@ -71,11 +73,14 @@ async function withPreview(view, verify) {
   const listStubPath = fileURLToPath(new URL(`.skill-market-list-stub-${pid}.mjs`, componentDir))
   const originalFetch = globalThis.fetch
   const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  const originalMessageError = message.error
   const pending = {
     snapshot: { 'A.md': deferred(), 'B.md': deferred() },
     market: { 'A.md': deferred(), 'B.md': deferred() }
   }
-  const files = ['SKILL.md', 'A.md', 'B.md', 'scripts/run.py'].map((path) => ({ path, is_dir: false }))
+  const files = ['SKILL.md', 'A.md', 'B.md', 'scripts/run.py', 'scripts/bad.py'].map((path) => ({ path, is_dir: false, previewable: true }))
+  files.push({ path: 'diagram.png', is_dir: false, previewable: false })
+  const requestedFiles = []
   const marketSkill = {
     slug: 'example', name: 'Example', owner_uid: 'publisher', owner_name: 'Publisher', description: 'Example skill',
     category: 'other', scope: 'global', latest_version: 1, install_count: 0, likes_count: 0,
@@ -92,12 +97,14 @@ async function withPreview(view, verify) {
       configurable: true,
       value: { getItem: () => null, setItem() {}, removeItem() {} }
     })
+    message.error = () => {}
     globalThis.fetch = async (url) => {
       const path = String(url)
       if (path.startsWith('/api/skill-market/requests?')) return Response.json({ data: { items: [request], total: 1 } })
       if (path === '/api/skills/share-requests/release-2/tree') return Response.json({ data: files })
       if (path.startsWith('/api/skills/share-requests/release-2/snapshot?')) {
         const file = new URL(path, 'http://yuxi.local').searchParams.get('path')
+        requestedFiles.push(file)
         if (file === 'scripts/run.py') return Response.json({ data: { content: scriptContent } })
         return pending.snapshot[file]?.promise || Response.json({ data: { content: '# Introduction' } })
       }
@@ -106,6 +113,8 @@ async function withPreview(view, verify) {
       if (path === '/api/skill-market/example/tree') return Response.json({ data: files })
       if (path.startsWith('/api/skill-market/example/file?')) {
         const file = new URL(path, 'http://yuxi.local').searchParams.get('path')
+        requestedFiles.push(file)
+        if (file === 'scripts/bad.py') return Response.json({ detail: '仅支持预览 UTF-8 文本文件' }, { status: 400 })
         if (file === 'scripts/run.py') return Response.json({ data: { content: scriptContent } })
         return pending.market[file]?.promise || Response.json({ data: { content: '# Introduction' } })
       }
@@ -152,7 +161,7 @@ async function withPreview(view, verify) {
     app.mount(host)
     const tick = async () => { await setImmediate(); await nextTick() }
     await tick()
-    await verify({ host, pending, tick })
+    await verify({ host, pending, requestedFiles, tick })
   } finally {
     app?.unmount()
     await server?.close()
@@ -160,6 +169,7 @@ async function withPreview(view, verify) {
     if (existsSync(previewStubPath)) unlinkSync(previewStubPath)
     if (existsSync(listStubPath)) unlinkSync(listStubPath)
     globalThis.fetch = originalFetch
+    message.error = originalMessageError
     if (originalStorage) Object.defineProperty(globalThis, 'localStorage', originalStorage)
     else delete globalThis.localStorage
   }
@@ -265,5 +275,53 @@ test('approval snapshot shows scripts as unmodified text', async () => {
     assert.ok(code)
     assert.equal(code.text, scriptContent)
     assert.equal(findAll(snapshot, (item) => item.type === 'resource').length, 0)
+  })
+})
+
+test('market detail explains binary attachments without requesting their text preview', async () => {
+  await withPreview('market', async ({ host, requestedFiles, tick }) => {
+    findAll(host, (item) => item.type === 'button' && item.props.class === 'market-card-title')[0].props.onClick()
+    await tick()
+
+    const detail = modal(host, 'Skill 详情')
+    const attachment = findAll(detail, (item) => item.type === 'button' && visibleText(item).startsWith('diagram.png'))[0]
+    assert.match(visibleText(attachment), /不可预览/)
+    attachment.props.onClick()
+    await tick()
+
+    assert.equal(findAll(detail, (item) => item.type === 'a-empty')[0].props.description, '此文件不支持在线预览')
+    assert.deepEqual(requestedFiles, ['SKILL.md'])
+  })
+})
+
+test('approval snapshot explains binary attachments without requesting their text preview', async () => {
+  await withPreview('personal', async ({ host, requestedFiles, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item).includes('市场审核'))[0].props.onClick()
+    await tick()
+    findAll(modal(host, '市场审核申请'), (item) => item.type === 'a-button' && visibleText(item) === '查看提交快照')[0].props.onClick()
+    await tick()
+
+    const snapshot = modal(host, '提交快照')
+    const attachment = findAll(snapshot, (item) => item.type === 'button' && visibleText(item).startsWith('diagram.png'))[0]
+    assert.match(visibleText(attachment), /不可预览/)
+    attachment.props.onClick()
+    await tick()
+
+    assert.equal(findAll(snapshot, (item) => item.type === 'a-empty')[0].props.description, '此文件不支持在线预览，请下载完整快照检查')
+    assert.deepEqual(requestedFiles, ['SKILL.md'])
+  })
+})
+
+test('market detail keeps an unsupported encoded script error inside the preview', async () => {
+  await withPreview('market', async ({ host, requestedFiles, tick }) => {
+    findAll(host, (item) => item.type === 'button' && item.props.class === 'market-card-title')[0].props.onClick()
+    await tick()
+
+    const detail = modal(host, 'Skill 详情')
+    select(detail, 'scripts/bad.py')
+    await tick()
+
+    assert.equal(findAll(detail, (item) => item.type === 'a-empty')[0].props.description, '无法在线预览此文件')
+    assert.deepEqual(requestedFiles, ['SKILL.md', 'scripts/bad.py'])
   })
 })

@@ -166,6 +166,97 @@ async def test_market_catalog_total_matches_visible_filtered_rows_across_pages()
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+async def test_market_file_tree_distinguishes_scripts_from_binary_attachments(monkeypatch, tmp_path):
+    """文件树标记可预览类型，文本脚本可读取，二进制和非 UTF-8 内容明确拒绝。"""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    viewer = User(uid="viewer", username="Viewer", password_hash="x", role="user", department_id=1)
+    app = FastAPI()
+    app.include_router(market_router, prefix="/api")
+
+    async def provide_user():
+        return viewer
+
+    async def provide_db():
+        async with sessions() as db:
+            yield db
+
+    app.dependency_overrides[get_required_user] = provide_user
+    app.dependency_overrides[get_db] = provide_db
+    monkeypatch.setattr(market_module, "get_skill_data_dir", lambda: tmp_path)
+
+    release_dir = tmp_path / "market_releases" / "demo"
+    release_dir.mkdir(parents=True)
+    (release_dir / "SKILL.md").write_text("---\nname: demo\ndescription: Demo\n---\n", encoding="utf-8")
+    (release_dir / "run.py").write_text("print('ok')\n", encoding="utf-8")
+    (release_dir / "bad.py").write_bytes(b"\xff\xfe")
+    (release_dir / "diagram.png").write_bytes(b"\x89PNG\r\n")
+
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda conn: Base.metadata.create_all(
+                    conn,
+                    tables=[
+                        Department.__table__,
+                        User.__table__,
+                        Skill.__table__,
+                        SkillShareRequest.__table__,
+                        MarketSkill.__table__,
+                        MarketSkillRelease.__table__,
+                        MarketSkillInstall.__table__,
+                        MarketSkillLike.__table__,
+                        MCPServer.__table__,
+                    ],
+                )
+            )
+        async with sessions() as db:
+            db.add_all(
+                [
+                    Department(id=1, name="Product"),
+                    viewer,
+                    User(uid="author", username="Author", password_hash="x", department_id=1),
+                    MarketSkill(
+                        id="listing-demo",
+                        slug="demo",
+                        owner_uid="author",
+                        personal_slug="demo",
+                        scope="global",
+                        latest_release_id="release-demo",
+                    ),
+                    MarketSkillRelease(
+                        id="release-demo",
+                        market_skill_id="listing-demo",
+                        version=1,
+                        name="Demo",
+                        description="Demo skill",
+                        category="other",
+                        dir_path="market_releases/demo",
+                        content_hash="hash",
+                        request_id="request-demo",
+                    ),
+                ]
+            )
+            await db.commit()
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            tree = await client.get("/api/skill-market/demo/tree")
+            assert tree.status_code == 200
+            previewable = {item["path"]: item["previewable"] for item in tree.json()["data"]}
+            assert previewable == {"SKILL.md": True, "bad.py": True, "diagram.png": False, "run.py": True}
+
+            script = await client.get("/api/skill-market/demo/file", params={"path": "run.py"})
+            assert script.status_code == 200
+            assert script.json()["data"]["content"] == "print('ok')\n"
+            assert (await client.get("/api/skill-market/demo/file", params={"path": "diagram.png"})).status_code == 400
+            assert (await client.get("/api/skill-market/demo/file", params={"path": "bad.py"})).status_code == 400
+            assert (await client.get("/api/skill-market/demo/file", params={"path": "missing.py"})).status_code == 404
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
 async def test_market_page_and_detail_report_only_accessible_unshadowed_shared_origin(monkeypatch):
     """跨页市场卡用原件身份查共享副本，并选当前用户可用的最新版本。"""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")

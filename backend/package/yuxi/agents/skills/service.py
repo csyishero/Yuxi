@@ -2356,6 +2356,7 @@ def build_skill_tree(path: Path, base_dir: Path) -> list[dict[str, Any]]:
                     "name": child.name,
                     "path": rel,
                     "is_dir": False,
+                    "previewable": is_skill_text_path(child),
                 }
             )
     return children

@@ -852,9 +852,14 @@ async def market_skill_file(db: AsyncSession, *, slug: str, user: User, path: st
     release = await repo.release(listing.latest_release_id)
     root = get_skill_data_dir() / release.dir_path
     target, _ = resolve_skill_relative_path(root, path)
-    if not target.is_file() or not is_skill_text_path(target):
-        raise ValueError("文件不存在或不支持文本预览")
-    content = await asyncio.to_thread(target.read_text, encoding="utf-8")
+    if not target.is_file():
+        raise ValueError("文件不存在")
+    if not is_skill_text_path(target):
+        raise ValueError("仅支持预览文本文件")
+    try:
+        content = await asyncio.to_thread(target.read_text, encoding="utf-8")
+    except UnicodeError as exc:
+        raise ValueError("仅支持预览 UTF-8 文本文件") from exc
     if target != (root / "SKILL.md").resolve() or user.role in {"admin", "superadmin"}:
         return content
     if not content.startswith("---"):

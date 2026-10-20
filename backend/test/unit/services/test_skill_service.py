@@ -17,6 +17,22 @@ from yuxi.permissions import ResourcePermission, resolve_skill_permission
 from yuxi.storage.postgres.models_business import Skill, User
 
 
+def test_skill_tree_marks_scripts_previewable_and_binary_attachments_unpreviewable(tmp_path):
+    (tmp_path / "SKILL.md").write_text("# Demo\n", encoding="utf-8")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "run.py").write_text("print('ok')\n", encoding="utf-8")
+    (tmp_path / "diagram.png").write_bytes(b"\x89PNG\r\n")
+
+    tree = svc.build_skill_tree(tmp_path, tmp_path)
+
+    assert {item["path"]: item["previewable"] for item in tree if not item["is_dir"]} == {
+        "SKILL.md": True,
+        "diagram.png": False,
+    }
+    assert tree[0]["children"] == [{"name": "run.py", "path": "scripts/run.py", "is_dir": False, "previewable": True}]
+
+
 _MULTIPROCESS_SKILL_SYNC_SCRIPT = """
 import json
 import os
