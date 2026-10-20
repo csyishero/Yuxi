@@ -181,7 +181,7 @@
               <button v-for="file in files" :key="file.path" type="button" :class="{ active: file.path === selectedFile }" @click="selectFile(file.path)">{{ file.path }}</button>
             </div>
             <div class="market-file-content">
-              <a-spin :spinning="fileLoading"><MarkdownPreview v-if="fileContent" :content="fileContent" :compact="true" /><a-empty v-else description="选择文件预览" /></a-spin>
+              <a-spin :spinning="fileLoading"><MarkdownPreview v-if="fileContent && isMarkdownFile(selectedFile)" :content="fileContent" :compact="true" /><pre v-else-if="fileContent" class="market-code-preview"><code>{{ fileContent }}</code></pre><a-empty v-else description="选择文件预览" /></a-spin>
             </div>
           </div>
           <div class="market-detail-actions">
@@ -221,7 +221,7 @@
 
     <a-modal v-model:open="snapshotOpen" title="提交快照" :footer="null" width="740px" :body-style="{ maxHeight: 'calc(100vh - 160px)', overflowY: 'auto' }">
       <a-button class="market-snapshot-download" @click="downloadSnapshot">下载完整快照（含附件）</a-button>
-      <div class="market-files snapshot-files"><div class="market-files-list"><strong>文件</strong><button v-for="file in snapshotFiles" :key="file.path" type="button" :class="{ active: file.path === snapshotSelected }" @click="selectSnapshotFile(file.path)">{{ file.path }}</button></div><div class="market-file-content"><a-spin :spinning="snapshotLoading"><MarkdownPreview v-if="snapshotContent" :content="snapshotContent" :compact="true" /><a-empty v-else :description="snapshotError || '选择文件预览'" /></a-spin></div></div>
+      <div class="market-files snapshot-files"><div class="market-files-list"><strong>文件</strong><button v-for="file in snapshotFiles" :key="file.path" type="button" :class="{ active: file.path === snapshotSelected }" @click="selectSnapshotFile(file.path)">{{ file.path }}</button></div><div class="market-file-content"><a-spin :spinning="snapshotLoading"><MarkdownPreview v-if="snapshotContent && isMarkdownFile(snapshotSelected)" :content="snapshotContent" :compact="true" /><pre v-else-if="snapshotContent" class="market-code-preview"><code>{{ snapshotContent }}</code></pre><a-empty v-else :description="snapshotError || '选择文件预览'" /></a-spin></div></div>
     </a-modal>
 
     <a-modal v-model:open="reviewOpen" :title="reviewApproved ? '批准发布' : '拒绝申请'" :ok-text="reviewApproved ? '确认发布' : '确认拒绝'" :confirm-loading="reviewLoading" @ok="review">
@@ -482,6 +482,7 @@ let snapshotFileRequestSequence = 0
 
 const errorText = (failure) => failure?.response?.data?.detail || failure?.message || '操作失败，请稍后重试'
 const flattenFiles = (nodes) => nodes.flatMap((node) => node.is_dir ? flattenFiles(node.children || []) : [node])
+const isMarkdownFile = (path) => path?.toLowerCase().endsWith('.md')
 const marketScopeLabel = (item) => {
   if (item.scope === 'global') return '全公司'
   if (Number(item.department_id) === Number(userStore.departmentId)) return '本部门'
@@ -1276,6 +1277,7 @@ defineExpose({ loading: computed(() => activeView.value === 'market' ? loading.v
 .market-files-list button { border: 0; background: none; text-align: left; padding: 7px; border-radius: 6px; color: var(--color-text-secondary); cursor: pointer; overflow-wrap: anywhere; }
 .market-files-list button.active { color: var(--color-primary-700); background: var(--color-primary-50); }
 .market-file-content { min-height: 0; overflow: auto; padding: 16px; }
+.market-code-preview { width: max-content; min-width: 100%; margin: 0; white-space: pre; tab-size: 4; font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 .market-detail-actions { justify-content: flex-end; margin-top: 20px; }
 .market-request { padding: 16px 0; border-bottom: 1px solid var(--gray-150); }
 .market-request-toolbar, .market-request-pages { display: flex; align-items: center; gap: 10px; margin: 10px 0; }

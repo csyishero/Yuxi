@@ -56,6 +56,8 @@ function deferred() {
   return { promise, resolve }
 }
 
+const scriptContent = '#!/usr/bin/env python3\n  print("<resource>")\n'
+
 const stub = (name) => ({
   setup(_props, { attrs, slots }) {
     return () => h(name, attrs, [attrs.message, slots.default?.()])
@@ -73,7 +75,7 @@ async function withPreview(view, verify) {
     snapshot: { 'A.md': deferred(), 'B.md': deferred() },
     market: { 'A.md': deferred(), 'B.md': deferred() }
   }
-  const files = ['SKILL.md', 'A.md', 'B.md'].map((path) => ({ path, is_dir: false }))
+  const files = ['SKILL.md', 'A.md', 'B.md', 'scripts/run.py'].map((path) => ({ path, is_dir: false }))
   const marketSkill = {
     slug: 'example', name: 'Example', owner_uid: 'publisher', owner_name: 'Publisher', description: 'Example skill',
     category: 'other', scope: 'global', latest_version: 1, install_count: 0, likes_count: 0,
@@ -96,6 +98,7 @@ async function withPreview(view, verify) {
       if (path === '/api/skills/share-requests/release-2/tree') return Response.json({ data: files })
       if (path.startsWith('/api/skills/share-requests/release-2/snapshot?')) {
         const file = new URL(path, 'http://yuxi.local').searchParams.get('path')
+        if (file === 'scripts/run.py') return Response.json({ data: { content: scriptContent } })
         return pending.snapshot[file]?.promise || Response.json({ data: { content: '# Introduction' } })
       }
       if (path.startsWith('/api/skill-market?')) return Response.json({ data: [marketSkill] })
@@ -103,6 +106,7 @@ async function withPreview(view, verify) {
       if (path === '/api/skill-market/example/tree') return Response.json({ data: files })
       if (path.startsWith('/api/skill-market/example/file?')) {
         const file = new URL(path, 'http://yuxi.local').searchParams.get('path')
+        if (file === 'scripts/run.py') return Response.json({ data: { content: scriptContent } })
         return pending.market[file]?.promise || Response.json({ data: { content: '# Introduction' } })
       }
       return Response.json({ data: [] })
@@ -220,5 +224,46 @@ test('market detail keeps B visible when A finishes after B', async () => {
     const detail = modal(host, 'Skill 详情')
     assert.match(String(findAll(detail, (item) => item.type === 'button' && visibleText(item) === 'B.md')[0].props.class), /active/)
     assert.deepEqual(previewContent(detail), ['# B detail'])
+  })
+})
+
+test('market script preview shows source text instead of parsing it as Markdown', async () => {
+  await withPreview('market', async ({ host, tick }) => {
+    const skill = findAll(host, (item) => item.type === 'button' && item.props.class === 'market-card-title')[0]
+    skill.props.onClick()
+    await tick()
+
+    const detail = modal(host, 'Skill 详情')
+    assert.deepEqual(previewContent(detail), ['# Introduction'])
+    select(detail, 'scripts/run.py')
+    await tick()
+
+    assert.deepEqual(previewContent(detail), [])
+    const code = findAll(detail, (item) => item.type === 'code')[0]
+    assert.ok(code)
+    assert.equal(code.text, scriptContent)
+    assert.equal(findAll(detail, (item) => item.type === 'resource').length, 0)
+  })
+})
+
+test('approval snapshot shows scripts as unmodified text', async () => {
+  await withPreview('personal', async ({ host, tick }) => {
+    const reviewEntry = findAll(host, (item) => item.type === 'a-button' && visibleText(item).includes('市场审核'))[0]
+    reviewEntry.props.onClick()
+    await tick()
+    const previewEntry = findAll(modal(host, '市场审核申请'), (item) => item.type === 'a-button' && visibleText(item) === '查看提交快照')[0]
+    previewEntry.props.onClick()
+    await tick()
+
+    const snapshot = modal(host, '提交快照')
+    assert.deepEqual(previewContent(snapshot), ['# Introduction'])
+    select(snapshot, 'scripts/run.py')
+    await tick()
+
+    assert.deepEqual(previewContent(snapshot), [])
+    const code = findAll(snapshot, (item) => item.type === 'code')[0]
+    assert.ok(code)
+    assert.equal(code.text, scriptContent)
+    assert.equal(findAll(snapshot, (item) => item.type === 'resource').length, 0)
   })
 })
