@@ -17,7 +17,13 @@ export function combineSkillCards(marketCards, existingCards) {
     if (!current || Number(item.id) > Number(current.id)) sharedByMarketSlug.set(item.related_market_slug, item)
   }
   return [
-    ...marketCards.map((item) => ({ ...item, kind: 'market', shared_available_slug: sharedByMarketSlug.get(item.slug)?.slug || null })),
+    ...marketCards.map((item) => ({
+      ...item,
+      kind: 'market',
+      shared_available_slug: Object.hasOwn(item, 'shared_available_slug')
+        ? item.shared_available_slug
+        : sharedByMarketSlug.get(item.slug)?.slug || null
+    })),
     ...publicExisting.map((item) => ({ ...item, kind: 'existing' }))
   ]
 }
@@ -67,29 +73,57 @@ export function skillDetailRoute(item) {
   return item.source_scope === 'personal' ? { path, query: { scope: 'personal' } } : { path }
 }
 
-/** 个人空间只展示本人源文件和已安装的市场版本。 */
-export function personalSkillItems(existingCards, marketCards, uid) {
+function withMarketInstall(personal, installed) {
+  return {
+    ...personal,
+    kind: 'personal',
+    market_install: installed || null,
+    market_installed_version: installed?.installed_version || null,
+    market_slug: installed?.slug || null,
+    market_visible: installed?.visible !== false
+  }
+}
+
+function personalAndInstalledPageItems(existingCards, marketCards, uid) {
   const personal = existingCards.filter((item) =>
     item.source_scope === 'personal' && (!item.owner_uid || item.owner_uid === uid)
   )
   const ownInstalled = new Map(marketCards
     .filter((item) => item.installed_version && ownPersonalSkill(item, personal, uid))
     .map((item) => [item.own_personal_slug, item]))
-  return [
-    ...personal.map((item) => {
-      const installed = ownInstalled.get(item.slug)
-      return { ...item, kind: 'personal', market_install: installed || null, market_installed_version: installed?.installed_version || null, market_slug: installed?.slug || null, market_visible: installed?.visible !== false }
-    }),
-    ...marketCards.filter((item) => item.installed_version && !ownInstalled.has(item.own_personal_slug)).map((item) => ({ ...item, kind: 'market' }))
-  ]
+  const created = personal.map((item) => {
+    const pageInstall = ownInstalled.get(item.slug)
+    const sourceInstall = item.market_install
+    const installed = pageInstall || (sourceInstall?.installed_version && sourceInstall.owner_uid === uid && sourceInstall.own_personal_slug === item.slug
+      ? sourceInstall : null)
+    return withMarketInstall(item, installed)
+  })
+  const installed = marketCards.filter((item) => item.installed_version).map((item) => {
+    const original = ownPersonalSkill(item, personal, uid) || ownPersonalSkill(item, [item.own_personal].filter(Boolean), uid)
+    return original ? withMarketInstall(original, item) : { ...item, kind: 'market' }
+  })
+  const coveredOriginals = new Set(created.map((item) => item.slug))
+  const privateItems = [...created, ...installed.filter((item) => item.kind !== 'personal' || !coveredOriginals.has(item.slug))]
+  return { created, installed, privateItems }
+}
+
+/** 个人空间只展示当前来源页；同源原件和安装在跨页时也保留原件身份。 */
+export function personalSkillItems(existingCards, marketCards, uid) {
+  return personalAndInstalledPageItems(existingCards, marketCards, uid).privateItems
 }
 
 /** 个人空间按来源列出本人可使用的技能；全部视图只保留同源技能的一个入口。 */
 export function personalSpaceSkillGroups(existingCards, marketCards, uid) {
-  const privateItems = personalSkillItems(existingCards, marketCards, uid)
+  const { created, installed, privateItems } = personalAndInstalledPageItems(existingCards, marketCards, uid)
   const publicItems = filterSkillCards(combineSkillCards([], existingCards), '', 'all')
-  const sharedItems = publicItems.filter((item) => item.source_type !== 'builtin')
-  const systemItems = publicItems.filter((item) => item.source_type === 'builtin')
+  // 来源页逐项对应服务端的授权分页；全部视图继续折叠同源版本。
+  const sourceItems = existingCards.filter((item) =>
+    item.source_scope !== 'personal' &&
+    item.enabled !== false &&
+    (item.source_type !== 'builtin' || !retiredBuiltinSlugs.has(item.slug))
+  ).map((item) => ({ ...item, kind: 'existing' }))
+  const sharedItems = sourceItems.filter((item) => item.source_type !== 'builtin')
+  const systemItems = sourceItems.filter((item) => item.source_type === 'builtin')
   const installedMarketSlugs = new Set(privateItems.flatMap((item) => {
     if (item.kind === 'market') return item.visible === false ? [] : [item.slug]
     return item.market_slug && item.market_visible !== false ? [item.market_slug] : []
@@ -100,6 +134,8 @@ export function personalSpaceSkillGroups(existingCards, marketCards, uid) {
       ...publicItems.filter((item) => !installedMarketSlugs.has(item.related_market_slug || item.slug))
     ],
     private: privateItems,
+    created,
+    installed,
     shared: sharedItems,
     system: systemItems
   }

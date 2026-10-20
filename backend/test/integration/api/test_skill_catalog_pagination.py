@@ -42,13 +42,14 @@ async def test_shared_skill_pages_only_count_authorized_items(test_client, stand
                     (slug, name, description, category, source_type, tool_dependencies,
                      mcp_dependencies, skill_dependencies, dir_path, share_config, enabled,
                      created_by, updated_by)
-                VALUES ($1, $1, 'pagination fixture', 'other', 'upload', '[]'::jsonb,
+                VALUES ($1, $1, 'pagination fixture', 'other', $5, '[]'::jsonb,
                         '[]'::jsonb, '[]'::jsonb, $1, $2::jsonb, $3, $4, $4)
                 """,
                 slug,
                 json.dumps(hidden_scope if index == 3 else visible_scope),
                 index != 2,
                 uid if index == 2 else "another-user",
+                "builtin" if index == 1 else "upload",
             )
 
         found = []
@@ -74,6 +75,33 @@ async def test_shared_skill_pages_only_count_authorized_items(test_client, stand
         assert cards.json()["total"] == 3
         assert cards.json()["has_more"] is False
         assert len(cards.json()["data"]) == 1
+
+        builtin = await test_client.get(
+            "/api/skills",
+            headers=headers,
+            params={"source": "shared", "shared_kind": "builtin", "search": f"pytest-page-{suffix}", "limit": 1},
+        )
+        assert builtin.status_code == 200, builtin.text
+        assert builtin.json()["total"] == 1
+        assert [item["slug"] for item in builtin.json()["data"]] == [slugs[1]]
+
+        shared_pages = []
+        for offset in (0, 1):
+            shared = await test_client.get(
+                "/api/skills",
+                headers=headers,
+                params={
+                    "source": "shared",
+                    "shared_kind": "shared",
+                    "search": f"pytest-page-{suffix}",
+                    "limit": 1,
+                    "offset": offset,
+                },
+            )
+            assert shared.status_code == 200, shared.text
+            assert shared.json()["total"] == 2
+            shared_pages.extend(item["slug"] for item in shared.json()["data"])
+        assert set(shared_pages) == {slugs[0], slugs[2]}
 
         denied = await test_client.get(f"/api/system/skills/{slugs[3]}/details", headers=headers)
         assert denied.status_code == 404

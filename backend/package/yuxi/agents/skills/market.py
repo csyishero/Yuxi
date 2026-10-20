@@ -14,9 +14,11 @@ from yuxi.agents.skills.market_repository import MarketSkillRepository
 from yuxi.agents.skills.repository import SkillRepository
 from yuxi.agents.skills.service import (
     ResolvedSkill,
+    approved_shared_origins,
     build_skill_tree,
     compute_skill_dir_hash,
     copy_skill_snapshot,
+    get_personal_skill,
     is_skill_text_path,
     list_personal_skills,
     lock_skill_slug_allocation,
@@ -403,17 +405,68 @@ async def list_market_skills(
     listings = await repo.visible(
         user, query=query, sort=sort, installed_only=installed_only, offset=offset, limit=limit, category=category
     )
+    shared_by_source = await _available_shared_slugs_by_source(db, user=user, listings=listings)
     visible_mcps = await get_visible_mcp_reference_slugs(db, user) if listings else None
     cards = []
     for listing in listings:
-        cards.append(await _market_card(db, repo, listing, user, visible_mcp_slugs=visible_mcps))
+        cards.append(
+            await _market_card(
+                db,
+                repo,
+                listing,
+                user,
+                visible_mcp_slugs=visible_mcps,
+                shared_available_slug=shared_by_source.get((listing.owner_uid, listing.personal_slug)),
+            )
+        )
     return cards
+
+
+async def page_market_skills(
+    db: AsyncSession,
+    *,
+    user: User,
+    query: str = "",
+    sort: str = "recent",
+    installed_only: bool = False,
+    offset: int = 0,
+    limit: int = 100,
+    category: str | None = None,
+) -> tuple[list[dict], int]:
+    """返回市场当前页和同一授权筛选条件下的准确总数。"""
+    cards = await list_market_skills(
+        db,
+        user=user,
+        query=query,
+        sort=sort,
+        installed_only=installed_only,
+        offset=offset,
+        limit=limit,
+        category=category,
+    )
+    normalized_category = normalize_skill_category(category) if category is not None else None
+    total = await MarketSkillRepository(db).count_visible(
+        user, query=query, category=normalized_category, installed_only=installed_only
+    )
+    return cards, total
 
 
 async def list_user_market_installs(db: AsyncSession, *, user: User) -> list[dict]:
     """列出本人已安装版本的安全摘要，包括现时可见状态。"""
     items = await MarketSkillRepository(db).installed_releases_for_user(str(user.uid))
     return _market_install_summaries(items, user=user)
+
+
+async def personal_market_install_summaries(
+    db: AsyncSession, *, user: User, personal_slugs: set[str]
+) -> dict[str, dict]:
+    """仅为当前个人技能页查本人同源安装，并复用安装列表的权限裁剪。"""
+    rows = await MarketSkillRepository(db).installed_releases_for_personal_slugs(str(user.uid), personal_slugs)
+    return {
+        card["own_personal_slug"]: card
+        for card in _market_install_summaries(rows, user=user)
+        if card["own_personal_slug"] is not None
+    }
 
 
 async def page_user_market_installs(
@@ -423,7 +476,25 @@ async def page_user_market_installs(
     items, total = await MarketSkillRepository(db).page_installed_releases_for_user(
         str(user.uid), user=user, offset=offset, limit=limit, search=search
     )
-    return _market_install_summaries(items, user=user), total
+    cards = _market_install_summaries(items, user=user)
+    for card in cards:
+        card["own_personal"] = None
+        if personal_slug := card["own_personal_slug"]:
+            try:
+                personal = await get_personal_skill(str(user.uid), personal_slug)
+            except ValueError:
+                continue
+            card["own_personal"] = {
+                "id": personal.id,
+                "slug": personal.slug,
+                "name": personal.name,
+                "description": personal.description,
+                "category": personal.category,
+                "source_type": personal.source_type,
+                "source_scope": personal.source_scope,
+                "enabled": personal.enabled,
+            }
+    return cards, total
 
 
 def _market_install_summaries(items: list[tuple[MarketSkill, MarketSkillRelease]], *, user: User) -> list[dict]:
@@ -492,12 +563,60 @@ async def get_market_skill(db: AsyncSession, *, slug: str, user: User) -> dict:
     if listing is None:
         raise ValueError("市场 Skill 不存在")
     visible_mcps = await get_visible_mcp_reference_slugs(db, user)
-    card = await _market_card(db, repo, listing, user, visible_mcp_slugs=visible_mcps)
+    shared_by_source = await _available_shared_slugs_by_source(db, user=user, listings=[listing])
+    card = await _market_card(
+        db,
+        repo,
+        listing,
+        user,
+        visible_mcp_slugs=visible_mcps,
+        shared_available_slug=shared_by_source.get((listing.owner_uid, listing.personal_slug)),
+    )
     card["releases"] = [
         {"version": release.version, "created_at": format_utc_datetime(release.created_at)}
         for release in await repo.releases(listing.id)
     ]
     return card
+
+
+async def _available_shared_slugs_by_source(
+    db: AsyncSession, *, user: User, listings: list[MarketSkill]
+) -> dict[tuple[str, str], str]:
+    """仅按当前市场页原件查找用户能用且没有被个人技能覆盖的共享副本。"""
+    sources = {(item.owner_uid, item.personal_slug) for item in listings}
+    if not sources:
+        return {}
+    current_or_legacy = or_(
+        Skill.id == SkillShareRequest.published_skill_id,
+        and_(SkillShareRequest.published_skill_id.is_(None), Skill.slug == SkillShareRequest.published_slug),
+    )
+    rows = await db.scalars(
+        select(Skill)
+        .join(SkillShareRequest, current_or_legacy)
+        .where(
+            tuple_(SkillShareRequest.owner_uid, SkillShareRequest.personal_slug).in_(sources),
+            SkillShareRequest.channel == "shared",
+            SkillShareRequest.status == "approved",
+            Skill.source_type == "personal_share",
+            Skill.enabled.is_(True),
+        )
+    )
+    candidates = list({item.id: item for item in rows.all()}.values())
+    origins = await approved_shared_origins(db, candidates)
+    latest: dict[tuple[str, str], Skill] = {}
+    for skill in candidates:
+        source = origins.get(skill.slug)
+        if source not in sources or not user_can_access_skill(user, skill):
+            continue
+        try:
+            await get_personal_skill(str(user.uid), skill.slug)
+        except ValueError:
+            pass
+        else:
+            continue
+        if source not in latest or skill.id > latest[source].id:
+            latest[source] = skill
+    return {source: skill.slug for source, skill in latest.items()}
 
 
 async def _market_card(
@@ -508,6 +627,7 @@ async def _market_card(
     *,
     visible_mcp_slugs: set[str] | None,
     metrics: tuple[int, int] | None = None,
+    shared_available_slug: str | None = None,
 ) -> dict:
     """组合当前版本、作者、指标和用户安装状态。"""
     release = await repo.release(listing.latest_release_id)
@@ -523,6 +643,7 @@ async def _market_card(
         "owner_uid": listing.owner_uid,
         "owner_name": owner or listing.owner_uid,
         "own_personal_slug": listing.personal_slug if listing.owner_uid == str(user.uid) else None,
+        "shared_available_slug": shared_available_slug,
         "scope": listing.scope,
         "department_id": listing.department_id,
         "latest_version": release.version,

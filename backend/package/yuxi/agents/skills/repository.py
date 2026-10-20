@@ -8,6 +8,9 @@ from yuxi.storage.postgres.models_business import Skill, User
 from yuxi.utils.datetime_utils import utc_now_naive
 
 
+RETIRED_BUILTIN_SKILL_SLUGS = ("image-gen", "mysql-reporter")
+
+
 class SkillRepository:
     def __init__(self, db_session: AsyncSession):
         self.db = db_session
@@ -31,6 +34,8 @@ class SkillRepository:
         search: str = "",
         audience_search: str | None = None,
         audience_department_id: int | None = None,
+        shared_kind: str | None = None,
+        exclude_retired_builtin: bool = False,
     ) -> tuple[list[Skill], int]:
         """在数据库中按读取和管理授权筛选共享 Skill，并返回稳定分页。"""
         config = cast(Skill.share_config, JSONB)
@@ -113,6 +118,22 @@ class SkillRepository:
             visibility = or_(Skill.source_type == "builtin", authorized) if user.role == "admin" else authorized
 
         filters = [visibility]
+        if shared_kind == "builtin":
+            filters.extend(
+                (
+                    Skill.source_type == "builtin",
+                    Skill.enabled.is_(True),
+                    Skill.slug.notin_(RETIRED_BUILTIN_SKILL_SLUGS),
+                )
+            )
+        elif shared_kind == "shared":
+            filters.extend((Skill.source_type != "builtin", Skill.enabled.is_(True)))
+        if exclude_retired_builtin:
+            filters.append(or_(Skill.source_type != "builtin", Skill.slug.notin_(RETIRED_BUILTIN_SKILL_SLUGS)))
+            # 内置技能只有管理员可管理。普通用户即使恰好是历史记录的创建者，
+            # 禁用后也不能经过下面的授权后处理，因此必须在 count/page 前排除。
+            if user.role not in {"admin", "superadmin"}:
+                filters.append(or_(Skill.source_type != "builtin", Skill.enabled.is_(True)))
         if search.strip():
             needle = search.strip()
             filters.append(

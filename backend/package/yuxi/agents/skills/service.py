@@ -1013,6 +1013,8 @@ async def page_skill_cards_for_user(
     search: str = "",
     audience_search: str | None = None,
     audience_department_id: int | None = None,
+    shared_kind: str | None = None,
+    exclude_retired_builtin: bool = False,
 ) -> tuple[list[ResolvedSkill], int | None, bool]:
     """按个人或共享来源分页管理卡片，并保持原有卡片授权与标记。"""
     needle = search.strip().casefold()
@@ -1033,6 +1035,8 @@ async def page_skill_cards_for_user(
             search=search,
             audience_search=audience_search,
             audience_department_id=audience_department_id,
+            **({"shared_kind": shared_kind} if shared_kind is not None else {}),
+            **({"exclude_retired_builtin": True} if exclude_retired_builtin else {}),
         )
         matching_personal = []
         for item in shared:
@@ -1264,16 +1268,22 @@ async def page_visible_skills_for_management(
     search: str = "",
     audience_search: str | None = None,
     audience_department_id: int | None = None,
+    shared_kind: str | None = None,
+    exclude_retired_builtin: bool = False,
 ) -> tuple[list[Skill], int]:
     """以数据库授权条件分页读取管理页可见的共享 Skill。"""
-    audience_filters = {}
+    query_filters = {}
     if audience_search or audience_department_id is not None:
-        audience_filters = {
+        query_filters = {
             "audience_search": audience_search,
             "audience_department_id": audience_department_id,
         }
+    if shared_kind is not None:
+        query_filters["shared_kind"] = shared_kind
+    if exclude_retired_builtin:
+        query_filters["exclude_retired_builtin"] = True
     items, total = await SkillRepository(db).page_visible(
-        user, limit=limit, offset=offset, search=search, **audience_filters
+        user, limit=limit, offset=offset, search=search, **query_filters
     )
     visible = [
         item

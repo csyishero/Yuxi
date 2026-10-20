@@ -31,17 +31,19 @@ test('技能卡片与管理员个人目录请求都把搜索和续页条件传�
     const user = useUserStore()
     user.token = 'test-token'
 
-    await listSkillCards({ source: 'shared', limit: 30, offset: 30, search: '分析', audienceDepartmentId: 3 })
+    await listSkillCards({ source: 'shared', sharedKind: 'builtin', limit: 30, offset: 30, search: '分析', audienceDepartmentId: 3, excludeRetiredBuiltin: true })
     await listPersonalSkillCatalog({ limit: 30, offset: 30, search: '报告', ownerSearch: 'alice', departmentId: 3, excludeOwn: true, cardPage: true })
 
     assert.equal(requested.length, 2)
     const url = new URL(requested[0], 'http://local.test')
     assert.equal(url.pathname, '/api/skills')
     assert.equal(url.searchParams.get('source'), 'shared')
+    assert.equal(url.searchParams.get('shared_kind'), 'builtin')
     assert.equal(url.searchParams.get('limit'), '30')
     assert.equal(url.searchParams.get('offset'), '30')
     assert.equal(url.searchParams.get('search'), '分析')
     assert.equal(url.searchParams.get('audience_department_id'), '3')
+    assert.equal(url.searchParams.get('exclude_retired_builtin'), 'true')
 
     const catalogUrl = new URL(requested[1], 'http://local.test')
     assert.equal(catalogUrl.pathname, '/api/skills/personal-catalog')

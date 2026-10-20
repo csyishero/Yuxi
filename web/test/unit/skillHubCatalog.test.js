@@ -64,6 +64,20 @@ test('停用或被个人原件覆盖的共享副本不标记市场卡为已可�
   assert.equal(market.shared_available_slug, null)
 })
 
+test('市场后端给出的可见共享来源不因当前共享页缺席而丢失', () => {
+  const [market] = combineSkillCards(
+    [{ slug: 'report-market', shared_available_slug: 'report-shared-v3' }],
+    []
+  )
+  assert.equal(market.shared_available_slug, 'report-shared-v3')
+
+  const [noShared] = combineSkillCards(
+    [{ slug: 'report-market', shared_available_slug: null }],
+    [{ slug: 'stale-shared', related_market_slug: 'report-market', source_type: 'personal_share' }]
+  )
+  assert.equal(noShared.shared_available_slug, null)
+})
+
 test('个人空间折叠本人原件和已安装市场版本，保留他人市场安装', () => {
   const items = personalSkillItems(
     [
@@ -83,6 +97,22 @@ test('个人空间折叠本人原件和已安装市场版本，保留他人市�
   assert.equal(items[0].market_slug, 'mine-2')
   assert.equal(items[0].market_install.slug, 'mine-2')
   assert.equal(items[0].market_visible, true)
+})
+
+test('共享来源保留每个已启用版本和个人覆盖项，全部视图继续合并同源入口', () => {
+  const groups = personalSpaceSkillGroups(
+    [
+      { slug: 'mine', source_scope: 'personal', owner_uid: 'alice' },
+      { id: 1, slug: 'report-v1', source_scope: 'shared', source_type: 'personal_share', related_market_slug: 'report-market' },
+      { id: 2, slug: 'report-v2', source_scope: 'shared', source_type: 'personal_share', related_market_slug: 'report-market' },
+      { id: 3, slug: 'mine', source_scope: 'shared', source_type: 'upload', shadowed_by_personal: true }
+    ],
+    [],
+    'alice'
+  )
+
+  assert.deepEqual(groups.shared.map((item) => item.id), [1, 2, 3])
+  assert.deepEqual(groups.all.map((item) => item.slug), ['mine', 'report-v2'])
 })
 
 test('失去部门权限后仍保留自己的市场安装入口以便卸载', () => {

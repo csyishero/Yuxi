@@ -60,10 +60,13 @@ export const getSkillDetail = async (slug) => apiGet(`${BASE_URL}/${encodeURICom
 export const getPersonalSkillDetail = async (slug) => apiGet(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}`)
 
 export const listSkillCards = async ({
-  source, limit, offset, search, refreshPersonal = false, audienceSearch, audienceDepartmentId
+  source, sharedKind, limit, offset, search, refreshPersonal = false, audienceSearch, audienceDepartmentId,
+  excludeRetiredBuiltin = false
 } = {}) => {
   const params = new URLSearchParams()
   if (source) params.set('source', source)
+  if (sharedKind) params.set('shared_kind', sharedKind)
+  if (excludeRetiredBuiltin) params.set('exclude_retired_builtin', 'true')
   if (limit !== undefined) params.set('limit', String(limit))
   if (offset !== undefined) params.set('offset', String(offset))
   if (search?.trim()) params.set('search', search.trim())

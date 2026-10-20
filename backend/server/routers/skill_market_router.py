@@ -12,8 +12,8 @@ from yuxi.agents.skills.market import (
     install_market_skill,
     list_market_rankings,
     list_market_requests,
-    list_market_skills,
     list_user_market_installs,
+    page_market_skills,
     page_user_market_installs,
     market_skill_file,
     market_skill_tree,
@@ -68,18 +68,23 @@ async def list_market_route(
 ):
     """搜索并排序当前用户可见的市场条目。"""
     try:
+        items, total = await page_market_skills(
+            db,
+            user=user,
+            query=query,
+            category=category,
+            sort=sort,
+            installed_only=installed_only,
+            offset=offset,
+            limit=limit,
+        )
         return {
             "success": True,
-            "data": await list_market_skills(
-                db,
-                user=user,
-                query=query,
-                category=category,
-                sort=sort,
-                installed_only=installed_only,
-                offset=offset,
-                limit=limit,
-            ),
+            "data": items,
+            "total": total,
+            "has_more": offset + limit < total,
+            "limit": limit,
+            "offset": offset,
         }
     except ValueError as exc:
         _raise_market_error(exc)

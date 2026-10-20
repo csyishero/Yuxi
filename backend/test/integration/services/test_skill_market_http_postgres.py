@@ -190,7 +190,9 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
                 ) == shared_published.published_slug
 
             current = User(uid="risk-user", username="Risk", password_hash="x", role="user", department_id=2)
-            assert (await client.get("/api/skill-market")).json()["data"] == []
+            risk_catalog = (await client.get("/api/skill-market")).json()
+            assert risk_catalog["data"] == []
+            assert risk_catalog["total"] == 0
             assert (await client.get("/api/skill-market?category=finance_analysis")).json()["data"] == []
             assert (await client.get("/api/skill-market/credit-review")).status_code == 404
             assert (await client.post("/api/skill-market/credit-review/install")).status_code == 404
@@ -202,7 +204,9 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
             current = User(uid="credit-user", username="Credit", password_hash="x", role="user", department_id=1)
             listing = (await client.get("/api/skill-market?sort=installs")).json()["data"][0]
             assert listing["category"] == "finance_analysis"
-            assert len((await client.get("/api/skill-market?category=finance_analysis&limit=1")).json()["data"]) == 1
+            finance_page = (await client.get("/api/skill-market?category=finance_analysis&limit=1")).json()
+            assert len(finance_page["data"]) == 1
+            assert (finance_page["total"], finance_page["has_more"]) == (1, False)
             assert (await client.get("/api/skill-market?category=office_tools")).json()["data"] == []
             assert (await client.get("/api/skill-market?category=invalid")).status_code == 400
             assert listing["installed_version"] is None
@@ -211,7 +215,9 @@ async def test_market_review_visibility_install_like_and_manual_upgrade(monkeypa
             assert installed.status_code == 200, installed.text
             assert installed.json()["data"]["installed_version"] == 1
             assert installed.json()["data"]["install_count"] == 1
-            assert len((await client.get("/api/skill-market?installed_only=true")).json()["data"]) == 1
+            installed_page = (await client.get("/api/skill-market?installed_only=true")).json()
+            assert len(installed_page["data"]) == 1
+            assert installed_page["total"] == 1
             assert len((await client.get("/api/skill-market?limit=1&offset=0")).json()["data"]) == 1
             assert (await client.get("/api/skill-market?limit=1&offset=1")).json()["data"] == []
             liked = await client.post("/api/skill-market/credit-review/like")

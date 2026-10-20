@@ -253,7 +253,13 @@ def test_skill_cards_page_separates_personal_and_shared_sources(monkeypatch):
         assert audience_search is None and audience_department_id is None
         return [_skill("later-personal", source_type="personal", created_by="user")], None, True
 
+    async def fake_installs(_db, *, user, personal_slugs):
+        assert user.uid == "user"
+        assert personal_slugs == {"later-personal"}
+        return {}
+
     monkeypatch.setattr("server.routers.skill_router.page_skill_cards_for_user", fake_page)
+    monkeypatch.setattr("server.routers.skill_router.personal_market_install_summaries", fake_installs)
     client = TestClient(_build_app(role="user"))
     resp = client.get("/api/skills?source=personal&limit=1&offset=1&search=later")
 
@@ -262,6 +268,65 @@ def test_skill_cards_page_separates_personal_and_shared_sources(monkeypatch):
     assert resp.json()["total"] is None
     assert resp.json()["has_more"] is True
     assert resp.json()["offset"] == 1
+
+
+def test_shared_kind_is_rejected_outside_shared_source(monkeypatch):
+    """系统与共享的子分类不能用于个人或混合来源。"""
+
+    async def fake_page(*_args, **_kwargs):
+        return [], 0, False
+
+    monkeypatch.setattr("server.routers.skill_router.page_skill_cards_for_user", fake_page)
+    client = TestClient(_build_app(role="user"))
+
+    for source in ("all", "personal"):
+        for pagination in ("", "&limit=1"):
+            response = client.get(f"/api/skills?source={source}&shared_kind=builtin{pagination}")
+            assert response.status_code == 422
+
+
+def test_shared_kind_reaches_shared_skill_page(monkeypatch):
+    """共享子分类应交给数据库分页，而不是对当前页二次筛选。"""
+
+    async def fake_page(_db, _user, **kwargs):
+        assert kwargs["shared_kind"] == "builtin"
+        return [_skill("builtin-example", source_type="builtin")], 1, False
+
+    monkeypatch.setattr("server.routers.skill_router.page_skill_cards_for_user", fake_page)
+    response = TestClient(_build_app(role="user")).get("/api/skills?source=shared&shared_kind=builtin&limit=1")
+
+    assert response.status_code == 200
+    assert [item["slug"] for item in response.json()["data"]] == ["builtin-example"]
+    assert response.json()["total"] == 1
+
+
+def test_unpaged_shared_kind_hides_retired_and_disabled_but_governance_keeps_them(monkeypatch):
+    """旧目录调用也与分页目录一致，治理入口仍展示停用技能。"""
+    all_cards = [
+        skill_service._resolved_shared_skill(item)
+        for item in [
+            _skill("builtin-active", source_type="builtin"),
+            _skill("image-gen", source_type="builtin"),
+            _skill("mysql-reporter", source_type="builtin"),
+            _skill("builtin-disabled", source_type="builtin", enabled=False),
+            _skill("shared-disabled", enabled=False),
+        ]
+    ]
+
+    async def fake_list(_db, _user, **_kwargs):
+        return all_cards
+
+    monkeypatch.setattr("server.routers.skill_router.list_skill_cards_for_user", fake_list)
+    client = TestClient(_build_app(role="superadmin"))
+
+    catalog = client.get("/api/skills?source=shared&shared_kind=builtin")
+    assert catalog.status_code == 200, catalog.text
+    assert [item["slug"] for item in catalog.json()["data"]] == ["builtin-active"]
+    assert catalog.json()["total"] == 1
+
+    governance = client.get("/api/skills?source=shared")
+    assert governance.status_code == 200, governance.text
+    assert governance.json()["total"] == 5
 
 
 def test_personal_skill_confirm_and_delete_routes(monkeypatch):

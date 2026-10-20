@@ -23,6 +23,26 @@ class _PageSession:
 
 
 @pytest.mark.asyncio
+async def test_personal_page_install_lookup_is_bounded_by_current_user_owner_and_slugs():
+    """个人卡关联只读取本人安装、本人发布以及当前页原件。"""
+    session = _PageSession()
+
+    rows = await MarketSkillRepository(session).installed_releases_for_personal_slugs(
+        "viewer", {"owned-one", "owned-two"}
+    )
+
+    assert rows == []
+    statement = str(
+        session.page_statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert "market_skill_installs.uid = 'viewer'" in statement
+    assert "market_skills.owner_uid = 'viewer'" in statement
+    assert "market_skills.personal_slug IN ('owned-one', 'owned-two')" in statement or (
+        "market_skills.personal_slug IN ('owned-two', 'owned-one')" in statement
+    )
+
+
+@pytest.mark.asyncio
 async def test_install_search_only_uses_visible_release_content():
     """隐藏安装仅允许按公开标识搜索，名称及描述受现时可见范围限制。"""
     session = _PageSession()

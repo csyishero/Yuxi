@@ -45,5 +45,6 @@ async def test_install_page_keeps_hidden_release_private(monkeypatch):
             "personal_slug": None,
             "own_personal_slug": None,
             "visible": False,
+            "own_personal": None,
         }
     ]

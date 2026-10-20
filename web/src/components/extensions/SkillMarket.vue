@@ -20,36 +20,36 @@
           <div class="skill-page-actions">
             <a-button @click="selectView('market')">去市场找技能</a-button>
             <a-button v-if="userStore.isAdmin" @click="openRequests">市场审核<span v-if="pendingRequestCount"> ({{ pendingRequestCount }})</span></a-button>
-            <a-button v-if="userStore.isAdmin || hasManageableSharedSkills || legacyHasMore.shared" @click="managementOpen = true">技能治理</a-button>
+            <a-button v-if="userStore.isAdmin || hasManageableSharedSkills || legacyTotals.shared > legacySharedCards.length" @click="managementOpen = true">技能治理</a-button>
             <SkillCardList toolbar-only :market-installs="installedCards" @updated="refreshHome" />
           </div>
         </div>
         <div v-if="!personalError && !legacyLoading && !installedLoading" class="skill-overview" aria-label="我的技能概况">
-          <div><strong>{{ ownedCount }}{{ legacyHasMore.personal ? '+' : '' }}</strong><span>我创建的</span></div>
-          <div><strong>{{ installedCount }}{{ installedHasMore ? '+' : '' }}</strong><span>市场已安装</span></div>
-          <div><strong>{{ availableSharedCount }}{{ legacyHasMore.shared ? '+' : '' }}</strong><span>团队与系统可用</span></div>
+          <div><strong>{{ ownedCount }}{{ legacyHasMore.personal ? '+' : '' }}</strong><span>我创建的 · 第 {{ legacyPages.personal }} 页</span></div>
+          <div><strong>{{ installedTotal }}</strong><span>市场已安装</span></div>
+          <div><strong>{{ legacyTotals.shared + legacyTotals.builtin }}</strong><span>团队与系统可用</span></div>
           <div v-if="pendingRequestCount"><strong>{{ pendingRequestCount }}</strong><span>市场待审核</span></div>
         </div>
         <div class="skill-list-heading">
           <div><h3>{{ releaseView ? '发布与审核记录' : '技能列表' }}</h3><p>{{ releaseView ? '查看已提交的共享与市场申请、审核结果和当时的文件快照。' : '直接查看、发布和管理技能。' }}</p></div>
           <a-button type="link" @click="releaseView = !releaseView">{{ releaseView ? '返回技能列表' : '查看发布记录' }}</a-button>
         </div>
-        <PublicationRecords v-if="releaseView" :personal-skills="personalError || legacyLoading || legacyHasMore.personal || personalQuery.trim() ? null : ownedSkills" />
+        <PublicationRecords v-if="releaseView" :personal-skills="personalError || legacyLoading || legacyHasMore.personal || legacyPages.personal !== 1 || appliedPersonalQuery ? null : ownedSkills" />
         <template v-else>
           <div class="skill-list-toolbar">
             <nav class="personal-source-filters" aria-label="我的技能来源">
-              <button v-for="filter in personalSourceFilters" :key="filter.key" type="button" :class="{ active: personalSource === filter.key }" :aria-current="personalSource === filter.key ? 'page' : undefined" @click="personalSource = filter.key">{{ filter.label }}<span>{{ searchedPersonalSpaceGroups[filter.key].length }}{{ filterHasMore(filter.key) ? '+' : '' }}</span></button>
+              <button v-for="filter in personalSourceFilters" :key="filter.key" type="button" :class="{ active: personalSource === filter.key }" :aria-current="personalSource === filter.key ? 'page' : undefined" @click="selectPersonalSource(filter.key)">{{ filter.label }}<span v-if="filter.key === 'installed'">{{ installedTotal }}</span><span v-else-if="filter.key === 'shared'">{{ legacyTotals.shared }}</span><span v-else-if="filter.key === 'system'">{{ legacyTotals.builtin }}</span></button>
             </nav>
             <a-input v-model:value="personalQuery" allow-clear aria-label="搜索我的技能" placeholder="搜索我的技能" class="personal-search" />
           </div>
-          <a-spin :spinning="legacyLoading || installedLoading">
-            <div v-if="!filteredPersonalItems.length && !legacyLoading && !installedLoading && !personalError" class="personal-empty">{{ filterHasMore(personalSource) ? '当前页没有匹配项，可继续加载后续技能。' : personalQuery ? '没有找到匹配的技能。' : '这里还没有技能。可以上传或从市场安装。' }}</div>
+          <a-spin :spinning="personalBusy">
+            <div v-if="!filteredPersonalItems.length && !personalBusy && !personalError" class="personal-empty">{{ appliedPersonalQuery ? '没有找到匹配的技能。' : '这里还没有技能。可以上传或从市场安装。' }}</div>
             <div v-else-if="filteredPersonalItems.length" class="skill-list">
               <div class="skill-list-header"><span>技能</span><span>来源</span><span>状态</span><span>操作</span></div>
               <div v-for="item in filteredPersonalItems" :key="`${item.kind}:${item.slug}`" class="skill-row">
                 <div class="skill-row-name"><span class="skill-row-icon"><Sparkles v-if="item.kind === 'personal'" :size="18" /><BookOpen v-else :size="18" /></span><span><button type="button" :disabled="item.kind === 'market' && item.visible === false" @click="openPersonalItem(item)">{{ item.name }}</button><small>{{ item.description || item.slug }}</small></span></div>
                 <div class="skill-row-origin">{{ personalItemOrigin(item) }}<small>{{ skillCategoryLabel(item.category) }}</small></div>
-                <div class="skill-row-status" :class="{ 'is-unavailable': item.visible === false || item.market_visible === false }">{{ personalItemStatus(item) }}</div>
+                <div class="skill-row-status" :class="{ 'is-unavailable': item.visible === false || item.market_visible === false || item.shadowed_by_personal }">{{ personalItemStatus(item) }}</div>
                 <div class="skill-row-actions">
                   <template v-if="item.kind === 'personal'"><a-button size="small" @click="openPersonalItem(item)">查看</a-button><a-button size="small" @click="openPublish(item)">发布技能</a-button><a-button v-if="item.market_installed_version" size="small" :danger="item.market_visible === false" @click="item.market_visible === false ? confirmUninstall(item.market_install) : openDetail(item.market_slug)">{{ item.market_visible === false ? '卸载旧安装' : '管理安装' }}</a-button></template>
                   <template v-else-if="item.kind === 'market'"><a-button v-if="item.visible !== false" size="small" @click="openPersonalItem(item)">查看</a-button><a-button size="small" danger @click="confirmUninstall(item)">{{ item.visible === false ? '卸载旧安装' : '卸载' }}</a-button></template>
@@ -57,10 +57,24 @@
                 </div>
               </div>
             </div>
-            <div v-if="!legacyLoading && !installedLoading && !personalError && (showMorePersonal || showMoreShared || showMoreInstalled)" class="personal-more">
-              <a-button v-if="showMorePersonal" :loading="legacyMoreLoading.personal" @click="loadLegacySource('personal')">加载更多我创建的技能</a-button>
-              <a-button v-if="showMoreInstalled" :loading="installedMoreLoading" @click="loadInstalledMore">加载更多市场已安装技能</a-button>
-              <a-button v-if="showMoreShared" :loading="legacyMoreLoading.shared" @click="loadLegacySource('shared')">加载更多团队与系统技能</a-button>
+            <div v-if="!personalBusy && !personalError" class="personal-pages">
+              <div v-if="['all', 'created'].includes(personalSource) && (legacyPages.personal > 1 || legacyHasMore.personal)" class="personal-page-group" aria-label="我创建的技能分页">
+                <span>我创建的 · 第 {{ legacyPages.personal }} 页</span>
+                <a-button size="small" :disabled="legacyPages.personal === 1" @click="changeLegacyPage('personal', legacyPages.personal - 1)">上一页</a-button>
+                <a-button size="small" :disabled="!legacyHasMore.personal" @click="changeLegacyPage('personal', legacyPages.personal + 1)">下一页</a-button>
+              </div>
+              <div v-if="['all', 'installed'].includes(personalSource) && installedTotal > installedPageSize" class="personal-page-group" aria-label="市场已安装技能分页">
+                <span>市场已安装 · 共 {{ installedTotal }} 项</span>
+                <a-pagination :current="installedPage" :page-size="installedPageSize" :total="installedTotal" :page-size-options="['20', '30', '50']" show-size-changer size="small" @change="changeInstalledPage" />
+              </div>
+              <div v-if="['all', 'shared'].includes(personalSource) && legacyTotals.shared > legacyPageSizes.shared" class="personal-page-group" aria-label="团队共享技能分页">
+                <span>团队共享 · 共 {{ legacyTotals.shared }} 项</span>
+                <a-pagination :current="legacyPages.shared" :page-size="legacyPageSizes.shared" :total="legacyTotals.shared" :page-size-options="['20', '30', '50']" show-size-changer size="small" @change="(page, size) => changeLegacyPage('shared', page, size)" />
+              </div>
+              <div v-if="['all', 'system'].includes(personalSource) && legacyTotals.builtin > legacyPageSizes.builtin" class="personal-page-group" aria-label="系统内置技能分页">
+                <span>系统内置 · 共 {{ legacyTotals.builtin }} 项</span>
+                <a-pagination :current="legacyPages.builtin" :page-size="legacyPageSizes.builtin" :total="legacyTotals.builtin" :page-size-options="['20', '30', '50']" show-size-changer size="small" @change="(page, size) => changeLegacyPage('builtin', page, size)" />
+              </div>
             </div>
           </a-spin>
           <p class="skill-list-hint">共享、系统和已安装的市场技能，可在智能体中选择使用。</p>
@@ -73,12 +87,12 @@
         <div class="skill-page-title"><div class="skill-page-icon"><Sparkles :size="25" /></div><div><h2>技能市场</h2><p>发现已发布的技能，查看适用范围并安装到自己的空间。</p></div></div>
         <a-button class="market-rankings-button" @click="openRankings"><ChartNoAxesColumn :size="16" /> 热门榜</a-button>
       </div>
-      <div class="market-toolbar"><a-input-search v-model:value="query" placeholder="搜索技能名称或用途" allow-clear class="market-search" @search="refresh" @pressEnter="refresh" /><span v-if="!marketError && !loading" class="market-result-count">已显示 {{ visibleCards.length }} 项</span></div>
+      <div class="market-toolbar"><a-input-search v-model:value="query" placeholder="搜索技能名称或用途" allow-clear class="market-search" @search="searchMarket" @pressEnter="searchMarket" /><span v-if="!marketError && !loading" class="market-result-count">共 {{ marketTotal }} 项</span></div>
       <nav class="market-categories" aria-label="技能方向筛选">
         <button type="button" :class="{ active: selectedCategory === 'all' }" :aria-current="selectedCategory === 'all' ? 'page' : undefined" @click="selectCategory('all')">全部方向</button>
         <button v-for="category in skillCategories" :key="category.value" type="button" :class="{ active: selectedCategory === category.value }" :aria-current="selectedCategory === category.value ? 'page' : undefined" @click="selectCategory(category.value)">{{ category.label }}</button>
       </nav>
-      <a-alert v-if="marketError" type="error" :message="marketError" show-icon class="market-error"><template #action><a-button size="small" @click="refresh">重试</a-button></template></a-alert>
+      <a-alert v-if="marketError" type="error" :message="marketError" show-icon class="market-error"><template #action><a-button size="small" @click="fetchMarketPage(marketPage)">重试</a-button></template></a-alert>
       <a-spin :spinning="loading">
         <div v-if="!visibleCards.length && !loading && !marketError" class="market-empty"><Store :size="28" /><strong>{{ catalogEmptyState.title }}</strong><span>{{ catalogEmptyState.hint }}</span></div>
         <div v-else-if="visibleCards.length" class="market-grid">
@@ -95,7 +109,7 @@
             </div>
           </article>
         </div>
-        <div v-if="hasMore && !loading && !marketError" class="market-more"><a-button :loading="loadingMore" @click="loadMore">加载更多</a-button></div>
+        <div v-if="marketTotal > marketPageSize && !loading && !marketError" class="market-pages"><a-pagination :current="marketPage" :page-size="marketPageSize" :total="marketTotal" :page-size-options="['12', '24', '48']" show-size-changer @change="changeMarketPage" /></div>
       </a-spin>
       <p class="skill-list-hint">市场只展示当前账号有权查看的已上架技能。</p>
     </section>
@@ -302,20 +316,27 @@ const cards = ref([])
 const installedCards = ref([])
 const legacyPersonalCards = ref([])
 const legacySharedCards = ref([])
-const legacyCards = computed(() => [...legacyPersonalCards.value, ...legacySharedCards.value])
+const legacyBuiltinCards = ref([])
+const legacyCards = computed(() => [...legacyPersonalCards.value, ...legacySharedCards.value, ...legacyBuiltinCards.value])
 const loading = ref(false)
 const legacyLoading = ref(false)
 const installedLoading = ref(false)
-const legacyHasMore = ref({ personal: false, shared: false })
-const legacyMoreLoading = ref({ personal: false, shared: false })
-const installedHasMore = ref(false)
-const installedMoreLoading = ref(false)
-const loadingMore = ref(false)
-const hasMore = ref(false)
-const pageSize = 100
+const legacyHasMore = ref({ personal: false })
+const legacyPageLoading = ref({ personal: false, shared: false, builtin: false })
+const legacyPages = ref({ personal: 1, shared: 1, builtin: 1 })
+const legacyPageSizes = ref({ shared: 30, builtin: 30 })
+const legacyTotals = ref({ shared: 0, builtin: 0 })
+const installedPage = ref(1)
+const installedPageSize = ref(30)
+const installedTotal = ref(0)
+const marketPage = ref(1)
+const marketPageSize = ref(24)
+const marketTotal = ref(0)
+const appliedMarketQuery = ref('')
 const personalPageSize = 30
 let requestSequence = 0
-let legacyRequestSequence = 0
+const legacyRequestSequence = { personal: 0, shared: 0, builtin: 0 }
+let legacyRefreshSequence = 0
 let installedRequestSequence = 0
 let personalSearchTimer
 const personalError = ref('')
@@ -328,10 +349,11 @@ const publishOpen = ref(false)
 const publishSkill = ref(null)
 const personalSource = ref('all')
 const personalQuery = ref('')
+const appliedPersonalQuery = ref('')
 const combinedCards = computed(() => combineSkillCards(cards.value, legacyCards.value))
-const visibleCards = computed(() => filterSkillCards(combinedCards.value, query.value, 'market', selectedCategory.value))
+const visibleCards = computed(() => filterSkillCards(combinedCards.value, '', 'market'))
 const catalogEmptyState = computed(() => {
-  if (query.value.trim()) return { title: '没有找到匹配的技能', hint: '换个关键词试试。' }
+  if (appliedMarketQuery.value) return { title: '没有找到匹配的技能', hint: '换个关键词试试。' }
   return selectedCategory.value === 'all'
     ? { title: '市场里还没有技能', hint: '可以先创建个人技能，再申请发布到市场。' }
     : { title: '这个方向还没有技能', hint: '切换方向查看其他技能。' }
@@ -351,35 +373,18 @@ const personalSpaceGroups = computed(() => {
   return Object.fromEntries(Object.entries(groups).map(([source, items]) => [source, items.map(safePersonalItem)]))
 })
 const personalSourceGroups = computed(() => {
-  const privateItems = personalSpaceGroups.value.private
   return {
     all: personalSpaceGroups.value.all,
-    created: privateItems.filter((item) => item.kind === 'personal'),
-    installed: privateItems.filter((item) => item.kind === 'market' || item.market_installed_version),
+    created: personalSpaceGroups.value.created,
+    installed: personalSpaceGroups.value.installed,
     shared: personalSpaceGroups.value.shared,
     system: personalSpaceGroups.value.system
   }
 })
-const searchedPersonalSpaceGroups = computed(() => {
-  const needle = personalQuery.value.trim().toLowerCase()
-  return Object.fromEntries(Object.entries(personalSourceGroups.value).map(([source, items]) => [
-    source,
-    items.filter((item) => !needle || `${item.name || ''} ${item.slug} ${item.description || ''}`.toLowerCase().includes(needle))
-  ]))
-})
-const filteredPersonalItems = computed(() => searchedPersonalSpaceGroups.value[personalSource.value])
+const filteredPersonalItems = computed(() => personalSourceGroups.value[personalSource.value])
 const ownedSkills = computed(() => personalSourceGroups.value.created)
 const ownedCount = computed(() => ownedSkills.value.length)
-const installedCount = computed(() => personalSourceGroups.value.installed.length)
-const availableSharedCount = computed(() => personalSpaceGroups.value.shared.length + personalSpaceGroups.value.system.length)
-const showMorePersonal = computed(() => ['all', 'created', 'installed'].includes(personalSource.value) && legacyHasMore.value.personal)
-const showMoreShared = computed(() => ['all', 'shared', 'system'].includes(personalSource.value) && legacyHasMore.value.shared)
-const showMoreInstalled = computed(() => ['all', 'installed'].includes(personalSource.value) && installedHasMore.value)
-const filterHasMore = (filter) => filter === 'all'
-  ? legacyHasMore.value.personal || legacyHasMore.value.shared || installedHasMore.value
-  : filter === 'created' ? legacyHasMore.value.personal
-    : filter === 'installed' ? legacyHasMore.value.personal || installedHasMore.value
-      : legacyHasMore.value.shared
+const personalBusy = computed(() => legacyLoading.value || installedLoading.value || Object.values(legacyPageLoading.value).some(Boolean))
 const hasManageableSharedSkills = computed(() => legacyCards.value.some((item) => item.source_scope !== 'personal' && canManageSkillRecord(item)))
 const pendingRequestCount = ref(0)
 const detailOpen = ref(false)
@@ -459,7 +464,11 @@ const personalItemOrigin = (item) => item.kind === 'personal'
   : item.kind === 'market' ? '市场已安装' : item.source_type === 'builtin' ? '系统内置' : '团队共享'
 /** 个人空间同时说明原件、市场安装及过期授权。 */
 const personalItemStatus = (item) => {
-  if (item.kind === 'existing') return item.source_type === 'builtin' ? '系统内置' : '共享技能'
+  if (item.kind === 'existing') {
+    const source = item.source_type === 'builtin' ? '系统内置' : '共享技能'
+    const version = item.source_type === 'personal_share' && item.version ? ` · v${item.version}` : ''
+    return `${source}${version}${item.shadowed_by_personal ? ' · 个人版本优先' : ''}`
+  }
   if (item.kind === 'market') {
     return item.visible === false
       ? `市场已安装 · 当前不可用 · v${item.installed_version}`
@@ -524,7 +533,20 @@ function openManagementMarket(slug) {
 function selectCategory(category) {
   if (selectedCategory.value === category) return
   selectedCategory.value = category
-  refresh()
+  fetchMarketPage(1)
+}
+
+/** 提交关键词后从市场第一页重新查询。 */
+function searchMarket() {
+  appliedMarketQuery.value = query.value.trim()
+  fetchMarketPage(1)
+}
+
+/** 切换页码或每页条数，避免旧页的偏移进入新尺寸。 */
+function changeMarketPage(page, size) {
+  const sizeChanged = size !== marketPageSize.value
+  marketPageSize.value = size
+  fetchMarketPage(sizeChanged ? 1 : page)
 }
 
 function openRankings() {
@@ -567,77 +589,134 @@ async function fetchRankings() {
   }
 }
 
+/** 仅替换指定来源的当前页；个人文件来源无需扫描总数。 */
+async function fetchLegacySource(source, page = legacyPages.value[source]) {
+  const requestId = ++legacyRequestSequence[source]
+  const search = appliedPersonalQuery.value
+  const limit = source === 'personal' ? personalPageSize : legacyPageSizes.value[source]
+  legacyPages.value[source] = page
+  legacyPageLoading.value[source] = true
+  try {
+    const response = await listSkillCards({
+      source: source === 'personal' ? 'personal' : 'shared',
+      sharedKind: source === 'personal' ? undefined : source,
+      limit,
+      offset: (page - 1) * limit,
+      search
+    })
+    if (requestId !== legacyRequestSequence[source] || search !== appliedPersonalQuery.value) return
+    const items = response?.data || []
+    const total = Number(response?.total || 0)
+    if (page > 1 && !items.length) {
+      const fallback = source === 'personal' ? page - 1 : Math.max(1, Math.min(page - 1, Math.ceil(total / limit)))
+      await fetchLegacySource(source, fallback)
+      return
+    }
+    if (source === 'personal') {
+      legacyPersonalCards.value = items
+      legacyHasMore.value.personal = Boolean(response?.has_more)
+      missingPersonalSlugs.value = new Set()
+    } else {
+      if (source === 'shared') legacySharedCards.value = items
+      else legacyBuiltinCards.value = items
+      legacyTotals.value[source] = total
+    }
+  } catch (failure) {
+    if (requestId === legacyRequestSequence[source]) personalError.value = errorText(failure)
+  } finally {
+    if (requestId === legacyRequestSequence[source]) legacyPageLoading.value[source] = false
+  }
+}
+
 async function fetchLegacy() {
-  const requestId = ++legacyRequestSequence
+  const refreshId = ++legacyRefreshSequence
   legacyLoading.value = true
-  legacyMoreLoading.value = { personal: false, shared: false }
   personalError.value = ''
   try {
-    const search = personalQuery.value.trim()
-    const [personal, shared] = await Promise.all([
-      listSkillCards({ source: 'personal', limit: personalPageSize, offset: 0, search }),
-      listSkillCards({ source: 'shared', limit: personalPageSize, offset: 0, search })
-    ])
-    if (requestId !== legacyRequestSequence) return
-    legacyPersonalCards.value = personal?.data || []
-    legacySharedCards.value = shared?.data || []
-    legacyHasMore.value = { personal: Boolean(personal?.has_more), shared: Boolean(shared?.has_more) }
-    missingPersonalSlugs.value = new Set()
-  } catch (failure) {
-    if (requestId === legacyRequestSequence) personalError.value = errorText(failure)
+    await Promise.all(['personal', 'shared', 'builtin'].map((source) => fetchLegacySource(source)))
   } finally {
-    if (requestId === legacyRequestSequence) legacyLoading.value = false
+    if (refreshId === legacyRefreshSequence) legacyLoading.value = false
   }
 }
 
-async function loadLegacySource(source) {
-  if (legacyLoading.value || legacyMoreLoading.value[source] || !legacyHasMore.value[source]) return
-  const requestId = legacyRequestSequence
-  const search = personalQuery.value.trim()
-  const target = source === 'personal' ? legacyPersonalCards : legacySharedCards
-  legacyMoreLoading.value[source] = true
-  try {
-    const page = await listSkillCards({ source, limit: personalPageSize, offset: target.value.length, search })
-    if (requestId !== legacyRequestSequence || search !== personalQuery.value.trim()) return
-    target.value = [...target.value, ...(page?.data || [])]
-    legacyHasMore.value[source] = Boolean(page?.has_more)
-  } catch (failure) {
-    if (requestId === legacyRequestSequence) message.error(errorText(failure))
-  } finally {
-    if (requestId === legacyRequestSequence) legacyMoreLoading.value[source] = false
+/** 页码变化只重新请求对应来源，改变每页数量时回到第一页。 */
+function changeLegacyPage(source, page, size) {
+  if (source !== 'personal' && size !== legacyPageSizes.value[source]) {
+    legacyPageSizes.value[source] = size
+    page = 1
   }
+  fetchLegacySource(source, page)
 }
 
-async function fetchInstalled() {
+async function fetchInstalled(page = installedPage.value) {
   const requestId = ++installedRequestSequence
-  const search = personalQuery.value.trim()
+  const search = appliedPersonalQuery.value
+  installedPage.value = page
   installedLoading.value = true
-  installedMoreLoading.value = false
   try {
-    const page = await listMarketInstalls({ limit: personalPageSize, offset: 0, search })
-    if (requestId === installedRequestSequence && search === personalQuery.value.trim()) {
-      installedCards.value = page?.data || []
-      installedHasMore.value = Boolean(page?.has_more)
+    while (true) {
+      const response = await listMarketInstalls({
+        limit: installedPageSize.value,
+        offset: (page - 1) * installedPageSize.value,
+        search
+      })
+      if (requestId !== installedRequestSequence || search !== appliedPersonalQuery.value) return
+      const items = response?.data || []
+      const total = Number(response?.total || 0)
+      if (page > 1 && !items.length) {
+        page = Math.max(1, Math.min(page - 1, Math.ceil(total / installedPageSize.value)))
+        installedPage.value = page
+        continue
+      }
+      installedCards.value = items
+      installedTotal.value = total
+      return
     }
+  } catch (failure) {
+    if (requestId === installedRequestSequence && search === appliedPersonalQuery.value) throw failure
   } finally {
     if (requestId === installedRequestSequence) installedLoading.value = false
   }
 }
 
-async function loadInstalledMore() {
-  if (installedLoading.value || installedMoreLoading.value || !installedHasMore.value) return
-  const requestId = installedRequestSequence
-  const search = personalQuery.value.trim()
-  installedMoreLoading.value = true
-  try {
-    const page = await listMarketInstalls({ limit: personalPageSize, offset: installedCards.value.length, search })
-    if (requestId !== installedRequestSequence || search !== personalQuery.value.trim()) return
-    installedCards.value = [...installedCards.value, ...(page?.data || [])]
-    installedHasMore.value = Boolean(page?.has_more)
-  } catch (failure) {
-    if (requestId === installedRequestSequence) message.error(errorText(failure))
-  } finally {
-    if (requestId === installedRequestSequence) installedMoreLoading.value = false
+function changeInstalledPage(page, size) {
+  if (size !== installedPageSize.value) {
+    installedPageSize.value = size
+    page = 1
+  }
+  fetchInstalled(page).catch((failure) => { personalError.value = errorText(failure) })
+}
+
+/** 来源切换重新从各来源第一页查询，避免“全部”的旧页被误当总数。 */
+function resetPersonalPages(source = 'all') {
+  if (source === 'all' || source === 'created' || source === 'installed') legacyPages.value.personal = 1
+  if (source === 'all' || source === 'shared') legacyPages.value.shared = 1
+  if (source === 'all' || source === 'system') legacyPages.value.builtin = 1
+  if (source === 'all' || source === 'installed') installedPage.value = 1
+}
+
+function selectPersonalSource(source) {
+  if (personalSource.value === source) return
+  personalSource.value = source
+  resetPersonalPages(source)
+  personalError.value = ''
+  ++legacyRefreshSequence
+  legacyLoading.value = false
+  const needed = source === 'all' ? ['personal', 'shared', 'builtin']
+    : source === 'installed' ? ['personal']
+      : [source === 'created' ? 'personal' : source === 'system' ? 'builtin' : 'shared']
+  for (const candidate of ['personal', 'shared', 'builtin']) {
+    if (needed.includes(candidate)) continue
+    ++legacyRequestSequence[candidate]
+    legacyPageLoading.value[candidate] = false
+  }
+  if (source === 'all') fetchLegacy()
+  else needed.forEach((candidate) => fetchLegacySource(candidate))
+  if (source === 'all' || source === 'installed') {
+    fetchInstalled().catch((failure) => { personalError.value = errorText(failure) })
+  } else {
+    ++installedRequestSequence
+    installedLoading.value = false
   }
 }
 
@@ -691,45 +770,47 @@ async function fetchDepartmentNames() {
   }
 }
 
-async function refresh() {
+async function fetchMarketPage(page) {
   const requestId = ++requestSequence
+  marketPage.value = page
   loading.value = true
-  loadingMore.value = false
-  personalError.value = ''
   marketError.value = ''
-  const legacyRefresh = fetchLegacy()
-  const installedRefresh = fetchInstalled().catch((failure) => { if (requestId === requestSequence) personalError.value = errorText(failure) })
+  cards.value = []
   try {
-    const items = (await listMarketSkills({ query: query.value, category: selectedCategory.value, limit: pageSize }))?.data || []
+    const response = await listMarketSkills({
+      query: appliedMarketQuery.value,
+      category: selectedCategory.value,
+      offset: (page - 1) * marketPageSize.value,
+      limit: marketPageSize.value
+    })
     if (requestId !== requestSequence) return
+    const items = response?.data || []
+    const total = response?.total || 0
+    if (page > 1 && !items.length) {
+      await fetchMarketPage(Math.max(1, Math.min(page - 1, Math.ceil(total / marketPageSize.value))))
+      return
+    }
     cards.value = items
-    hasMore.value = items.length === pageSize
+    marketTotal.value = total
   } catch (failure) {
     if (requestId === requestSequence) marketError.value = errorText(failure)
   } finally {
     if (requestId === requestSequence) loading.value = false
-    await Promise.all([legacyRefresh, installedRefresh])
   }
+}
+
+async function refresh() {
+  personalError.value = ''
+  appliedMarketQuery.value = query.value.trim()
+  await Promise.all([
+    fetchMarketPage(1),
+    fetchLegacy(),
+    fetchInstalled().catch((failure) => { personalError.value = errorText(failure) })
+  ])
 }
 
 async function refreshHome() {
   await Promise.all([refresh(), fetchRequests()])
-}
-
-async function loadMore() {
-  if (!hasMore.value || loadingMore.value || loading.value) return
-  const requestId = requestSequence
-  loadingMore.value = true
-  try {
-    const items = (await listMarketSkills({ query: query.value, category: selectedCategory.value, offset: cards.value.length, limit: pageSize }))?.data || []
-    if (requestId !== requestSequence) return
-    cards.value = [...cards.value, ...items]
-    hasMore.value = items.length === pageSize
-  } catch (failure) {
-    if (requestId === requestSequence) message.error(errorText(failure))
-  } finally {
-    if (requestId === requestSequence) loadingMore.value = false
-  }
 }
 
 async function openDetail(slug) {
@@ -951,6 +1032,8 @@ watch(managementOpen, (open) => { if (!open) refresh() })
 watch(personalQuery, () => {
   clearTimeout(personalSearchTimer)
   personalSearchTimer = setTimeout(() => {
+    appliedPersonalQuery.value = personalQuery.value.trim()
+    resetPersonalPages()
     fetchLegacy()
     fetchInstalled().catch((failure) => { personalError.value = errorText(failure) })
   }, 220)
@@ -1015,7 +1098,8 @@ defineExpose({ loading: computed(() => activeView.value === 'market' ? loading.v
 .skill-row-origin, .skill-row-status { color: var(--color-text-secondary); font-size: 12px; }
 .skill-row-status.is-unavailable { color: var(--color-warning-700); }
 .skill-row-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
-.personal-more { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.personal-pages { display: grid; gap: 10px; justify-content: end; margin-top: 18px; }
+.personal-page-group { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; color: var(--color-text-secondary); font-size: 12px; }
 .skill-list-hint { margin: 13px 0 0; color: var(--color-text-tertiary); font-size: 12px; }
 .ranking-controls { margin-bottom: 10px; }
 .ranking-metric-tabs { display: flex; gap: 16px; border-bottom: 1px solid var(--gray-150); }
@@ -1038,7 +1122,7 @@ defineExpose({ loading: computed(() => activeView.value === 'market' ? loading.v
 .market-categories button:hover { border-color: var(--main-400); color: var(--main-600); }
 .market-categories button.active { border-color: var(--main-500); background: var(--main-50); color: var(--main-600); font-weight: 600; }
 .market-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(235px, 1fr)); gap: 14px; }
-.market-more { display: flex; justify-content: center; margin-top: 22px; }
+.market-pages { display: flex; justify-content: center; margin-top: 22px; }
 .market-card { min-height: 235px; display: flex; flex-direction: column; padding: 18px; background: var(--color-bg-container); border: 1px solid var(--gray-150); border-radius: 12px; transition: border-color .2s, background-color .2s; }
 .market-card:hover { border-color: var(--main-400); background: var(--gray-0); }
 .market-card-top, .market-card-bottom, .market-detail-heading, .market-detail-actions, .market-request-title, .market-request-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }

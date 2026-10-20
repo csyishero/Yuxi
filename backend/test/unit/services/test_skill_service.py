@@ -338,6 +338,76 @@ async def test_audience_skill_page_filters_before_database_limit(monkeypatch: py
 
 
 @pytest.mark.asyncio
+async def test_shared_kind_reaches_database_page_before_card_assembly(monkeypatch: pytest.MonkeyPatch):
+    """内置技能筛选需要在共享列表的 SQL 页和总数之前执行。"""
+    builtin = Skill(
+        slug="builtin-example",
+        name="builtin-example",
+        description="example",
+        dir_path="builtin-example",
+        source_type="builtin",
+        enabled=True,
+        created_by="system",
+        share_config={"version": 2, "read_scope": {"access_level": "global"}},
+    )
+
+    async def fake_page(_db, _user, *, shared_kind, **_kwargs):
+        assert shared_kind == "builtin"
+        return [builtin], 1
+
+    async def no_personal(_uid, _slug):
+        raise ValueError("个人 Skill 不存在")
+
+    monkeypatch.setattr(svc, "page_visible_skills_for_management", fake_page)
+    monkeypatch.setattr(svc, "get_personal_skill", no_personal)
+
+    cards, total, has_more = await svc.page_skill_cards_for_user(
+        None,
+        _user("member"),
+        source="shared",
+        shared_kind="builtin",
+        limit=1,
+        offset=0,
+    )
+
+    assert [card.slug for card in cards] == ["builtin-example"]
+    assert (total, has_more) == (1, False)
+
+
+@pytest.mark.asyncio
+async def test_governance_page_keeps_disabled_skill_without_shared_kind(monkeypatch: pytest.MonkeyPatch):
+    """目录分类筛选不应改变治理页查看已停用技能的能力。"""
+    disabled = Skill(
+        slug="shared-disabled",
+        name="shared-disabled",
+        description="disabled",
+        dir_path="shared/shared-disabled",
+        source_type="upload",
+        enabled=False,
+        created_by="root",
+        share_config={"version": 2, "read_scope": {"access_level": "global"}},
+    )
+    calls = []
+
+    class FakeRepo:
+        def __init__(self, _db):
+            pass
+
+        async def page_visible(self, _user, **kwargs):
+            calls.append(kwargs)
+            return [disabled], 1
+
+    monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
+    cards, total = await svc.page_visible_skills_for_management(
+        None, _user("root", role="superadmin"), limit=20, offset=0
+    )
+
+    assert [card.slug for card in cards] == ["shared-disabled"]
+    assert total == 1
+    assert "shared_kind" not in calls[0]
+
+
+@pytest.mark.asyncio
 async def test_combined_skill_page_keeps_shared_audience_filter_in_database(monkeypatch: pytest.MonkeyPatch):
     """合并视图翻过个人来源后仍由数据库筛选共享受众。"""
     personal = svc.ResolvedSkill(

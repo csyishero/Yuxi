@@ -30,6 +30,55 @@ class MarketSkillRepository:
             (MarketSkill.scope == "department") & (MarketSkill.department_id == user.department_id),
         )
 
+    def _filtered_visible_statement(
+        self,
+        user: User,
+        *,
+        query: str = "",
+        category: str | None = None,
+        slug: str | None = None,
+        installed_only: bool = False,
+    ):
+        """复用授权与筛选条件，使列表和总数保持一致。"""
+        statement = select(MarketSkill).where(MarketSkill.latest_release_id.is_not(None), self._visible_filter(user))
+        search = query.strip()
+        if search or category is not None:
+            statement = statement.join(MarketSkillRelease, MarketSkillRelease.id == MarketSkill.latest_release_id)
+        if category is not None:
+            statement = statement.where(MarketSkillRelease.category == category)
+        if search:
+            statement = statement.where(
+                or_(
+                    MarketSkill.slug.icontains(search, autoescape=True),
+                    MarketSkillRelease.name.icontains(search, autoescape=True),
+                    MarketSkillRelease.description.icontains(search, autoescape=True),
+                )
+            )
+        if slug is not None:
+            statement = statement.where(MarketSkill.slug == slug)
+        if installed_only:
+            statement = statement.where(
+                MarketSkill.id.in_(
+                    select(MarketSkillInstall.market_skill_id).where(MarketSkillInstall.uid == str(user.uid))
+                )
+            )
+        return statement
+
+    async def count_visible(
+        self,
+        user: User,
+        *,
+        query: str = "",
+        category: str | None = None,
+        installed_only: bool = False,
+    ) -> int:
+        """计算当前用户授权和筛选后可见的市场条目数。"""
+        statement = self._filtered_visible_statement(
+            user, query=query, category=category, installed_only=installed_only
+        )
+        total = await self.db.scalar(statement.with_only_columns(func.count(MarketSkill.id)))
+        return int(total or 0)
+
     async def visible(
         self,
         user: User,
@@ -43,28 +92,9 @@ class MarketSkillRepository:
         limit: int = 100,
     ) -> list[MarketSkill]:
         """只返回当前用户可见的市场条目。"""
-        statement = select(MarketSkill).where(MarketSkill.latest_release_id.is_not(None), self._visible_filter(user))
-        if query.strip() or category is not None:
-            statement = statement.join(MarketSkillRelease, MarketSkillRelease.id == MarketSkill.latest_release_id)
-        if category is not None:
-            statement = statement.where(MarketSkillRelease.category == category)
-        if query.strip():
-            pattern = f"%{query.strip()}%"
-            statement = statement.where(
-                or_(
-                    MarketSkill.slug.ilike(pattern),
-                    MarketSkillRelease.name.ilike(pattern),
-                    MarketSkillRelease.description.ilike(pattern),
-                )
-            )
-        if slug is not None:
-            statement = statement.where(MarketSkill.slug == slug)
-        if installed_only:
-            statement = statement.where(
-                MarketSkill.id.in_(
-                    select(MarketSkillInstall.market_skill_id).where(MarketSkillInstall.uid == str(user.uid))
-                )
-            )
+        statement = self._filtered_visible_statement(
+            user, query=query, category=category, slug=slug, installed_only=installed_only
+        )
         if sort == "installs":
             count = (
                 select(func.count())
@@ -223,6 +253,29 @@ class MarketSkillRepository:
             )
             .where(MarketSkillInstall.uid == uid)
             .order_by(MarketSkillInstall.updated_at.desc(), MarketSkill.id.desc())
+        )
+        return [(listing, release) for listing, release in (await self.db.execute(statement)).all()]
+
+    async def installed_releases_for_personal_slugs(
+        self, uid: str, slugs: set[str]
+    ) -> list[tuple[MarketSkill, MarketSkillRelease]]:
+        """只关联当前个人技能页由本人发布并安装的市场版本。"""
+        if not slugs:
+            return []
+        statement = (
+            select(MarketSkill, MarketSkillRelease)
+            .select_from(MarketSkillInstall)
+            .join(MarketSkill, MarketSkill.id == MarketSkillInstall.market_skill_id)
+            .join(
+                MarketSkillRelease,
+                (MarketSkillRelease.id == MarketSkillInstall.release_id)
+                & (MarketSkillRelease.market_skill_id == MarketSkill.id),
+            )
+            .where(
+                MarketSkillInstall.uid == uid,
+                MarketSkill.owner_uid == uid,
+                MarketSkill.personal_slug.in_(slugs),
+            )
         )
         return [(listing, release) for listing, release in (await self.db.execute(statement)).all()]
 

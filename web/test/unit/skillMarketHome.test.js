@@ -54,7 +54,7 @@ const stub = (name) => ({
   }
 })
 
-async function withHome({ role = 'user', query = {}, shares = [], marketRequests = [], mineShares = [], mineMarket = [], extraPersonal = [], extraShared = [], extraInstalls = [], extraMarket = [], snapshots = {}, hiddenOwn = false, marketFailure = false, personalFailure = false, historyFailureOnce = false } = {}, verify) {
+async function withHome({ role = 'user', query = {}, shares = [], marketRequests = [], mineShares = [], mineMarket = [], extraPersonal = [], extraShared = [], extraInstalls = [], extraMarket = [], snapshots = {}, hiddenOwn = false, marketFailure = false, personalFailure = false, historyFailureOnce = false, skillPageOverride, installPageOverride, marketPageOverride } = {}, verify) {
   const componentDir = new URL('../../src/components/extensions/', import.meta.url)
   const sharedDir = new URL('../../src/components/shared/', import.meta.url)
   const compiledPath = fileURLToPath(new URL(`.skill-market-home-${pid}.mjs`, componentDir))
@@ -95,12 +95,25 @@ async function withHome({ role = 'user', query = {}, shares = [], marketRequests
     globalThis.fetch = async (url, options = {}) => {
       const path = String(url)
       requested.push({ path, method: options.method || 'GET' })
-      if (path.startsWith('/api/skill-market?')) return marketFailure
-        ? Response.json({ detail: '市场暂不可用' }, { status: 503 })
-        : Response.json({ data: [
+      if (path.startsWith('/api/skill-market?')) {
+        if (marketFailure) return Response.json({ detail: '市场暂不可用' }, { status: 503 })
+        const params = new URL(path, 'http://yuxi.local').searchParams
+        const market = [
         { slug: 'new-market', name: '市场新技能', owner_uid: 'bob', owner_name: 'Bob', latest_version: 1, install_count: 4, likes_count: 2, category: 'other', scope: 'global', description: '市场展示条目' },
         ...extraMarket
-        ] })
+        ]
+        const query = (params.get('query') || '').toLowerCase()
+        const category = params.get('category')
+        const matching = market.filter((item) =>
+          (!query || `${item.slug} ${item.name} ${item.description || ''}`.toLowerCase().includes(query)) &&
+          (!category || item.category === category)
+        )
+        const offset = Number(params.get('offset') || 0)
+        const limit = Number(params.get('limit') || 100)
+        const override = await marketPageOverride?.({ offset, limit, query, category, matching })
+        if (override) return Response.json(override)
+        return Response.json({ data: matching.slice(offset, offset + limit), total: matching.length, limit, offset, has_more: offset + limit < matching.length })
+      }
       if (path.startsWith('/api/skill-market/-/installs')) {
         const params = new URL(path, 'http://yuxi.local').searchParams
         const offset = Number(params.get('offset') || 0)
@@ -113,6 +126,8 @@ async function withHome({ role = 'user', query = {}, shares = [], marketRequests
         ]
         const search = (params.get('search') || '').toLowerCase()
         const matching = installs.filter((item) => !search || `${item.slug} ${item.visible === false ? '' : `${item.name} ${item.description || ''}`}`.toLowerCase().includes(search))
+        const override = await installPageOverride?.({ offset, limit, search, matching })
+        if (override) return Response.json(override)
         return Response.json({ data: matching.slice(offset, offset + limit), total: matching.length, has_more: offset + limit < matching.length, limit, offset })
       }
       if (path.startsWith('/api/skills?') || path === '/api/skills') {
@@ -129,10 +144,15 @@ async function withHome({ role = 'user', query = {}, shares = [], marketRequests
         ]
         const source = params.get('source')
         const search = (params.get('search') || '').toLowerCase()
-        const all = (source === 'personal' ? personal : source === 'shared' ? shared : [...personal, ...shared])
+        const sharedKind = params.get('shared_kind')
+        const all = (source === 'personal' ? personal : source === 'shared' ? shared.filter((item) =>
+          !sharedKind || (sharedKind === 'builtin' ? item.source_type === 'builtin' : item.source_type !== 'builtin')
+        ) : [...personal, ...shared])
           .filter((item) => !search || `${item.slug} ${item.name} ${item.description || ''}`.toLowerCase().includes(search))
         const offset = Number(params.get('offset') || 0)
         const limit = Number(params.get('limit') || 30)
+        const override = await skillPageOverride?.({ source, sharedKind, search, offset, limit, all })
+        if (override) return Response.json(override)
         return Response.json({ data: all.slice(offset, offset + limit), total: source === 'personal' ? null : all.length, has_more: offset + limit < all.length, limit, offset })
       }
       if (path.startsWith('/api/skills/personal/')) {
@@ -228,7 +248,7 @@ async function withHome({ role = 'user', query = {}, shares = [], marketRequests
     app.use(pinia)
     app.use(router)
     app.provide(ssrContextKey, { modules: new Set() })
-    for (const name of ['a-button', 'a-spin', 'a-input', 'a-input-search', 'a-select', 'a-alert', 'a-empty', 'a-tag', 'a-textarea', 'a-radio', 'a-radio-group', 'a-upload', 'a-checkbox', 'a-switch', 'a-tabs', 'a-tab-pane']) app.component(name, stub(name))
+    for (const name of ['a-button', 'a-spin', 'a-input', 'a-input-search', 'a-select', 'a-alert', 'a-empty', 'a-tag', 'a-textarea', 'a-radio', 'a-radio-group', 'a-upload', 'a-checkbox', 'a-switch', 'a-tabs', 'a-tab-pane', 'a-pagination']) app.component(name, stub(name))
     for (const name of ['a-modal', 'a-drawer']) app.component(name, {
       props: { open: Boolean, title: String },
       setup: (props, { attrs, slots }) => () => props.open ? h(name, { ...attrs, title: props.title }, slots.default?.()) : null
@@ -269,32 +289,39 @@ test('我的技能默认是唯一清单，包含本人来源而不混入待安�
   })
 })
 
-test('个人与团队技能分别按来源续页，后续技能仍可从列表进入', async () => {
+test('个人与团队技能分别翻页并替换当前页，系统技能单独计数', async () => {
   const extraPersonal = Array.from({ length: 30 }, (_, index) => ({
     slug: `personal-${index}`, name: `个人技能 ${index}`, source_scope: 'personal', source_type: 'upload', owner_uid: 'alice', category: 'other'
   }))
-  const extraShared = Array.from({ length: 29 }, (_, index) => ({
+  const extraShared = Array.from({ length: 30 }, (_, index) => ({
     slug: `shared-${index}`, name: `共享技能 ${index}`, source_scope: 'shared', source_type: 'upload', enabled: true, category: 'other'
   }))
   await withHome({ extraPersonal, extraShared }, async ({ host, requested, tick }) => {
     let home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
     assert.ok(requested.some((request) => request.path.includes('source=personal') && request.path.includes('limit=30') && request.path.includes('offset=0')))
     assert.ok(requested.some((request) => request.path.includes('source=shared') && request.path.includes('limit=30') && request.path.includes('offset=0')))
-    assert.doesNotMatch(visibleText(home), /个人技能 29|共享技能 28/)
-    const morePersonal = findAll(home, (item) => item.type === 'a-button' && visibleText(item).includes('加载更多我创建的技能'))[0]
-    assert.ok(morePersonal)
-    morePersonal.props.onClick()
+    assert.doesNotMatch(visibleText(home), /个人技能 29|共享技能 29/)
+    const personalPages = findAll(home, (item) => item.props['aria-label'] === '我创建的技能分页')[0]
+    assert.ok(personalPages)
+    assert.match(visibleText(personalPages), /第 1 页/)
+    const personalNext = findAll(personalPages, (item) => item.type === 'a-button' && visibleText(item) === '下一页')[0]
+    personalNext.props.onClick()
     await tick()
     home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
     assert.match(visibleText(home), /个人技能 29/)
+    assert.equal(findAll(home, (item) => item.props.class === 'skill-row' && visibleText(item).includes('我创建的技能')).length, 0)
     assert.ok(requested.some((request) => request.path.includes('source=personal') && request.path.includes('offset=30')))
-    const moreShared = findAll(home, (item) => item.type === 'a-button' && visibleText(item).includes('加载更多团队与系统技能'))[0]
-    assert.ok(moreShared)
-    moreShared.props.onClick()
+    const sharedPages = findAll(home, (item) => item.props['aria-label'] === '团队共享技能分页')[0]
+    assert.ok(sharedPages)
+    const sharedPagination = findAll(sharedPages, (item) => item.type === 'a-pagination')[0]
+    assert.equal(sharedPagination.props.total, 31)
+    sharedPagination.props.onChange(2, 30)
     await tick()
     home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
-    assert.match(visibleText(home), /共享技能 28/)
-    assert.ok(requested.some((request) => request.path.includes('source=shared') && request.path.includes('offset=30')))
+    assert.match(visibleText(home), /共享技能 29/)
+    assert.equal(findAll(home, (item) => item.props.class === 'skill-row' && visibleText(item).includes('团队共享技能')).length, 0)
+    assert.ok(requested.some((request) => request.path.includes('shared_kind=shared') && request.path.includes('offset=30')))
+    assert.ok(requested.some((request) => request.path.includes('shared_kind=builtin') && request.path.includes('offset=0')))
   })
 })
 
@@ -333,7 +360,7 @@ test('个人技能搜索结果不能用来判定发布记录的原件是否已�
   })
 })
 
-test('市场已安装技能按页读取，旧安装在后续页仍可管理', async () => {
+test('市场已安装技能有准确总数，翻页替换且旧安装仍可管理', async () => {
   const extraInstalls = Array.from({ length: 29 }, (_, index) => ({
     slug: `installed-${index}`, name: `安装技能 ${index}`, installed_version: 1, visible: true, category: 'other'
   }))
@@ -341,13 +368,234 @@ test('市场已安装技能按页读取，旧安装在后续页仍可管理', as
     let home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
     assert.ok(requested.some((request) => request.path.includes('/api/skill-market/-/installs?limit=30&offset=0')))
     assert.doesNotMatch(visibleText(home), /安装技能 28/)
-    const more = findAll(home, (item) => item.type === 'a-button' && visibleText(item).includes('加载更多市场已安装技能'))[0]
-    assert.ok(more)
-    more.props.onClick()
+    const installedPages = findAll(home, (item) => item.props['aria-label'] === '市场已安装技能分页')[0]
+    assert.ok(installedPages)
+    const pagination = findAll(installedPages, (item) => item.type === 'a-pagination')[0]
+    assert.equal(pagination.props.total, 31)
+    pagination.props.onChange(2, 30)
     await tick()
     home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
     assert.match(visibleText(home), /安装技能 28/)
+    assert.doesNotMatch(visibleText(home), /已安装市场版/)
     assert.ok(requested.some((request) => request.path.includes('/api/skill-market/-/installs?limit=30&offset=30')))
+  })
+})
+
+test('原件在当前页而历史市场安装在后页时，原件仍显示安装版本且安装分页只显示当前页', async () => {
+  const ownInstall = {
+    slug: 'own-market', name: '市场发布版', owner_uid: 'alice', own_personal_slug: 'own-source',
+    installed_version: 2, visible: true
+  }
+  const extraPersonal = [{
+    slug: 'own-source', name: '个人原件', source_scope: 'personal', owner_uid: 'alice', market_install: ownInstall
+  }]
+  const extraInstalls = [
+    ...Array.from({ length: 28 }, (_, index) => ({ slug: `filler-${index}`, name: `安装 ${index}`, installed_version: 1, visible: true })),
+    { ...ownInstall, own_personal: extraPersonal[0] }
+  ]
+  await withHome({ extraPersonal, extraInstalls }, async ({ host, tick }) => {
+    let home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    let ownRow = findAll(home, (item) => item.props.class === 'skill-row' && visibleText(item).includes('个人原件'))[0]
+    assert.match(visibleText(ownRow), /市场已安装 v2/)
+    assert.match(visibleText(ownRow), /管理安装/)
+
+    findAll(home, (item) => item.type === 'button' && visibleText(item).includes('我创建的'))[0].props.onClick()
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    ownRow = findAll(home, (item) => item.props.class === 'skill-row' && visibleText(item).includes('个人原件'))[0]
+    assert.match(visibleText(ownRow), /市场已安装 v2/)
+
+    findAll(home, (item) => item.type === 'button' && visibleText(item).includes('市场已安装'))[0].props.onClick()
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.equal(findAll(home, (item) => item.props.class === 'skill-row').length, 30)
+    const pager = findAll(home, (item) => item.props['aria-label'] === '市场已安装技能分页')[0]
+    assert.equal(findAll(pager, (item) => item.type === 'a-pagination')[0].props.total, 31)
+    findAll(pager, (item) => item.type === 'a-pagination')[0].props.onChange(2, 30)
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    const rows = findAll(home, (item) => item.props.class === 'skill-row')
+    assert.equal(rows.length, 1)
+    assert.match(visibleText(rows[0]), /个人原件.*市场已安装 v2/)
+  })
+})
+
+test('安装当前页可找到后页个人原件，市场名搜索不会过滤合并后的原件', async () => {
+  const original = { slug: 'late-source', name: '个人笔记', source_scope: 'personal', owner_uid: 'alice' }
+  const extraPersonal = [
+    ...Array.from({ length: 29 }, (_, index) => ({ slug: `personal-${index}`, name: `个人技能 ${index}`, source_scope: 'personal', owner_uid: 'alice' })),
+    original
+  ]
+  const extraInstalls = [{
+    slug: 'market-report', name: '市场报表', owner_uid: 'alice', own_personal_slug: 'late-source',
+    own_personal: original, installed_version: 3, visible: true
+  }]
+  await withHome({ extraPersonal, extraInstalls }, async ({ host, requested, tick }) => {
+    let home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    findAll(home, (item) => item.type === 'button' && visibleText(item).includes('市场已安装'))[0].props.onClick()
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    let ownRow = findAll(home, (item) => item.props.class === 'skill-row' && visibleText(item).includes('个人笔记'))[0]
+    assert.ok(ownRow)
+    assert.match(visibleText(ownRow), /市场已安装 v3/)
+    assert.equal(requested.some((item) => item.path.includes('source=personal') && item.path.includes('offset=30')), false)
+
+    const search = findAll(home, (item) => item.type === 'a-input' && item.props['aria-label'] === '搜索我的技能')[0]
+    search.props['onUpdate:value']('市场报表')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    const rows = findAll(home, (item) => item.props.class === 'skill-row')
+    assert.equal(rows.length, 1)
+    ownRow = rows[0]
+    assert.match(visibleText(ownRow), /个人笔记.*市场已安装 v3/)
+    assert.ok(requested.some((item) => item.path.includes('/api/skill-market/-/installs?') && item.path.includes('search=%E5%B8%82%E5%9C%BA%E6%8A%A5%E8%A1%A8')))
+  })
+})
+
+test('来源与关键词改变后回第一页，个人文件空尾页也回到仍有数据的页', async () => {
+  const extraPersonal = Array.from({ length: 30 }, (_, index) => ({
+    slug: `personal-${index}`, name: `个人技能 ${index}`, source_scope: 'personal', source_type: 'upload', owner_uid: 'alice',
+    description: index === 0 ? '数据汇总' : ''
+  }))
+  let removedLast = false
+  await withHome({
+    extraPersonal,
+    skillPageOverride: ({ source, offset, all }) => {
+      if (source !== 'personal') return null
+      if (offset === 30) {
+        removedLast = true
+        return { data: [], total: null, has_more: false }
+      }
+      return removedLast ? { data: all.slice(0, 30), total: null, has_more: false } : null
+    }
+  }, async ({ host, requested, tick }) => {
+    let home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    const pager = findAll(home, (item) => item.props['aria-label'] === '我创建的技能分页')[0]
+    findAll(pager, (item) => item.type === 'a-button' && visibleText(item) === '下一页')[0].props.onClick()
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.equal(findAll(home, (item) => item.props['aria-label'] === '我创建的技能分页').length, 0)
+    assert.ok(findAll(home, (item) => item.props.class === 'skill-row' && visibleText(item).includes('我创建的技能')).length)
+    assert.ok(requested.filter((item) => item.path.includes('source=personal') && item.path.includes('offset=0')).length >= 2)
+
+    const search = findAll(home, (item) => item.type === 'a-input' && item.props['aria-label'] === '搜索我的技能')[0]
+    search.props['onUpdate:value']('数据汇总')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.ok(requested.some((item) => item.path.includes('source=personal') && item.path.includes('search=%E6%95%B0%E6%8D%AE%E6%B1%87%E6%80%BB') && item.path.includes('offset=0')))
+    const rows = findAll(home, (item) => item.props.class === 'skill-row')
+    assert.match(rows.map(visibleText).join(' '), /个人技能 0/)
+    assert.doesNotMatch(rows.map(visibleText).join(' '), /个人技能 1/)
+  })
+})
+
+test('翻页中的旧个人结果晚于新搜索返回时不覆盖新列表', async () => {
+  const extraPersonal = Array.from({ length: 30 }, (_, index) => ({
+    slug: `personal-${index}`, name: `个人技能 ${index}`, source_scope: 'personal', source_type: 'upload', owner_uid: 'alice',
+    description: index === 0 ? '数据汇总' : ''
+  }))
+  let releaseOldPage
+  const oldPage = new Promise((resolve) => { releaseOldPage = resolve })
+  await withHome({
+    extraPersonal,
+    skillPageOverride: ({ source, offset }) => source === 'personal' && offset === 30 ? oldPage : null
+  }, async ({ host, tick }) => {
+    let home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    const pager = findAll(home, (item) => item.props['aria-label'] === '我创建的技能分页')[0]
+    findAll(pager, (item) => item.type === 'a-button' && visibleText(item) === '下一页')[0].props.onClick()
+    const search = findAll(home, (item) => item.type === 'a-input' && item.props['aria-label'] === '搜索我的技能')[0]
+    search.props['onUpdate:value']('数据汇总')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    await tick()
+    releaseOldPage({ data: [{ slug: 'late-old', name: '旧页技能', source_scope: 'personal', owner_uid: 'alice' }], total: null, has_more: false })
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    const rows = findAll(home, (item) => item.props.class === 'skill-row').map(visibleText).join(' ')
+    assert.match(rows, /个人技能 0/)
+    assert.doesNotMatch(rows, /旧页技能/)
+  })
+})
+
+test('切换我的技能来源时各来源回第一页', async () => {
+  const extraPersonal = Array.from({ length: 30 }, (_, index) => ({
+    slug: `personal-${index}`, name: `个人技能 ${index}`, source_scope: 'personal', source_type: 'upload', owner_uid: 'alice'
+  }))
+  await withHome({ extraPersonal }, async ({ host, requested, tick }) => {
+    let home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    const pager = findAll(home, (item) => item.props['aria-label'] === '我创建的技能分页')[0]
+    findAll(pager, (item) => item.type === 'a-button' && visibleText(item) === '下一页')[0].props.onClick()
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.match(visibleText(findAll(home, (item) => item.props['aria-label'] === '我创建的技能分页')[0]), /第 2 页/)
+    const beforeShared = requested.length
+    findAll(home, (item) => item.type === 'button' && visibleText(item).includes('团队共享'))[0].props.onClick()
+    await tick()
+    const sharedRequests = requested.slice(beforeShared).filter((item) => item.path.startsWith('/api/skills?') || item.path.startsWith('/api/skill-market/-/installs?'))
+    assert.equal(sharedRequests.length, 1)
+    assert.match(sharedRequests[0].path, /source=shared.*shared_kind=shared.*offset=0/)
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.match(visibleText(findAll(home, (item) => item.props['aria-label'] === '我的技能概况')[0]), /第 2 页/)
+    findAll(home, (item) => item.type === 'button' && visibleText(item).includes('全部'))[0].props.onClick()
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.match(visibleText(findAll(home, (item) => item.props['aria-label'] === '我创建的技能分页')[0]), /第 1 页/)
+    assert.ok(findAll(home, (item) => item.props.class === 'skill-row' && visibleText(item).includes('我创建的技能')).length)
+    assert.ok(requested.filter((item) => item.path.includes('source=personal') && item.path.includes('offset=0')).length >= 2)
+  })
+})
+
+test('市场安装尾页被删除后回到最后仍有数据的页', async () => {
+  const extraInstalls = Array.from({ length: 29 }, (_, index) => ({
+    slug: `installed-${index}`, name: `安装技能 ${index}`, installed_version: 1, visible: true
+  }))
+  let removedLast = false
+  await withHome({
+    extraInstalls,
+    installPageOverride: ({ offset, limit, matching }) => {
+      if (offset === 30) {
+        removedLast = true
+        return { data: [], total: 30, has_more: false }
+      }
+      return removedLast ? { data: matching.slice(0, limit), total: 30, has_more: false } : null
+    }
+  }, async ({ host, requested, tick }) => {
+    let home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    const pager = findAll(home, (item) => item.props['aria-label'] === '市场已安装技能分页')[0]
+    findAll(pager, (item) => item.type === 'a-pagination')[0].props.onChange(2, 30)
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.equal(findAll(home, (item) => item.props['aria-label'] === '市场已安装技能分页').length, 0)
+    assert.ok(findAll(home, (item) => item.props.class === 'skill-row' && visibleText(item).includes('已安装市场版')).length)
+    assert.ok(requested.filter((item) => item.path.includes('/api/skill-market/-/installs?') && item.path.includes('offset=0')).length >= 2)
+  })
+})
+
+test('市场安装旧页请求晚到失败时不覆盖新搜索结果', async () => {
+  const extraInstalls = Array.from({ length: 29 }, (_, index) => ({
+    slug: `installed-${index}`, name: `安装技能 ${index}`, installed_version: 1, visible: true,
+    description: index === 0 ? '数据汇总' : ''
+  }))
+  let failOldPage
+  const oldPage = new Promise((_resolve, reject) => { failOldPage = reject })
+  await withHome({
+    extraInstalls,
+    installPageOverride: ({ offset }) => offset === 30 ? oldPage : null
+  }, async ({ host, tick }) => {
+    let home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    const pager = findAll(home, (item) => item.props['aria-label'] === '市场已安装技能分页')[0]
+    findAll(pager, (item) => item.type === 'a-pagination')[0].props.onChange(2, 30)
+    const search = findAll(home, (item) => item.type === 'a-input' && item.props['aria-label'] === '搜索我的技能')[0]
+    search.props['onUpdate:value']('数据汇总')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    await tick()
+    failOldPage(new Error('旧页查询失败'))
+    await tick()
+    home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
+    assert.equal(findAll(home, (item) => item.type === 'a-alert' && visibleText(item).includes('旧页查询失败')).length, 0)
+    const rows = findAll(home, (item) => item.props.class === 'skill-row').map(visibleText).join(' ')
+    assert.match(rows, /安装技能 0/)
   })
 })
 
@@ -424,6 +672,53 @@ test('切换技能市场后只展示已上架条目，返回仍是个人清单',
     await tick()
     assert.ok(findAll(host, (item) => item.props.id === 'skill-personal-view').length)
     assert.equal(router.currentRoute.value.query.view, undefined)
+  })
+})
+
+test('技能市场按页替换卡片，显示准确总数并可跳转后页', async () => {
+  const extraMarket = Array.from({ length: 24 }, (_, index) => ({
+    slug: `market-${index}`, name: `市场分页技能 ${index}`, owner_uid: 'bob', owner_name: 'Bob',
+    latest_version: 1, install_count: 0, likes_count: 0, category: 'other', scope: 'global'
+  }))
+  await withHome({ extraMarket, query: { tab: 'skills', view: 'market' } }, async ({ host, requested, tick }) => {
+    let market = findAll(host, (item) => item.props.id === 'skill-market-view')[0]
+    assert.equal(findAll(market, (item) => item.props.class === 'market-card').length, 24)
+    assert.match(visibleText(market), /共 25 项/)
+    const pagination = findAll(market, (item) => item.type === 'a-pagination')[0]
+    assert.ok(pagination)
+    assert.equal(pagination.props.total, 25)
+    pagination.props.onChange(2, 24)
+    await tick()
+    market = findAll(host, (item) => item.props.id === 'skill-market-view')[0]
+    assert.equal(findAll(market, (item) => item.props.class === 'market-card').length, 1)
+    assert.match(visibleText(market), /市场分页技能 23/)
+    assert.doesNotMatch(visibleText(market), /市场新技能/)
+    assert.ok(requested.some((request) => request.path.includes('/api/skill-market?') && request.path.includes('offset=24') && request.path.includes('limit=24')))
+  })
+})
+
+test('市场最后一页全部删除时自动回到第一页空状态', async () => {
+  const extraMarket = Array.from({ length: 24 }, (_, index) => ({
+    slug: `market-${index}`, name: `市场分页技能 ${index}`, owner_uid: 'bob', owner_name: 'Bob',
+    latest_version: 1, install_count: 0, likes_count: 0, category: 'other', scope: 'global'
+  }))
+  let deleted = false
+  await withHome({
+    extraMarket,
+    query: { tab: 'skills', view: 'market' },
+    marketPageOverride: ({ offset }) => {
+      if (offset === 24) deleted = true
+      return deleted ? { data: [], total: 0, limit: 24, offset } : null
+    }
+  }, async ({ host, requested, tick }) => {
+    let market = findAll(host, (item) => item.props.id === 'skill-market-view')[0]
+    findAll(market, (item) => item.type === 'a-pagination')[0].props.onChange(2, 24)
+    await tick()
+    market = findAll(host, (item) => item.props.id === 'skill-market-view')[0]
+    assert.match(visibleText(market), /共 0 项/)
+    assert.ok(findAll(market, (item) => item.props.class === 'market-empty').length)
+    assert.equal(findAll(market, (item) => item.type === 'a-pagination').length, 0)
+    assert.ok(requested.filter((item) => item.path.startsWith('/api/skill-market?') && item.path.includes('offset=0')).length >= 2)
   })
 })
 
