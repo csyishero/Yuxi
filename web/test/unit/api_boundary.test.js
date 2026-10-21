@@ -259,6 +259,46 @@ test('市场审批只展示允许的范围冲突文案，其他响应仍脱敏',
   })
 })
 
+test('市场范围修改只显示受控结构化错误，任意字符串和畸形详情仍脱敏', async () => {
+  await withServer(async (server) => {
+    storageValues.set('user_token', 'test-token')
+    setActivePinia(createPinia())
+    const { useUserStore } = await server.ssrLoadModule('/src/stores/user.js')
+    useUserStore().userRole = 'superadmin'
+    const { changeMarketSkillScope } = await server.ssrLoadModule('/src/apis/skill_api.js')
+    const { apiPut } = await server.ssrLoadModule('/src/apis/base.js')
+
+    const expectScopeError = async (detail, expected) => {
+      globalThis.fetch = async () => Response.json({ detail }, { status: 400 })
+      await assert.rejects(
+        changeMarketSkillScope('weekly-report', 'department', 4, 6),
+        (error) => error.status === 400 && error.message === expected && error.response.data.detail === expected
+      )
+    }
+    await expectScopeError(
+      { code: 'dependency_scope', dependency_type: 'tool', dependency_slug: 'report_tool' },
+      '工具 report_tool 的授权范围未覆盖目标范围，请调整依赖授权后重试'
+    )
+    await expectScopeError(
+      { code: 'dependency_unavailable', dependency_type: 'mcp', dependency_slug: 'search_server' },
+      'MCP search_server 当前不可用，请检查依赖配置后重试'
+    )
+    await expectScopeError({ code: 'invalid_scope' }, '上架范围无效，请选择全公司或部门')
+    await expectScopeError({ code: 'target_department_required' }, '请选择目标部门')
+    await expectScopeError({ code: 'target_department_not_found' }, '目标部门不存在，请重新选择')
+    await expectScopeError('secret server context', '请求参数错误')
+    await expectScopeError({ code: 'dependency_scope', dependency_type: 'tool', dependency_slug: '<secret>' }, '请求参数错误')
+    await expectScopeError({ code: 'dependency_scope', dependency_type: 'arbitrary', dependency_slug: 'report_tool' }, '请求参数错误')
+    await expectScopeError({ code: 'unexpected_error', message: 'secret server context' }, '请求参数错误')
+
+    globalThis.fetch = async () => Response.json({ detail: { code: 'target_department_required' } }, { status: 400 })
+    await assert.rejects(
+      apiPut('/api/skills/weekly-report/scope', {}),
+      (error) => error.message === '请求参数错误' && error.response.data.detail === '请求参数错误'
+    )
+  })
+})
+
 test('用户管理分页 API 只请求当前页并编码服务端筛选条件', async () => {
   await withServer(async (server) => {
     storageValues.set('user_token', 'test-token')

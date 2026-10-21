@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiPut, apiDelete, apiAdminGet, apiAdminPost } from './base'
+import { apiGet, apiPost, apiPut, apiDelete, apiAdminGet, apiAdminPost, apiSuperAdminPut } from './base'
 
 const BASE_URL = '/api/system/skills'
 const USER_BASE_URL = '/api/skills'
@@ -19,13 +19,28 @@ export const listMarketRankings = async ({ metric = 'installs', scope = 'company
 }
 
 export const getMarketSkill = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}`)
-export const listMarketInstalls = async ({ limit, offset, search } = {}) => {
+export const listMarketInstalls = async ({ limit, offset, search, catalogAll = false } = {}) => {
   const params = new URLSearchParams()
   if (limit !== undefined) params.set('limit', String(limit))
   if (offset !== undefined) params.set('offset', String(offset))
   if (search?.trim()) params.set('search', search.trim())
+  if (catalogAll) params.set('catalog_all', 'true')
   return apiGet(`${MARKET_BASE_URL}/-/installs${params.size ? `?${params}` : ''}`)
 }
+/** 读取当前管理员可治理的市场条目，包括已下架条目。 */
+export const listManagedMarketSkills = async () => apiAdminGet(`${MARKET_BASE_URL}/-/management`)
+/** 读取单条市场治理状态，不走公开详情接口。 */
+export const getManagedMarketSkill = async (slug) => apiAdminGet(`${MARKET_BASE_URL}/-/management/${encodeURIComponent(slug)}`)
+/** 以页面读取的状态修订号下架市场条目。 */
+export const unpublishMarketSkill = async (slug, expectedRevision) =>
+  apiAdminPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/unpublish`, { expected_revision: expectedRevision })
+/** 仅由超级管理员调整当前上架范围。 */
+export const changeMarketSkillScope = async (slug, scope, departmentId, expectedRevision) =>
+  apiSuperAdminPut(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/scope`, {
+    scope,
+    department_id: departmentId,
+    expected_revision: expectedRevision
+  })
 export const getMarketSkillTree = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/tree`)
 export const getMarketSkillFile = async (slug, path = 'SKILL.md') =>
   apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/file?path=${encodeURIComponent(path)}`)
@@ -60,10 +75,14 @@ export const getSkillDetail = async (slug) => apiGet(`${BASE_URL}/${encodeURICom
 export const getPersonalSkillDetail = async (slug) => apiGet(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}`)
 
 export const listSkillCards = async ({
-  source, limit, offset, search, refreshPersonal = false, audienceSearch, audienceDepartmentId
+  source, sharedKind, limit, offset, search, refreshPersonal = false, audienceSearch, audienceDepartmentId,
+  excludeRetiredBuiltin = false, catalogAll = false
 } = {}) => {
   const params = new URLSearchParams()
   if (source) params.set('source', source)
+  if (sharedKind) params.set('shared_kind', sharedKind)
+  if (excludeRetiredBuiltin) params.set('exclude_retired_builtin', 'true')
+  if (catalogAll) params.set('catalog_all', 'true')
   if (limit !== undefined) params.set('limit', String(limit))
   if (offset !== undefined) params.set('offset', String(offset))
   if (search?.trim()) params.set('search', search.trim())
@@ -71,6 +90,12 @@ export const listSkillCards = async ({
   if (audienceSearch?.trim()) params.set('audience_search', audienceSearch.trim())
   if (audienceDepartmentId) params.set('audience_department_id', String(audienceDepartmentId))
   return apiGet(`${USER_BASE_URL}${params.size ? `?${params}` : ''}`)
+}
+
+export const getPersonalSkillSummary = async ({ search = '' } = {}) => {
+  const params = new URLSearchParams()
+  if (search.trim()) params.set('search', search.trim())
+  return apiGet(`${USER_BASE_URL}/summary${params.size ? `?${params}` : ''}`)
 }
 
 export const listPersonalSkillCatalog = async ({ departmentId, ownerSearch, offset = 0, limit, search, excludeOwn = false, cardPage = false } = {}) => {
@@ -289,6 +314,7 @@ export const skillApi = {
   getSkillDetail,
   getPersonalSkillDetail,
   listSkillCards,
+  getPersonalSkillSummary,
   listPersonalSkillCatalog,
   getPersonalSkillCatalogFile,
   publishPersonalSkillDirectly,

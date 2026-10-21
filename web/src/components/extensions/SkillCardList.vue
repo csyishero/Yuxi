@@ -93,7 +93,7 @@
     </div>
 
     <div
-      v-if="visibleSkillGroups.length === 0 && !sharedHasMore && !loading"
+      v-if="visibleSkillGroups.length === 0 && !sharedTotal && !loading"
       class="extension-card-grid-empty-state skill-empty-state"
     >
       <div class="skill-empty-card">
@@ -176,14 +176,29 @@
         <div v-if="group.alwaysShow && !group.skills.length" class="skill-catalog-empty">
           {{ catalogLoading ? '正在加载个人 Skill…' : '当前筛选下没有个人 Skill' }}
         </div>
-        <div v-if="group.key === 'personal' && catalogNextOffset !== null" class="skill-catalog-more">
-          <a-button :loading="catalogLoading" @click="fetchCatalog()">加载更多个人技能</a-button>
+        <div
+          v-if="group.key === 'personal' && userStore.isAdmin && (catalogPage > 1 || catalogHasMore)"
+          class="skill-catalog-more skill-personal-pages"
+        >
+          <span>个人技能 · 第 {{ catalogPage }} 页</span>
+          <a-button :disabled="catalogPage === 1 || catalogLoading" @click="changeCatalogPage(catalogPage - 1)">
+            上一页
+          </a-button>
+          <a-button :disabled="!catalogHasMore || catalogLoading" @click="changeCatalogPage(catalogPage + 1)">
+            下一页
+          </a-button>
         </div>
       </template>
-      <div v-if="sharedHasMore" class="skill-catalog-more">
-        <a-button :loading="sharedLoadingMore" :disabled="loading" @click="loadMoreSharedSkills">
-          加载更多共享技能
-        </a-button>
+      <div v-if="sharedTotal > sharedPageSize" class="skill-catalog-more skill-shared-pages">
+        <span>共 {{ sharedTotal }} 项共享技能</span>
+        <a-pagination
+          :current="sharedPage"
+          :page-size="sharedPageSize"
+          :total="sharedTotal"
+          :show-size-changer="false"
+          :disabled="loading"
+          @change="changeSharedPage"
+        />
       </div>
     </template>
     </template>
@@ -746,10 +761,9 @@ const selectedCardSlugs = ref([])
 const togglingSkillSlugs = ref([])
 
 const skills = ref([])
-const sharedHasMore = ref(false)
-const sharedLoadingMore = ref(false)
 const sharedPageSize = 30
-const sharedNextOffset = ref(0)
+const sharedPage = ref(1)
+const sharedTotal = ref(0)
 let sharedRequestSeq = 0
 let searchTimer = null
 const catalogCards = ref([])
@@ -757,7 +771,8 @@ const catalogDepartmentId = ref(undefined)
 const ownerSearch = ref('')
 const appliedDepartmentId = ref(undefined)
 const appliedOwnerSearch = ref('')
-const catalogNextOffset = ref(null)
+const catalogPage = ref(1)
+const catalogHasMore = ref(false)
 const catalogLoading = ref(false)
 const catalogPageSize = 30
 let catalogRequestSeq = 0
@@ -1532,18 +1547,17 @@ const handleBatchDelete = () => {
   })
 }
 
-/** 按技能卡片分页加载授权范围内的个人目录。 */
-const fetchCatalog = async ({ reset = false } = {}) => {
-  if (!userStore.isAdmin || (catalogLoading.value && !reset)) return
+/** 按技能卡片页读取授权范围内的个人目录。 */
+const fetchCatalog = async ({ reset = false, page = catalogPage.value } = {}) => {
+  if (!userStore.isAdmin) return
   const requestSeq = ++catalogRequestSeq
-  const offset = reset ? 0 : catalogNextOffset.value
-  if (offset === null) return
+  const requestedPage = reset ? 1 : page
   catalogLoading.value = true
   try {
     const criteria = {
       departmentId: appliedDepartmentId.value,
       ownerSearch: appliedOwnerSearch.value,
-      offset,
+      offset: (requestedPage - 1) * catalogPageSize,
       limit: catalogPageSize,
       cardPage: true,
       search: searchQuery.value.trim(),
@@ -1556,26 +1570,40 @@ const fetchCatalog = async ({ reset = false } = {}) => {
       criteria.ownerSearch !== appliedOwnerSearch.value ||
       criteria.search !== searchQuery.value.trim()
     ) return
-    const page = result?.data?.items || []
-    catalogCards.value = [...new Map(
-      (reset ? page : [...catalogCards.value, ...page])
-        .map((skill) => [`${skill.owner_uid}:${skill.slug}`, skill])
-    ).values()]
-    catalogNextOffset.value = result?.data?.next_offset ?? null
+    const cards = result?.data?.items || []
+    if (!cards.length && requestedPage > 1) {
+      await fetchCatalog({ page: requestedPage - 1 })
+      return
+    }
+    catalogCards.value = cards
+    catalogPage.value = requestedPage
+    catalogHasMore.value = result?.data?.next_offset != null
   } catch (error) {
-    message.error(error?.response?.data?.detail || '加载个人 Skill 目录失败')
+    if (requestSeq === catalogRequestSeq) message.error(error?.response?.data?.detail || '加载个人 Skill 目录失败')
   } finally {
     if (requestSeq === catalogRequestSeq) catalogLoading.value = false
   }
+}
+
+/** 个人技能页只切换当前目录，不重读共享技能。 */
+const changeCatalogPage = (page) => {
+  if (page === catalogPage.value || page < 1 || catalogLoading.value || (page > catalogPage.value && !catalogHasMore.value)) return
+  fetchCatalog({ page })
 }
 
 /** 按当前部门和人员条件重新查询。 */
 const applyCatalogFilters = () => {
   appliedDepartmentId.value = catalogDepartmentId.value
   appliedOwnerSearch.value = ownerSearch.value.trim()
+  catalogRequestSeq += 1
   catalogCards.value = []
-  catalogNextOffset.value = 0
-  fetchSkills()
+  catalogPage.value = 1
+  catalogHasMore.value = false
+  skills.value = []
+  sharedPage.value = 1
+  sharedTotal.value = 0
+  selectedCardSlugs.value = []
+  fetchSkills({ page: 1, resetCatalog: true })
 }
 
 /** 获取部门名称，供共享范围和管理员筛选使用。 */
@@ -1592,27 +1620,32 @@ const loadDepartments = async () => {
   }
 }
 
-const fetchSkills = async ({ refreshPersonal = false } = {}) => {
+const fetchSkills = async ({ refreshPersonal = false, page = sharedPage.value, includeCatalog = true, resetCatalog = false } = {}) => {
   const requestSeq = ++sharedRequestSeq
   loading.value = true
-  sharedHasMore.value = false
-  sharedNextOffset.value = 0
-  skills.value = []
   try {
     const skillResult = await skillApi.listSkillCards({
       source: 'shared',
+      excludeRetiredBuiltin: true,
       limit: sharedPageSize,
-      offset: 0,
+      offset: (page - 1) * sharedPageSize,
       search: searchQuery.value.trim(),
       refreshPersonal,
       audienceSearch: userStore.isAdmin ? appliedOwnerSearch.value : undefined,
       audienceDepartmentId: userStore.isAdmin ? appliedDepartmentId.value : undefined
     })
     if (requestSeq !== sharedRequestSeq) return
+    const total = Number(skillResult?.total ?? 0)
+    const lastPage = Math.max(1, Math.ceil(total / sharedPageSize))
+    if (page > lastPage) {
+      await fetchSkills({ refreshPersonal, page: lastPage, includeCatalog, resetCatalog })
+      return
+    }
+    if (page !== sharedPage.value) selectedCardSlugs.value = []
     skills.value = skillResult?.data || []
-    sharedNextOffset.value = skills.value.length
-    sharedHasMore.value = Boolean(skillResult?.has_more)
-    if (userStore.isAdmin) await fetchCatalog({ reset: true })
+    sharedPage.value = page
+    sharedTotal.value = total
+    if (userStore.isAdmin && includeCatalog) await fetchCatalog({ reset: resetCatalog })
   } catch {
     if (requestSeq === sharedRequestSeq) message.error('加载共享技能失败')
   } finally {
@@ -1620,29 +1653,10 @@ const fetchSkills = async ({ refreshPersonal = false } = {}) => {
   }
 }
 
-const loadMoreSharedSkills = async () => {
-  if (!sharedHasMore.value || sharedLoadingMore.value || loading.value) return
-  const requestSeq = sharedRequestSeq
-  sharedLoadingMore.value = true
-  try {
-    const result = await skillApi.listSkillCards({
-      source: 'shared',
-      limit: sharedPageSize,
-      offset: sharedNextOffset.value,
-      search: searchQuery.value.trim(),
-      audienceSearch: userStore.isAdmin ? appliedOwnerSearch.value : undefined,
-      audienceDepartmentId: userStore.isAdmin ? appliedDepartmentId.value : undefined
-    })
-    if (requestSeq !== sharedRequestSeq) return
-    const page = result?.data || []
-    skills.value = [...new Map([...skills.value, ...page].map((skill) => [skill.id ?? skill.slug, skill])).values()]
-    sharedNextOffset.value += page.length
-    sharedHasMore.value = Boolean(result?.has_more)
-  } catch (error) {
-    if (requestSeq === sharedRequestSeq) message.error(error?.response?.data?.detail || '加载更多共享技能失败')
-  } finally {
-    if (requestSeq === sharedRequestSeq) sharedLoadingMore.value = false
-  }
+/** 切换共享技能页，不重新读取其他成员的个人目录。 */
+const changeSharedPage = (page) => {
+  if (page === sharedPage.value || loading.value) return
+  fetchSkills({ page, includeCatalog: false })
 }
 
 const beforeSkillUpload = (file) => {
@@ -1847,9 +1861,18 @@ watch(activeTab, () => {
 watch(searchQuery, () => {
   if (props.toolbarOnly) return
   if (searchTimer) window.clearTimeout(searchTimer)
+  sharedRequestSeq += 1
+  catalogRequestSeq += 1
+  catalogCards.value = []
+  catalogPage.value = 1
+  catalogHasMore.value = false
+  skills.value = []
+  sharedPage.value = 1
+  sharedTotal.value = 0
   searchTimer = window.setTimeout(() => {
     searchTimer = null
-    fetchSkills()
+    selectedCardSlugs.value = []
+    fetchSkills({ page: 1, resetCatalog: true })
   }, 250)
 })
 
@@ -1864,6 +1887,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   sharedRequestSeq += 1
+  catalogRequestSeq += 1
   if (searchTimer) window.clearTimeout(searchTimer)
 })
 
@@ -1907,6 +1931,22 @@ defineExpose({
 .skill-catalog-more {
   padding: 12px var(--page-padding);
   color: var(--color-text-secondary);
+}
+
+.skill-shared-pages {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.skill-personal-pages {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .market-install-card-actions {

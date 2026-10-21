@@ -27,7 +27,7 @@ from yuxi.utils import logger
 from yuxi.utils.singleton import SingletonMeta
 
 AGENT_RUN_TERMINAL_STATUS_SQL = ", ".join(f"'{status}'" for status in AGENT_RUN_TERMINAL_STATUSES)
-BUSINESS_SCHEMA_VERSION = 14
+BUSINESS_SCHEMA_VERSION = 15
 KNOWLEDGE_SCHEMA_VERSION = 2
 SCHEMA_VERSION_TABLE = "yuxi_schema_migrations"
 AGENT_RUN_LEASE_SCHEMA_STATEMENTS = (
@@ -1015,7 +1015,7 @@ class PostgresManager(metaclass=SingletonMeta):
             )
 
     async def ensure_skill_market_schema(self) -> None:
-        """幂等创建市场状态，并补齐共享申请与技能分类。"""
+        """幂等创建市场状态，并补齐首批次、共享申请与技能分类。"""
         self._check_initialized()
         tables = (
             MarketSkill.__table__,
@@ -1062,6 +1062,22 @@ class PostgresManager(metaclass=SingletonMeta):
                 text(
                     "ALTER TABLE IF EXISTS market_skill_releases ADD COLUMN IF NOT EXISTS category "
                     "VARCHAR(32) NOT NULL DEFAULT 'other'"
+                )
+            )
+            for statement in (
+                "ALTER TABLE market_skills ADD COLUMN IF NOT EXISTS is_published BOOLEAN NOT NULL DEFAULT TRUE",
+                "ALTER TABLE market_skills ADD COLUMN IF NOT EXISTS publication_generation INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE market_skills ADD COLUMN IF NOT EXISTS active_from_version INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE market_skills ADD COLUMN IF NOT EXISTS state_revision INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE market_skill_installs ADD COLUMN IF NOT EXISTS confirmed_generation "
+                "INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE skill_share_requests ADD COLUMN IF NOT EXISTS market_generation INTEGER",
+            ):
+                await conn.execute(text(statement))
+            await conn.execute(
+                text(
+                    "UPDATE skill_share_requests SET market_generation = 1 "
+                    "WHERE channel = 'market' AND market_generation IS NULL"
                 )
             )
 

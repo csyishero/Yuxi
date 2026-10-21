@@ -14,16 +14,16 @@ function createCatalog(listSkillCards) {
   const state = {
     loading: ref(false),
     skills: ref([]),
-    sharedHasMore: ref(false),
-    sharedLoadingMore: ref(false),
-    sharedNextOffset: ref(0),
+    sharedPage: ref(1),
+    sharedTotal: ref(0),
+    selectedCardSlugs: ref([]),
     searchQuery: ref(''),
     appliedOwnerSearch: ref(''),
     appliedDepartmentId: ref(undefined)
   }
   const calls = []
   const actions = runInNewContext(
-    `let sharedRequestSeq = 0; const sharedPageSize = 30; ${code}; ({ fetchSkills, loadMoreSharedSkills })`,
+    `let sharedRequestSeq = 0; const sharedPageSize = 30; ${code}; ({ fetchSkills, changeSharedPage })`,
     {
       ...state,
       userStore: { isAdmin: false },
@@ -35,37 +35,37 @@ function createCatalog(listSkillCards) {
   return { ...state, ...actions, calls }
 }
 
-test('治理目录只请求共享来源，加载更多使用下一页偏移且不会重复卡片', async () => {
+test('治理目录只请求共享来源，切页替换卡片并保留精确总数', async () => {
   const catalog = createCatalog(async ({ offset }) => offset === 0
-    ? { data: [{ id: 1, slug: 'a' }, { id: 2, slug: 'b' }], has_more: true }
-    : { data: [{ id: 2, slug: 'b' }, { id: 3, slug: 'c' }], has_more: false })
+    ? { data: [{ id: 1, slug: 'a' }, { id: 2, slug: 'b' }], total: 32 }
+    : { data: [{ id: 2, slug: 'b' }, { id: 3, slug: 'c' }], total: 32 })
 
   await catalog.fetchSkills()
-  assert.equal(catalog.sharedHasMore.value, true)
-  assert.equal(catalog.sharedNextOffset.value, 2)
-  await catalog.loadMoreSharedSkills()
+  assert.equal(catalog.sharedTotal.value, 32)
+  assert.equal(catalog.sharedPage.value, 1)
+  await catalog.fetchSkills({ page: 2 })
   assert.deepEqual(catalog.calls.map(({ source, limit, offset }) => ({ source, limit, offset })), [
     { source: 'shared', limit: 30, offset: 0 },
-    { source: 'shared', limit: 30, offset: 2 }
+    { source: 'shared', limit: 30, offset: 30 }
   ])
-  assert.deepEqual(Array.from(catalog.skills.value, ({ slug }) => slug), ['a', 'b', 'c'])
-  assert.equal(catalog.sharedNextOffset.value, 4)
-  assert.equal(catalog.sharedHasMore.value, false)
+  assert.deepEqual(Array.from(catalog.skills.value, ({ slug }) => slug), ['b', 'c'])
+  assert.equal(catalog.sharedPage.value, 2)
+  assert.equal(catalog.sharedTotal.value, 32)
 })
 
 test('新的搜索替换目录，旧请求不能覆盖搜索结果', async () => {
   let finishOld
   const catalog = createCatalog(async ({ search }) => search
-    ? { data: [{ id: 9, slug: 'new' }], has_more: false }
+    ? { data: [{ id: 9, slug: 'new' }], total: 32 }
     : new Promise((resolve) => { finishOld = resolve }))
 
   const oldRequest = catalog.fetchSkills()
   catalog.searchQuery.value = 'new'
   await catalog.fetchSkills()
-  finishOld({ data: [{ id: 1, slug: 'old' }], has_more: true })
+  finishOld({ data: [{ id: 1, slug: 'old' }], total: 32 })
   await oldRequest
 
   assert.deepEqual(Array.from(catalog.skills.value, ({ slug }) => slug), ['new'])
-  assert.equal(catalog.sharedHasMore.value, false)
+  assert.equal(catalog.sharedTotal.value, 32)
   assert.equal(catalog.loading.value, false)
 })

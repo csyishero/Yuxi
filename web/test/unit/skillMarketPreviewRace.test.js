@@ -47,6 +47,7 @@ function findAll(target, predicate) {
 }
 
 function visibleText(target) {
+  if (target.type === 'comment') return ''
   return [target.text, ...(target.children || []).map(visibleText)].join(' ').trim()
 }
 

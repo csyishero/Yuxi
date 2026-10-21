@@ -17,7 +17,8 @@ function createCatalog(listPersonalSkillCatalog, { governanceOnly = false } = {}
     ownerSearch: ref(''),
     appliedDepartmentId: ref(3),
     appliedOwnerSearch: ref('alice'),
-    catalogNextOffset: ref(null),
+    catalogPage: ref(1),
+    catalogHasMore: ref(false),
     catalogLoading: ref(false),
     searchQuery: ref('报告')
   }
@@ -40,7 +41,7 @@ function createCatalog(listPersonalSkillCatalog, { governanceOnly = false } = {}
   return { ...state, ...actions, calls }
 }
 
-test('治理目录按卡片偏移续取并在服务端排除本人，重复卡片合并但不同所有者同名卡片保留', async () => {
+test('治理目录按页替换卡片并在服务端排除本人，不同所有者同名卡片保留', async () => {
   const catalog = createCatalog(async ({ offset }) => offset === 0
     ? { data: { items: [
       { owner_uid: 'alice', slug: 'same' }, { owner_uid: 'alice', slug: 'alpha' }
@@ -50,19 +51,19 @@ test('治理目录按卡片偏移续取并在服务端排除本人，重复卡�
     ], next_offset: null } }, { governanceOnly: true })
 
   await catalog.fetchCatalog({ reset: true })
-  await catalog.fetchCatalog()
+  await catalog.fetchCatalog({ page: 2 })
 
   assert.deepEqual(catalog.calls.map(({ departmentId, ownerSearch, offset, limit, cardPage, search, excludeOwn }) => ({
     departmentId, ownerSearch, offset, limit, cardPage, search, excludeOwn
   })), [
     { departmentId: 3, ownerSearch: 'alice', offset: 0, limit: 30, cardPage: true, search: '报告', excludeOwn: true },
-    { departmentId: 3, ownerSearch: 'alice', offset: 2, limit: 30, cardPage: true, search: '报告', excludeOwn: true }
+    { departmentId: 3, ownerSearch: 'alice', offset: 30, limit: 30, cardPage: true, search: '报告', excludeOwn: true }
   ])
   assert.deepEqual(
     Array.from(catalog.catalogCards.value, ({ owner_uid, slug }) => `${owner_uid}:${slug}`),
-    ['alice:same', 'alice:alpha', 'bob:same']
+    ['alice:alpha', 'bob:same']
   )
-  assert.equal(catalog.catalogNextOffset.value, null)
+  assert.equal(catalog.catalogHasMore.value, false)
 })
 
 test('筛选条件改变后忽略旧个人目录响应', async () => {
@@ -75,6 +76,6 @@ test('筛选条件改变后忽略旧个人目录响应', async () => {
   await oldRequest
 
   assert.deepEqual(Array.from(catalog.catalogCards.value), [])
-  assert.equal(catalog.catalogNextOffset.value, null)
+  assert.equal(catalog.catalogHasMore.value, false)
   assert.equal(catalog.catalogLoading.value, false)
 })

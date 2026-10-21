@@ -14,7 +14,7 @@ import time
 import uuid
 import zipfile
 from collections.abc import Callable, Sequence
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -107,6 +107,11 @@ _USER_SKILLS_LOCK = threading.Lock()
 _USER_SKILLS_LOCKS: dict[str, threading.Lock] = {}
 _USER_SKILL_PROJECTION_LOCK_SCOPE = "yuxi:skills:user-projection:v1:"
 SKILL_STORAGE_LOCK = 0x5958534B
+
+
+def market_projection_slug(release_id: str) -> str:
+    """为不可变市场版本生成独立的沙盒目录名。"""
+    return f"market-release-{release_id.replace('-', '')}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,7 +410,20 @@ async def sync_user_accessible_skills_async(
     visible_mcp_slugs: set[str] | frozenset[str] | None = _NO_VISIBLE_MCP_SLUGS,
 ) -> Path:
     """在线程池同步只读投影；未给可见列表时默认隐藏全部 MCP 引用。"""
-    return await asyncio.to_thread(sync_user_accessible_skills, uid, source_dirs, visible_mcp_slugs)
+    # to_thread 的线程不会随 await 取消而停止；事务锁必须等它真正停止写文件后再释放。
+    worker = asyncio.create_task(asyncio.to_thread(sync_user_accessible_skills, uid, source_dirs, visible_mcp_slugs))
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            result = await asyncio.shield(worker)
+            break
+        except asyncio.CancelledError as error:
+            if worker.cancelled():
+                raise
+            cancellation = error
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 
 async def refresh_user_skill_projection_async(uid: str) -> dict[str, str]:
@@ -439,6 +457,72 @@ async def refresh_user_skill_projection_async(uid: str) -> dict[str, str]:
         )
         await sync_user_accessible_skills_async(normalized_uid, source_dirs, visible_mcp_slugs)
         return source_dirs
+
+
+@asynccontextmanager
+async def stage_market_projection_revocation(
+    db: AsyncSession, *, release_ids: set[str], installer_uids: set[str], retained_uids: set[str]
+):
+    """在 UID 事务锁内可逆撤去市场目录；调用者须在上下文中提交策略。"""
+    from yuxi.workspace.paths import workspace_uid_dirname
+
+    projection_root = get_skill_projection_dir()
+    names = {market_projection_slug(release_id) for release_id in release_ids}
+    if any(Path(name).name != name for name in names):
+        raise ValueError("无效市场版本路径")
+    users = (await db.scalars(select(User.uid))).all()
+    uid_by_directory = {workspace_uid_dirname(str(uid)): str(uid) for uid in users}
+    # 安装者即使尚未物化目录也必须上锁；无安装的历史持有人也纳入。
+    lock_uids = set(installer_uids)
+    if projection_root.exists():
+        for root in projection_root.iterdir():
+            if root.is_symlink():
+                raise ValueError("用户投影根不能是符号链接")
+            if root.is_dir() and root.name in uid_by_directory and any((root / name).exists() for name in names):
+                lock_uids.add(uid_by_directory[root.name])
+    for uid in sorted(lock_uids):
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:lock_scope))"),
+            {"lock_scope": f"{_USER_SKILL_PROJECTION_LOCK_SCOPE}{uid}"},
+        )
+
+    projection_root.mkdir(parents=True, exist_ok=True)
+    # 兄弟目录不在任何 uid 挂载内；同一文件系统 rename 保证可逆。
+    staging = Path(tempfile.mkdtemp(prefix=".market-revocation-", dir=projection_root.parent))
+    moved: list[tuple[Path, Path]] = []
+    try:
+        # 取锁后重新扫描，包含等待锁期间刚刷新出来的目录和已无 User 行的孤儿。
+        for root in sorted(projection_root.iterdir()):
+            if root.is_symlink():
+                raise ValueError("用户投影根不能是符号链接")
+            if not root.is_dir() or uid_by_directory.get(root.name) in retained_uids:
+                continue
+            for name in sorted(names):
+                source = root / name
+                if not source.exists() and not source.is_symlink():
+                    continue
+                destination = staging / str(len(moved))
+                os.replace(source, destination)
+                moved.append((source, destination))
+        yield
+    except BaseException:
+        # 必须在调用者 rollback 释放 PostgreSQL 锁之前恢复。
+        for source, destination in reversed(moved):
+            os.replace(destination, source)
+        # 恢复失败直接保留暂存证据；恢复成功后只清理空目录，不掩盖原始错误。
+        try:
+            staging.rmdir()
+        except OSError:
+            logger.opt(exception=True).warning("市场治理恢复后，投影暂存清理失败: {}", staging)
+        raise
+    # owning transaction 已提交；空目录和非空目录的清理失败都不能误报策略回滚。
+    try:
+        if moved:
+            shutil.rmtree(staging)
+        else:
+            staging.rmdir()
+    except OSError:
+        logger.opt(exception=True).warning("市场治理已提交，投影暂存清理失败: {}", staging)
 
 
 def _remove_skill_from_user_projection(uid: str, slug: str) -> None:
@@ -1013,6 +1097,9 @@ async def page_skill_cards_for_user(
     search: str = "",
     audience_search: str | None = None,
     audience_department_id: int | None = None,
+    shared_kind: str | None = None,
+    exclude_retired_builtin: bool = False,
+    catalog_all: bool = False,
 ) -> tuple[list[ResolvedSkill], int | None, bool]:
     """按个人或共享来源分页管理卡片，并保持原有卡片授权与标记。"""
     needle = search.strip().casefold()
@@ -1025,6 +1112,56 @@ async def page_skill_cards_for_user(
             audience_department_id = user.department_id
 
     if source == "shared":
+        catalog_filters = {}
+        if catalog_all:
+            from yuxi.agents.skills.market import list_user_market_installs, personal_market_install_summaries
+
+            def personal_directory_names() -> set[str]:
+                """只枚举本人直接子目录，不逐个解析 SKILL.md。"""
+                root = personal_skills_root(str(user.uid))
+                if not root.is_dir():
+                    return set()
+                return {
+                    entry.name
+                    for entry in root.iterdir()
+                    if not entry.is_symlink() and entry.is_dir() and is_valid_skill_slug(entry.name)
+                }
+
+            candidate_names = await asyncio.to_thread(personal_directory_names)
+            matching_slugs = await SkillRepository(db).matching_shared_slugs(
+                candidate_names,
+                search=search,
+                **({"shared_kind": "builtin"} if shared_kind == "builtin" else {}),
+            )
+            shadowed_personal_slugs = set()
+            for slug in matching_slugs:
+                try:
+                    await get_personal_skill(str(user.uid), slug)
+                except ValueError:
+                    continue
+                shadowed_personal_slugs.add(slug)
+
+            installs = await list_user_market_installs(db, user=user, search=search)
+            installed_market_slugs = {item["slug"] for item in installs if item["visible"]}
+            if search.strip():
+                own_slugs = await MarketSkillRepository(db).installed_personal_slugs_for_user(str(user.uid))
+                matched_own_slugs = set()
+                needle = search.strip().casefold()
+                for slug in own_slugs:
+                    try:
+                        personal = await get_personal_skill(str(user.uid), slug)
+                    except ValueError:
+                        continue
+                    if needle in f"{personal.slug} {personal.name} {personal.description}".casefold():
+                        matched_own_slugs.add(slug)
+                own_installs = await personal_market_install_summaries(db, user=user, personal_slugs=matched_own_slugs)
+                installed_market_slugs.update(item["slug"] for item in own_installs.values() if item["visible"])
+            catalog_filters = {
+                "catalog_all": True,
+                "shadowed_personal_slugs": shadowed_personal_slugs,
+                "installed_market_slugs": installed_market_slugs,
+            }
+
         shared, total = await page_visible_skills_for_management(
             db,
             user,
@@ -1033,13 +1170,17 @@ async def page_skill_cards_for_user(
             search=search,
             audience_search=audience_search,
             audience_department_id=audience_department_id,
+            **({"shared_kind": shared_kind} if shared_kind is not None else {}),
+            **({"exclude_retired_builtin": True} if exclude_retired_builtin else {}),
+            **catalog_filters,
         )
         matching_personal = []
-        for item in shared:
-            try:
-                matching_personal.append(await get_personal_skill(str(user.uid), item.slug))
-            except ValueError:
-                pass
+        if not catalog_all:
+            for item in shared:
+                try:
+                    matching_personal.append(await get_personal_skill(str(user.uid), item.slug))
+                except ValueError:
+                    pass
         cards = await list_skill_cards_for_user(
             db,
             user,
@@ -1264,16 +1405,31 @@ async def page_visible_skills_for_management(
     search: str = "",
     audience_search: str | None = None,
     audience_department_id: int | None = None,
+    shared_kind: str | None = None,
+    exclude_retired_builtin: bool = False,
+    catalog_all: bool = False,
+    shadowed_personal_slugs: set[str] | None = None,
+    installed_market_slugs: set[str] | None = None,
 ) -> tuple[list[Skill], int]:
     """以数据库授权条件分页读取管理页可见的共享 Skill。"""
-    audience_filters = {}
+    query_filters = {}
     if audience_search or audience_department_id is not None:
-        audience_filters = {
+        query_filters = {
             "audience_search": audience_search,
             "audience_department_id": audience_department_id,
         }
+    if shared_kind is not None:
+        query_filters["shared_kind"] = shared_kind
+    if exclude_retired_builtin:
+        query_filters["exclude_retired_builtin"] = True
+    if catalog_all:
+        query_filters.update(
+            catalog_all=True,
+            shadowed_personal_slugs=shadowed_personal_slugs,
+            installed_market_slugs=installed_market_slugs,
+        )
     items, total = await SkillRepository(db).page_visible(
-        user, limit=limit, offset=offset, search=search, **audience_filters
+        user, limit=limit, offset=offset, search=search, **query_filters
     )
     visible = [
         item
@@ -2284,6 +2440,7 @@ def build_skill_tree(path: Path, base_dir: Path) -> list[dict[str, Any]]:
                     "name": child.name,
                     "path": rel,
                     "is_dir": False,
+                    "previewable": is_skill_text_path(child),
                 }
             )
     return children

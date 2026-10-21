@@ -15,6 +15,8 @@ from yuxi.storage.postgres.models_business import (
     MarketSkillInstall,
     MarketSkillLike,
     MarketSkillRelease,
+    Skill,
+    SkillShareRequest,
     User,
 )
 
@@ -30,6 +32,8 @@ async def market_case(monkeypatch, tmp_path):
                 tables=[
                     Department.__table__,
                     User.__table__,
+                    Skill.__table__,
+                    SkillShareRequest.__table__,
                     MarketSkill.__table__,
                     MarketSkillRelease.__table__,
                     MarketSkillInstall.__table__,

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
+from yuxi.agents.skills.repository import RETIRED_BUILTIN_SKILL_SLUGS
 from yuxi.agents.skills.service import (
     confirm_personal_skill_install_draft,
     confirm_skill_install_draft,
@@ -63,7 +64,8 @@ from yuxi.agents.skills.sharing import (
     publish_personal_skill_directly,
     submit_skill_share_request,
 )
-from yuxi.agents.skills.market import list_personal_publication_records
+from yuxi.agents.skills.market import list_personal_publication_records, personal_market_install_summaries
+from yuxi.services.skill_catalog_summary_service import personal_space_skill_counts
 from yuxi.permissions import (
     SKILL_PERMISSION_POLICY,
     ResourcePermission,
@@ -191,6 +193,9 @@ def _serialize_skill_for_user(item, user: User, visible_mcp_slugs: set[str] | No
 @user_skills.get("")
 async def list_skill_cards_route(
     source: Literal["all", "shared", "personal"] = Query("all"),
+    shared_kind: Literal["shared", "builtin"] | None = Query(None),
+    catalog_all: bool = Query(False),
+    exclude_retired_builtin: bool = Query(False),
     limit: int | None = Query(None, ge=1, le=100),
     offset: int = Query(0, ge=0),
     search: str = Query("", max_length=100),
@@ -199,6 +204,12 @@ async def list_skill_cards_route(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if shared_kind is not None and source != "shared":
+        raise HTTPException(status_code=422, detail="shared_kind 仅适用于共享 Skill 来源")
+    if exclude_retired_builtin and source != "shared":
+        raise HTTPException(status_code=422, detail="exclude_retired_builtin 仅适用于共享 Skill 来源")
+    if catalog_all and (source != "shared" or shared_kind is None or limit is None):
+        raise HTTPException(status_code=422, detail="catalog_all 仅适用于分页的共享 Skill 目录")
     try:
         if limit is None:
             items = await list_skill_cards_for_user(
@@ -209,6 +220,20 @@ async def list_skill_cards_route(
             )
             if source != "all":
                 items = [item for item in items if (item.source_scope == "personal") == (source == "personal")]
+            if shared_kind is not None:
+                items = [
+                    item
+                    for item in items
+                    if item.enabled
+                    and (item.source_type == "builtin") == (shared_kind == "builtin")
+                    and (item.source_type != "builtin" or item.slug not in RETIRED_BUILTIN_SKILL_SLUGS)
+                ]
+            if exclude_retired_builtin:
+                items = [
+                    item
+                    for item in items
+                    if item.source_type != "builtin" or item.slug not in RETIRED_BUILTIN_SKILL_SLUGS
+                ]
             if search.strip():
                 needle = search.strip().casefold()
                 items = [item for item in items if needle in f"{item.slug} {item.name} {item.description}".casefold()]
@@ -225,15 +250,25 @@ async def list_skill_cards_route(
                 search=search,
                 audience_search=audience_search,
                 audience_department_id=audience_department_id,
+                **({"shared_kind": shared_kind} if shared_kind is not None else {}),
+                **({"exclude_retired_builtin": True} if exclude_retired_builtin else {}),
+                **({"catalog_all": True} if catalog_all else {}),
             )
         visible_mcp_slugs = (
             await get_visible_mcp_reference_slugs(db, current_user)
             if any(item.mcp_dependencies for item in items)
             else None
         )
+        cards = [_serialize_skill_for_user(item, current_user, visible_mcp_slugs) for item in items]
+        if source == "personal" and limit is not None:
+            installs = await personal_market_install_summaries(
+                db, user=current_user, personal_slugs={item.slug for item in items}
+            )
+            for card in cards:
+                card["market_install"] = installs.get(card["slug"])
         return {
             "success": True,
-            "data": [_serialize_skill_for_user(item, current_user, visible_mcp_slugs) for item in items],
+            "data": cards,
             "total": total,
             "has_more": has_more,
             "limit": limit,
@@ -247,6 +282,16 @@ async def list_skill_cards_route(
     except Exception as e:
         logger.error(f"Failed to list Skill cards: {e}")
         raise HTTPException(status_code=500, detail="获取 Skill 列表失败")
+
+
+@user_skills.get("/summary")
+async def personal_skill_summary_route(
+    search: str = Query("", max_length=100),
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """返回个人空间各来源折叠后的精确总数。"""
+    return {"success": True, "data": await personal_space_skill_counts(db, current_user, search=search)}
 
 
 @user_skills.get("/personal-catalog")

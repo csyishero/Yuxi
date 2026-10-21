@@ -440,6 +440,7 @@ class SkillShareRequest(Base):
     published_skill_id = Column(Integer, nullable=True, comment="已批准共享副本的 Skill ID；删除后保留历史身份")
     department_ids = Column(JSON_VALUE, nullable=False, default=list)
     read_scope = Column(JSON_VALUE, nullable=True)
+    market_generation = Column(Integer, nullable=True)
     created_at = Column(DateTime, nullable=False, default=utc_now_naive)
     reviewed_at = Column(DateTime, nullable=True)
 
@@ -497,6 +498,10 @@ class MarketSkill(Base):
     scope = Column(String(16), nullable=False)
     department_id = Column(Integer, nullable=True)
     latest_release_id = Column(String(36), nullable=True)
+    is_published = Column(Boolean, nullable=False, default=True, server_default=text("TRUE"))
+    publication_generation = Column(Integer, nullable=False, default=1, server_default=text("1"))
+    active_from_version = Column(Integer, nullable=False, default=1, server_default=text("1"))
+    state_revision = Column(Integer, nullable=False, default=1, server_default=text("1"))
     created_at = Column(DateTime, nullable=False, default=utc_now_naive)
     updated_at = Column(DateTime, nullable=False, default=utc_now_naive)
 
@@ -536,6 +541,7 @@ class MarketSkillInstall(Base):
     uid = Column(String(64), ForeignKey("users.uid", ondelete="CASCADE"), primary_key=True)
     market_skill_id = Column(String(36), ForeignKey("market_skills.id", ondelete="CASCADE"), primary_key=True)
     release_id = Column(String(36), ForeignKey("market_skill_releases.id"), nullable=False)
+    confirmed_generation = Column(Integer, nullable=False, default=1, server_default=text("1"))
     installed_at = Column(DateTime, nullable=False, default=utc_now_naive)
     updated_at = Column(DateTime, nullable=False, default=utc_now_naive)
 

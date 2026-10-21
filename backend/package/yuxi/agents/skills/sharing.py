@@ -75,6 +75,7 @@ async def submit_skill_share_request(
     operator: User,
     channel: str = "shared",
     category: str | None = None,
+    market_generation: int | None = None,
 ) -> SkillShareRequest:
     """复制本人个人 Skill 为不可变待审快照。"""
     reason = application_reason.strip()
@@ -84,6 +85,8 @@ async def submit_skill_share_request(
         raise ValueError("共享申请原因不能超过 1000 字")
     if channel not in {"shared", "market"}:
         raise ValueError("无效的发布渠道")
+    if channel == "market" and market_generation is None:
+        raise ValueError("市场申请缺少上架批次")
     if category is not None:
         category = normalize_skill_category(category)
 
@@ -126,6 +129,7 @@ async def submit_skill_share_request(
             content_hash=await asyncio.to_thread(compute_skill_dir_hash, snapshot),
             application_reason=reason,
             channel=channel,
+            market_generation=market_generation if channel == "market" else None,
             status="pending",
             created_at=utc_now_naive(),
         )

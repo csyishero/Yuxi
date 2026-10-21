@@ -15,9 +15,63 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from yuxi.agents.skills import service as skill_service
 from yuxi.storage_migrations import v071_skills
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import Skill, User
+from yuxi.storage.postgres.models_business import (
+    Base,
+    Department,
+    MarketSkill,
+    MarketSkillInstall,
+    MarketSkillRelease,
+    MCPServer,
+    Skill,
+    User,
+)
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def ensure_live_api_schema():
+    """本文件自行创建测试数据，不依赖运行中的 API。"""
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_test_knowledge_resources():
+    """本文件没有外部知识库资源需要清理。"""
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_test_sandboxes():
+    """本文件没有沙盒资源需要清理。"""
+    yield
+
+
+@pytest.fixture(scope="module", autouse=True)
+def ensure_disposable_projection_tables():
+    """在一次性测试库创建本模块使用的用户和 Skill 表。"""
+
+    async def create_tables():
+        engine = create_async_engine(os.environ["POSTGRES_URL"])
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(
+                    lambda conn: Base.metadata.create_all(
+                        conn,
+                        tables=[
+                            Department.__table__,
+                            User.__table__,
+                            Skill.__table__,
+                            MarketSkill.__table__,
+                            MarketSkillRelease.__table__,
+                            MarketSkillInstall.__table__,
+                            MCPServer.__table__,
+                        ],
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(create_tables())
 
 
 async def _wait_for_advisory_waiter(session_factory, lock_identity) -> bool:
@@ -346,3 +400,374 @@ async def test_legacy_shared_skill_migrates_without_touching_personal_workspace(
                 await db.execute(delete(User).where(User.id == user_id))
             await db.commit()
         await engine.dispose()
+
+
+@pytest.fixture
+async def market_projection(tmp_path, monkeypatch):
+    """为市场治理与真实刷新创建独立 Schema 和不可变发布目录。"""
+    from yuxi.agents.skills import market
+    from yuxi.storage.postgres.models_business import OperationLog, SkillShareRequest
+
+    schema = f"pytest_governance_projection_{uuid.uuid4().hex[:12]}"
+    admin_engine = create_async_engine(os.environ["POSTGRES_URL"])
+    async with admin_engine.begin() as connection:
+        await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    engine = create_async_engine(os.environ["POSTGRES_URL"], connect_args={"server_settings": {"search_path": schema}})
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def local_session_context():
+        async with sessions() as db:
+            try:
+                yield db
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+
+    monkeypatch.setattr(pg_manager, "get_async_session_context", local_session_context)
+    monkeypatch.setattr(skill_service, "get_skill_projection_dir", lambda: tmp_path / "projections")
+    monkeypatch.setattr(skill_service, "get_skill_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(market, "get_skill_data_dir", lambda: tmp_path)
+    source = tmp_path / "market/release"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("---\nname: projection-guide\ndescription: old\n---\nOld release\n")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda conn: Base.metadata.create_all(
+                    conn,
+                    tables=[
+                        Department.__table__,
+                        User.__table__,
+                        Skill.__table__,
+                        MarketSkill.__table__,
+                        MarketSkillRelease.__table__,
+                        MarketSkillInstall.__table__,
+                        MCPServer.__table__,
+                        OperationLog.__table__,
+                        SkillShareRequest.__table__,
+                    ],
+                )
+            )
+        async with sessions() as db:
+            db.add_all([Department(id=1, name="A"), Department(id=2, name="B")])
+            await db.flush()
+            db.add_all(
+                [
+                    User(uid="z-reader", username="Z", password_hash="x", department_id=2),
+                    User(uid="a-reader", username="A", password_hash="x", department_id=1),
+                    User(uid="root", username="Root", password_hash="x", role="superadmin"),
+                ]
+            )
+            db.add(
+                MarketSkill(
+                    id="listing",
+                    slug="projection-guide",
+                    owner_uid="root",
+                    personal_slug="projection-guide",
+                    scope="global",
+                    latest_release_id="release",
+                )
+            )
+            await db.flush()
+            db.add(
+                MarketSkillRelease(
+                    id="release",
+                    market_skill_id="listing",
+                    version=1,
+                    name="projection-guide",
+                    description="old",
+                    dir_path="market/release",
+                    content_hash="old",
+                    request_id="request",
+                )
+            )
+            await db.flush()
+            db.add_all(
+                [
+                    MarketSkillInstall(uid=uid, market_skill_id="listing", release_id="release")
+                    for uid in ("z-reader", "a-reader")
+                ]
+            )
+            await db.commit()
+        for uid in ("z-reader", "a-reader"):
+            await skill_service.refresh_user_skill_projection_async(uid)
+        yield sessions
+    finally:
+        await engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        await admin_engine.dispose()
+
+
+@pytest.mark.parametrize("mutation", ["unpublish", "scope"])
+async def test_governance_waits_for_refresh_uid_lock_then_revokes(market_projection, mutation):
+    """先行刷新持锁时治理等待，提交后新刷新也无法恢复已撤目录。"""
+    from yuxi.services import skill_market_governance_service as service
+
+    sessions = market_projection
+    async with sessions() as holder, sessions() as writer:
+        await holder.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:scope))"), {"scope": "yuxi:skills:user-projection:v1:z-reader"}
+        )
+        identity = (
+            await holder.execute(
+                text(
+                    "SELECT classid::bigint, objid::bigint, objsubid FROM pg_locks "
+                    "WHERE pid=pg_backend_pid() AND locktype='advisory' AND granted"
+                )
+            )
+        ).one()
+        root = await writer.scalar(select(User).where(User.uid == "root"))
+        if mutation == "unpublish":
+            call = service.unpublish_market_skill(writer, slug="projection-guide", expected_revision=1, operator=root)
+        else:
+            call = service.change_market_skill_scope(
+                writer, slug="projection-guide", scope="department", department_id=1, expected_revision=1, operator=root
+            )
+        task = asyncio.create_task(call)
+        try:
+            assert await _wait_for_advisory_waiter(sessions, identity)
+            path = skill_service.get_user_skills_root_dir("z-reader") / "market-release-release"
+            assert (path / "SKILL.md").is_file()
+            await holder.commit()
+            await asyncio.wait_for(task, 5)
+            assert not path.exists()
+            await skill_service.refresh_user_skill_projection_async("z-reader")
+            assert not path.exists()
+            allowed = skill_service.get_user_skills_root_dir("a-reader") / "market-release-release"
+            assert allowed.exists() is (mutation == "scope")
+            if mutation == "scope":
+                await service.change_market_skill_scope(
+                    writer,
+                    slug="projection-guide",
+                    scope="global",
+                    department_id=None,
+                    expected_revision=2,
+                    operator=root,
+                )
+                await skill_service.refresh_user_skill_projection_async("z-reader")
+                assert "Old release" in (path / "SKILL.md").read_text()
+                install = await writer.get(MarketSkillInstall, ("z-reader", "listing"))
+                assert (install.release_id, install.confirmed_generation) == ("release", 1)
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_governance_restores_before_uid_locks_release(market_projection, monkeypatch):
+    """提交失败回滚前，文件恢复必须完成且刷新仍在真实 UID 锁上等待。"""
+    from yuxi.services import skill_market_governance_service as service
+
+    sessions = market_projection
+    refresh = None
+    async with sessions() as writer:
+        root = await writer.scalar(select(User).where(User.uid == "root"))
+
+        async def fail_commit():
+            nonlocal refresh
+            path = skill_service.get_user_skills_root_dir("z-reader") / "market-release-release"
+            assert not path.exists()
+            identities = (
+                await writer.execute(
+                    text(
+                        "SELECT classid::bigint, objid::bigint, objsubid FROM pg_locks "
+                        "WHERE pid=pg_backend_pid() AND locktype='advisory' AND granted"
+                    )
+                )
+            ).all()
+            refresh = asyncio.create_task(skill_service.refresh_user_skill_projection_async("z-reader"))
+            assert any([await _wait_for_advisory_waiter(sessions, identity) for identity in identities])
+            raise OSError("commit refused")
+
+        monkeypatch.setattr(writer, "commit", fail_commit)
+        original_rollback = writer.rollback
+
+        async def check_restore_then_rollback():
+            assert not refresh.done()
+            for uid in ("a-reader", "z-reader"):
+                path = skill_service.get_user_skills_root_dir(uid) / "market-release-release/SKILL.md"
+                assert "Old release" in path.read_text()
+            await original_rollback()
+
+        monkeypatch.setattr(writer, "rollback", check_restore_then_rollback)
+        try:
+            with pytest.raises(OSError, match="commit refused"):
+                await service.unpublish_market_skill(
+                    writer, slug="projection-guide", expected_revision=1, operator=root
+                )
+            await asyncio.wait_for(refresh, 5)
+            async with sessions() as observer:
+                listing = await observer.get(MarketSkill, "listing")
+                assert listing.is_published and listing.state_revision == 1
+        finally:
+            if refresh is not None and not refresh.done():
+                refresh.cancel()
+                await asyncio.gather(refresh, return_exceptions=True)
+
+
+async def test_refresh_waits_for_governance_commit(market_projection, monkeypatch):
+    """治理先拿 UID 锁时，真实刷新只能在提交后读取撤销结果。"""
+    from yuxi.services import skill_market_governance_service as service
+
+    sessions = market_projection
+    refresh = None
+    async with sessions() as writer:
+        root = await writer.scalar(select(User).where(User.uid == "root"))
+        original_commit = writer.commit
+
+        async def pause_before_commit():
+            nonlocal refresh
+            assert not (skill_service.get_user_skills_root_dir("z-reader") / "market-release-release").exists()
+            identity = (
+                await writer.execute(
+                    text(
+                        "SELECT classid::bigint, objid::bigint, objsubid FROM pg_locks "
+                        "WHERE pid=pg_backend_pid() AND locktype='advisory' AND granted "
+                        "AND objid::bigint=(hashtext('yuxi:skills:user-projection:v1:z-reader')::bigint & 4294967295)"
+                    )
+                )
+            ).one()
+            refresh = asyncio.create_task(skill_service.refresh_user_skill_projection_async("z-reader"))
+            assert await _wait_for_advisory_waiter(sessions, identity)
+            await original_commit()
+
+        monkeypatch.setattr(writer, "commit", pause_before_commit)
+        try:
+            await service.unpublish_market_skill(writer, slug="projection-guide", expected_revision=1, operator=root)
+            sources = await asyncio.wait_for(refresh, 5)
+            assert "market-release-release" not in sources
+            assert not (skill_service.get_user_skills_root_dir("z-reader") / "market-release-release").exists()
+        finally:
+            if refresh is not None and not refresh.done():
+                refresh.cancel()
+                await asyncio.gather(refresh, return_exceptions=True)
+
+
+async def test_governance_flushes_audit_before_staging_files(market_projection, monkeypatch):
+    """审计 flush 可能自动回滚并释放锁，因此必须先于文件撤销。"""
+    from sqlalchemy.exc import IntegrityError
+    from yuxi.services import skill_market_governance_service as service
+    from yuxi.storage.postgres.models_business import OperationLog
+
+    sessions = market_projection
+    async with sessions() as writer:
+        root = await writer.scalar(select(User).where(User.uid == "root"))
+
+        async def invalid_audit(db, *args, **kwargs):
+            for uid in ("a-reader", "z-reader"):
+                assert (skill_service.get_user_skills_root_dir(uid) / "market-release-release/SKILL.md").is_file()
+            db.add(OperationLog(user_id=-999, operation="invalid audit"))
+            await db.flush()
+
+        monkeypatch.setattr(service, "log_operation", invalid_audit)
+        with pytest.raises(IntegrityError):
+            await service.unpublish_market_skill(writer, slug="projection-guide", expected_revision=1, operator=root)
+    async with sessions() as db:
+        assert (await db.get(MarketSkill, "listing")).is_published
+        assert (await db.scalars(select(OperationLog))).all() == []
+
+
+async def test_committed_revocation_does_not_report_cleanup_as_policy_failure(market_projection, monkeypatch):
+    """提交后的不可见暂存清理失败不能把已提交治理误报成回滚。"""
+    from yuxi.services import skill_market_governance_service as service
+
+    original_rmtree = skill_service.shutil.rmtree
+
+    def fail_staging_cleanup(path, *args, **kwargs):
+        if Path(path).name.startswith(".market-revocation-"):
+            raise OSError("post-commit cleanup unavailable")
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(skill_service.shutil, "rmtree", fail_staging_cleanup)
+    async with market_projection() as db:
+        root = await db.scalar(select(User).where(User.uid == "root"))
+        result = await service.unpublish_market_skill(db, slug="projection-guide", expected_revision=1, operator=root)
+        assert result["is_published"] is False
+    async with market_projection() as db:
+        assert (await db.get(MarketSkill, "listing")).is_published is False
+    for uid in ("a-reader", "z-reader"):
+        assert not (skill_service.get_user_skills_root_dir(uid) / "market-release-release").exists()
+
+
+async def test_cancelled_refresh_holds_uid_lock_until_worker_finishes(market_projection, monkeypatch):
+    """取消刷新不能让仍在写文件的工作线程越过治理撤销事务。"""
+    import threading
+    from yuxi.services import skill_market_governance_service as service
+
+    sessions = market_projection
+    entered = threading.Event()
+    resume = threading.Event()
+    target = skill_service.get_user_skills_root_dir("z-reader") / "market-release-release"
+    (target / "SKILL.md").write_text("force refresh copy")
+    original_rename = Path.rename
+
+    def pause_final_rename(source, destination):
+        if Path(destination) == target:
+            entered.set()
+            if not resume.wait(timeout=15):
+                raise TimeoutError("test did not release projection worker")
+        return original_rename(source, destination)
+
+    monkeypatch.setattr(Path, "rename", pause_final_rename)
+    refresh = asyncio.create_task(skill_service.refresh_user_skill_projection_async("z-reader"))
+    governance = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        async with sessions() as observer:
+            identity = (
+                await observer.execute(
+                    text(
+                        "SELECT classid::bigint, objid::bigint, objsubid FROM pg_locks "
+                        "WHERE locktype='advisory' AND granted "
+                        "AND objid::bigint=(hashtext('yuxi:skills:user-projection:v1:z-reader')::bigint & 4294967295)"
+                    )
+                )
+            ).one()
+        refresh.cancel()
+        async with sessions() as writer:
+            root = await writer.scalar(select(User).where(User.uid == "root"))
+            governance = asyncio.create_task(
+                service.unpublish_market_skill(writer, slug="projection-guide", expected_revision=1, operator=root)
+            )
+            assert await _wait_for_advisory_waiter(sessions, identity)
+            assert not refresh.done()
+            refresh.cancel()  # 第二次取消也不能释放仍有工作线程写入的锁。
+            await asyncio.sleep(0)
+            assert not refresh.done()
+            resume.set()
+            with pytest.raises(asyncio.CancelledError):
+                await refresh
+            await asyncio.wait_for(governance, 5)
+        assert not target.exists()
+        async with sessions() as db:
+            assert not (await db.get(MarketSkill, "listing")).is_published
+    finally:
+        resume.set()
+        await asyncio.gather(refresh, *([governance] if governance else []), return_exceptions=True)
+
+
+async def test_empty_staging_cleanup_failure_keeps_committed_success(market_projection, monkeypatch):
+    """没有目录需要撤去时，提交后的 rmdir 失败也不得误报策略失败。"""
+    from yuxi.services import skill_market_governance_service as service
+
+    original_rmdir = Path.rmdir
+
+    def fail_empty_staging(path):
+        if path.name.startswith(".market-revocation-"):
+            raise OSError("empty staging cleanup unavailable")
+        return original_rmdir(path)
+
+    monkeypatch.setattr(Path, "rmdir", fail_empty_staging)
+    async with market_projection() as db:
+        root = await db.scalar(select(User).where(User.uid == "root"))
+        result = await service.change_market_skill_scope(
+            db, slug="projection-guide", scope="global", department_id=None, expected_revision=1, operator=root
+        )
+        assert result["state_revision"] == 2
+    async with market_projection() as db:
+        assert (await db.get(MarketSkill, "listing")).state_revision == 2
+    for uid in ("a-reader", "z-reader"):
+        assert (skill_service.get_user_skills_root_dir(uid) / "market-release-release/SKILL.md").is_file()

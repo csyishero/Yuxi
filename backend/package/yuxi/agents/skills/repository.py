@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from sqlalchemy import String, and_, case, cast, exists, func, or_, select
+from sqlalchemy import String, and_, case, cast, exists, false, func, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from yuxi.storage.postgres.models_business import Skill, User
+from yuxi.storage.postgres.models_business import MarketSkill, Skill, SkillShareRequest, User
 from yuxi.utils.datetime_utils import utc_now_naive
+
+
+RETIRED_BUILTIN_SKILL_SLUGS = ("image-gen", "mysql-reporter")
 
 
 class SkillRepository:
@@ -22,6 +26,28 @@ class SkillRepository:
         )
         return list(result.scalars().all())
 
+    async def matching_shared_slugs(
+        self, slugs: set[str], *, search: str = "", shared_kind: str = "shared"
+    ) -> set[str]:
+        """只查可能被同名个人原件覆盖的目录技能标识。"""
+        if not slugs:
+            return set()
+        statement = select(Skill.slug).where(
+            Skill.slug.in_(slugs),
+            Skill.source_type == "builtin" if shared_kind == "builtin" else Skill.source_type != "builtin",
+            Skill.enabled.is_(True),
+        )
+        if search.strip():
+            needle = search.strip()
+            statement = statement.where(
+                or_(
+                    Skill.slug.icontains(needle, autoescape=True),
+                    Skill.name.icontains(needle, autoescape=True),
+                    Skill.description.icontains(needle, autoescape=True),
+                )
+            )
+        return set((await self.db.scalars(statement)).all())
+
     async def page_visible(
         self,
         user,
@@ -31,6 +57,11 @@ class SkillRepository:
         search: str = "",
         audience_search: str | None = None,
         audience_department_id: int | None = None,
+        shared_kind: str | None = None,
+        exclude_retired_builtin: bool = False,
+        catalog_all: bool = False,
+        shadowed_personal_slugs: set[str] | None = None,
+        installed_market_slugs: set[str] | None = None,
     ) -> tuple[list[Skill], int]:
         """在数据库中按读取和管理授权筛选共享 Skill，并返回稳定分页。"""
         config = cast(Skill.share_config, JSONB)
@@ -113,6 +144,22 @@ class SkillRepository:
             visibility = or_(Skill.source_type == "builtin", authorized) if user.role == "admin" else authorized
 
         filters = [visibility]
+        if shared_kind == "builtin":
+            filters.extend(
+                (
+                    Skill.source_type == "builtin",
+                    Skill.enabled.is_(True),
+                    Skill.slug.notin_(RETIRED_BUILTIN_SKILL_SLUGS),
+                )
+            )
+        elif shared_kind == "shared":
+            filters.extend((Skill.source_type != "builtin", Skill.enabled.is_(True)))
+        if exclude_retired_builtin:
+            filters.append(or_(Skill.source_type != "builtin", Skill.slug.notin_(RETIRED_BUILTIN_SKILL_SLUGS)))
+            # 内置技能只有管理员可管理。普通用户即使恰好是历史记录的创建者，
+            # 禁用后也不能经过下面的授权后处理，因此必须在 count/page 前排除。
+            if user.role not in {"admin", "superadmin"}:
+                filters.append(or_(Skill.source_type != "builtin", Skill.enabled.is_(True)))
         if search.strip():
             needle = search.strip()
             filters.append(
@@ -188,11 +235,135 @@ class SkillRepository:
             )
 
         where = and_(*filters)
+        if catalog_all:
+            if shared_kind not in {"shared", "builtin"}:
+                raise ValueError("全部目录仅适用于共享或内置技能分类")
+            if shadowed_personal_slugs:
+                where = and_(where, Skill.slug.notin_(shadowed_personal_slugs))
+            if shared_kind == "builtin":
+                if installed_market_slugs:
+                    where = and_(where, Skill.slug.notin_(installed_market_slugs))
+                total = await self.db.scalar(select(func.count()).select_from(Skill).where(where))
+                rows = await self.db.scalars(
+                    select(Skill)
+                    .where(where)
+                    .order_by(Skill.updated_at.desc(), Skill.id.desc())
+                    .offset(offset)
+                    .limit(limit)
+                )
+                return list(rows.all()), int(total or 0)
+
+            related_market_slug = self._catalog_related_market_slug(user)
+            filtered = (
+                select(
+                    Skill.id.label("id"),
+                    Skill.slug.label("slug"),
+                    related_market_slug.label("related_market_slug"),
+                )
+                .where(where)
+                .cte("catalog_filtered")
+            )
+            available = select(filtered)
+            if installed_market_slugs:
+                available = available.where(
+                    func.coalesce(filtered.c.related_market_slug, filtered.c.slug).notin_(installed_market_slugs)
+                )
+            available = available.cte("catalog_available")
+            origin_kind = case((available.c.related_market_slug.is_not(None), "market"), else_="shared")
+            origin_slug = func.coalesce(available.c.related_market_slug, available.c.slug)
+            ranked = select(
+                available.c.id,
+                func.row_number()
+                .over(partition_by=(origin_kind, origin_slug), order_by=available.c.id.desc())
+                .label("origin_rank"),
+            ).cte("catalog_ranked")
+            selected = ranked.c.origin_rank == 1
+            total = await self.db.scalar(select(func.count()).select_from(ranked).where(selected))
+            rows = await self.db.scalars(
+                select(Skill)
+                .join(ranked, ranked.c.id == Skill.id)
+                .where(selected)
+                .order_by(Skill.updated_at.desc(), Skill.id.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+            return list(rows.all()), int(total or 0)
+
         total = await self.db.scalar(select(func.count()).select_from(Skill).where(where))
         rows = await self.db.scalars(
             select(Skill).where(where).order_by(Skill.updated_at.desc(), Skill.id.desc()).offset(offset).limit(limit)
         )
         return list(rows.all()), int(total or 0)
+
+    @staticmethod
+    def _catalog_related_market_slug(user: User):
+        """按审核来源真实性和当前市场授权计算共享版本的同源条目。"""
+        request = aliased(SkillShareRequest)
+        other = aliased(SkillShareRequest)
+
+        def matches_published_skill(item):
+            return and_(
+                item.content_hash.is_not(None),
+                item.content_hash != "",
+                item.name == Skill.name,
+                item.description == Skill.description,
+                item.reviewer_uid == Skill.created_by,
+                Skill.created_at.is_not(None),
+                item.reviewed_at.is_not(None),
+                Skill.created_at >= item.created_at,
+                Skill.created_at <= item.reviewed_at,
+            )
+
+        conflicting_request = exists(
+            select(1)
+            .select_from(other)
+            .where(
+                other.published_slug == Skill.slug,
+                other.channel == "shared",
+                other.status == "approved",
+                or_(
+                    other.owner_uid.is_distinct_from(request.owner_uid),
+                    other.personal_slug.is_distinct_from(request.personal_slug),
+                    other.content_hash.is_distinct_from(request.content_hash),
+                    ~func.coalesce(matches_published_skill(other), false()),
+                ),
+            )
+        ).correlate(Skill, request)
+
+        market_visible = True if user.role == "superadmin" else MarketSkill.scope == "global"
+        if user.role != "superadmin" and user.department_id is not None:
+            market_visible = or_(
+                market_visible,
+                and_(MarketSkill.scope == "department", MarketSkill.department_id == user.department_id),
+            )
+
+        return (
+            select(MarketSkill.slug)
+            .select_from(request)
+            .join(
+                MarketSkill,
+                and_(
+                    MarketSkill.owner_uid == request.owner_uid,
+                    MarketSkill.personal_slug == request.personal_slug,
+                ),
+            )
+            .where(
+                Skill.source_type == "personal_share",
+                Skill.content_hash.is_not(None),
+                Skill.content_hash != "",
+                request.published_slug == Skill.slug,
+                request.channel == "shared",
+                request.status == "approved",
+                func.coalesce(matches_published_skill(request), false()),
+                ~conflicting_request,
+                MarketSkill.latest_release_id.is_not(None),
+                MarketSkill.is_published.is_(True),
+                market_visible,
+            )
+            .limit(1)
+            .correlate(Skill)
+            .scalar_subquery()
+        )
 
     async def get_by_slug(self, slug: str, *, for_update: bool = False) -> Skill | None:
         stmt = select(Skill).where(Skill.slug == slug)

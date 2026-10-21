@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from yuxi.agents.skills.market import market_skill_visible
 import yuxi.agents.skills.runtime as skill_runtime
 from yuxi.agents.skills.runtime import (
     build_dependency_bundle,
@@ -10,6 +11,14 @@ from yuxi.agents.skills.runtime import (
     resolve_runtime_skills_for_context,
 )
 from yuxi.agents.skills.service import ResolvedSkill
+
+
+def test_withdrawn_market_skill_is_invisible_to_superadmin():
+    """下架状态也约束最高权限用户的普通市场入口。"""
+    listing = SimpleNamespace(is_published=False, scope="global", department_id=None)
+    root = SimpleNamespace(role="superadmin", department_id=1)
+
+    assert market_skill_visible(listing, root) is False
 
 
 @pytest.fixture(autouse=True)

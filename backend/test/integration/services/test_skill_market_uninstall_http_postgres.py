@@ -27,6 +27,7 @@ from yuxi.storage.postgres.models_business import (
     MarketSkillRelease,
     MCPServer,
     Skill,
+    SkillShareRequest,
     User,
 )
 
@@ -113,6 +114,7 @@ async def test_uninstall_removes_only_own_install_and_projection_even_after_scop
                         Department.__table__,
                         User.__table__,
                         Skill.__table__,
+                        SkillShareRequest.__table__,
                         MarketSkill.__table__,
                         MarketSkillRelease.__table__,
                         MarketSkillInstall.__table__,
@@ -199,6 +201,7 @@ async def test_uninstall_removes_only_own_install_and_projection_even_after_scop
                     "personal_slug": "report",
                     "own_personal_slug": None,
                     "visible": True,
+                    "unavailable_reason": None,
                 }
             ]
             removed = await client.delete("/api/skill-market/report/install")
@@ -239,25 +242,48 @@ async def test_uninstall_removes_only_own_install_and_projection_even_after_scop
             assert invisible_installs == [
                 {
                     "slug": "report",
-                    "name": "report",
-                    "description": "",
-                    "category": None,
                     "installed_version": 1,
-                    "owner_uid": None,
-                    "personal_slug": None,
-                    "own_personal_slug": None,
                     "visible": False,
+                    "unavailable_reason": "out_of_scope",
                 }
             ]
             async with sessions() as db:
+                assert await market.market_projection_sources(db, users["member-b"]) == {}
+                assert [
+                    item
+                    for item in await skill_service.list_accessible_skills(db, users["member-b"])
+                    if item.source_scope == "market"
+                ] == []
+            await skill_service.refresh_user_skill_projection_async("member-b")
+            assert not member_b_projection.exists()
+            async with sessions() as db:
                 listing = await db.get(MarketSkill, market_id)
                 listing.scope = "global"
+                listing.department_id = None
+                await db.commit()
+            async with sessions() as db:
+                assert set(await market.market_projection_sources(db, users["member-b"])) == {projection_name}
+                assert [
+                    item.slug
+                    for item in await skill_service.list_accessible_skills(db, users["member-b"])
+                    if item.source_scope == "market"
+                ] == ["report"]
+                assert (await market.list_user_market_installs(db, user=users["member-b"]))[0][
+                    "unavailable_reason"
+                ] is None
+            await skill_service.refresh_user_skill_projection_async("member-b")
+            assert member_b_projection.is_file()
+            async with sessions() as db:
+                listing = await db.get(MarketSkill, market_id)
+                listing.is_published = False
                 member_b = await db.scalar(select(User).where(User.uid == "member-b"))
                 member_b.department_id = None
                 await db.commit()
             users["member-b"].department_id = None
             assert (await client.get("/api/skill-market/report")).status_code == 400
-            assert (await client.get("/api/skill-market/-/installs")).json()["data"] == invisible_installs
+            assert (await client.get("/api/skill-market/-/installs")).json()["data"] == [
+                {"slug": "report", "installed_version": 1, "visible": False, "unavailable_reason": "unpublished"}
+            ]
             invisible_removal = await client.delete("/api/skill-market/report/install")
             assert invisible_removal.status_code == 200, invisible_removal.text
             assert invisible_removal.json()["data"]["uninstalled"] is True
@@ -276,6 +302,162 @@ async def test_uninstall_removes_only_own_install_and_projection_even_after_scop
             assert "report" not in await skill_service.select_default_skill_slugs(db, users["member-a"])
             assert "report" not in await skill_service.select_default_skill_slugs(db, users["member-b"])
             assert await market.market_projection_sources(db, users["member-a"]) == {}
+    finally:
+        await engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_engine.dispose()
+
+
+async def test_relisted_projection_excludes_previous_generation(monkeypatch, tmp_path: Path):
+    """新批次确认后，实际用户目录只包含本批次的审核版本。"""
+    schema = f"pytest_skill_relisted_{uuid.uuid4().hex[:12]}"
+    admin_engine = create_async_engine(os.environ["POSTGRES_URL"])
+    async with admin_engine.begin() as connection:
+        await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    engine = create_async_engine(os.environ["POSTGRES_URL"], connect_args={"server_settings": {"search_path": schema}})
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    market_id = str(uuid.uuid4())
+    release_ids = {version: str(uuid.uuid4()) for version in (1, 2, 4)}
+
+    async def no_personal_skills(_uid):
+        return []
+
+    monkeypatch.setattr(skill_service, "list_personal_skills", no_personal_skills)
+    monkeypatch.setattr(skill_service, "get_skill_projection_dir", lambda: tmp_path / "projections")
+    monkeypatch.setattr(skill_service, "get_skills_root_dir", lambda: tmp_path / "shared")
+    monkeypatch.setattr(market, "get_skill_data_dir", lambda: tmp_path)
+    (tmp_path / "shared").mkdir()
+    for version in release_ids:
+        source = tmp_path / "market" / f"v{version}"
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text(f"---\nname: report\ndescription: v{version}\n---\n# V{version}\n")
+
+    member = User(uid="member", username="Member", password_hash="x", role="user", department_id=1)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda conn: Base.metadata.create_all(
+                    conn,
+                    tables=[
+                        Department.__table__,
+                        User.__table__,
+                        Skill.__table__,
+                        SkillShareRequest.__table__,
+                        MarketSkill.__table__,
+                        MarketSkillRelease.__table__,
+                        MarketSkillInstall.__table__,
+                        MarketSkillLike.__table__,
+                        MCPServer.__table__,
+                    ],
+                )
+            )
+            await connection.execute(text("INSERT INTO departments (id, name) VALUES (1, 'Credit')"))
+        async with sessions() as db:
+            db.add(member)
+            await db.flush()
+            db.add_all(
+                [
+                    MarketSkill(
+                        id=market_id,
+                        slug="report",
+                        owner_uid="publisher",
+                        personal_slug="report",
+                        scope="department",
+                        department_id=1,
+                        latest_release_id=release_ids[4],
+                    ),
+                    *[
+                        MarketSkillRelease(
+                            id=release_ids[version],
+                            market_skill_id=market_id,
+                            version=version,
+                            name=f"Report v{version}",
+                            description=f"Reviewed release v{version}",
+                            dir_path=f"market/v{version}",
+                            content_hash=f"hash-v{version}",
+                            request_id=str(uuid.uuid4()),
+                        )
+                        for version in release_ids
+                    ],
+                ]
+            )
+            await db.flush()
+            db.add(MarketSkillInstall(uid="member", market_skill_id=market_id, release_id=release_ids[2]))
+            await db.commit()
+
+        async with sessions() as db:
+            before = await market.market_projection_sources(db, member)
+            assert set(before) == {
+                market.market_projection_slug(release_ids[1]),
+                market.market_projection_slug(release_ids[2]),
+            }
+            skill_service.sync_user_accessible_skills("member", before)
+        projection_root = tmp_path / "projections" / "member"
+        assert {entry.name for entry in projection_root.iterdir()} == set(before)
+
+        async with sessions() as db:
+            listing = await db.get(MarketSkill, market_id)
+            listing.publication_generation = 2
+            listing.active_from_version = 4
+            await db.commit()
+        async with sessions() as db:
+            assert await market.market_projection_sources(db, member) == {}
+            assert [
+                item for item in await skill_service.list_accessible_skills(db, member) if item.source_scope == "market"
+            ] == []
+            cards = await market.list_user_market_installs(db, user=member)
+            assert cards[0]["visible"] is True
+            assert cards[0]["unavailable_reason"] == "needs_confirmation"
+            assert cards[0]["name"] == "Report v4"
+            assert cards[0]["latest_version"] == 4
+            assert cards[0]["upgrade_available"] is True
+            detail = await market.get_market_skill(db, slug="report", user=member)
+            assert detail["installed_version"] == 2
+            assert detail["latest_version"] == 4
+            assert detail["upgrade_available"] is True
+        skill_service.sync_user_accessible_skills("member", {})
+        assert list(projection_root.iterdir()) == []
+
+        async with sessions() as db:
+            install = await db.get(MarketSkillInstall, ("member", market_id))
+            install.confirmed_generation = 2
+            await db.commit()
+        async with sessions() as db:
+            assert await market.market_projection_sources(db, member) == {}
+            assert [
+                item for item in await skill_service.list_accessible_skills(db, member) if item.source_scope == "market"
+            ] == []
+            assert (await market.list_user_market_installs(db, user=member))[0][
+                "unavailable_reason"
+            ] == "needs_confirmation"
+
+        async with sessions() as db:
+            install = await db.get(MarketSkillInstall, ("member", market_id))
+            install.release_id = release_ids[4]
+            await db.commit()
+        async with sessions() as db:
+            accessible = [
+                item for item in await skill_service.list_accessible_skills(db, member) if item.source_scope == "market"
+            ]
+            assert [(item.slug, item.version) for item in accessible] == [("report", "4")]
+            sources = await market.market_projection_sources(db, member)
+            assert set(sources) == {market.market_projection_slug(release_ids[4])}
+            assert (await market.list_user_market_installs(db, user=member))[0]["unavailable_reason"] is None
+            skill_service.sync_user_accessible_skills("member", sources)
+        assert {entry.name for entry in projection_root.iterdir()} == {market.market_projection_slug(release_ids[4])}
+        assert (
+            (projection_root / market.market_projection_slug(release_ids[4]) / "SKILL.md")
+            .read_text()
+            .endswith("# V4\n")
+        )
+        async with sessions() as db:
+            assert [release.version for release in await market.MarketSkillRepository(db).releases(market_id)] == [
+                1,
+                2,
+                4,
+            ]
+            assert (await db.get(MarketSkillInstall, ("member", market_id))).confirmed_generation == 2
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:
