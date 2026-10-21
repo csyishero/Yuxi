@@ -1490,11 +1490,12 @@ defineExpose({ loading: computed(() => activeView.value === 'market' ? loading.v
 .market-card p { margin: 11px 0; color: var(--color-text-secondary); line-height: 1.55; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; font-size: 13px; }
 .market-card-author { margin-top: auto; }
 .market-shared-note { margin-top: 5px; color: var(--main-600); font-size: 12px; }
-.market-card-bottom { border-top: 1px solid var(--gray-100); margin-top: 13px; padding-top: 11px; }
-.market-like { display: flex; align-items: center; gap: 5px; border: 0; background: none; color: var(--color-text-secondary); cursor: pointer; }
+.market-card-bottom { flex-wrap: wrap; border-top: 1px solid var(--gray-100); margin-top: 13px; padding-top: 11px; }
+.market-card-bottom :deep(.ant-btn) { margin-left: auto; }
+.market-like { display: flex; flex: none; align-items: center; gap: 5px; border: 0; background: none; color: var(--color-text-secondary); cursor: pointer; }
 .market-like.liked { color: var(--color-error-500); }
-.market-install-count { display: flex; align-items: center; gap: 5px; color: var(--color-text-secondary); font-size: 12px; }
-.market-available { color: var(--color-text-tertiary); font-size: 12px; }
+.market-install-count { display: flex; flex: none; align-items: center; gap: 5px; color: var(--color-text-secondary); font-size: 12px; white-space: nowrap; }
+.market-available { flex: none; color: var(--color-text-tertiary); font-size: 12px; white-space: nowrap; }
 .market-empty { display: grid; justify-items: center; gap: 8px; padding: 80px 16px; color: var(--color-text-secondary); }
 .market-empty strong { color: var(--color-text); }
 .market-error { margin-bottom: 16px; }
