@@ -178,6 +178,23 @@ test('打开后按作者和 slug 汇总两个渠道，同时保留最近申请�
   })
 })
 
+test('发布弹窗在较矮视口内保留底部空间并允许主体滚动', async () => {
+  await withPanel({}, async ({ host }) => {
+    const modal = findAll(host, (item) => item.type === 'a-modal')[0]
+    assert.equal(modal.props.style?.top, '16px')
+    assert.equal(modal.props.style?.paddingBottom, '16px')
+    assert.equal(modal.props['body-style']?.maxHeight, 'calc(100dvh - 112px)')
+    assert.equal(modal.props['body-style']?.overflowY, 'auto')
+  })
+})
+
+test('技能文件预览可获得键盘焦点以继续向下阅读', async () => {
+  await withPanel({}, async ({ host }) => {
+    const content = findAll(host, (item) => item.type === 'pre' && item.props.class === 'publish-file-content')[0]
+    assert.equal(content.props.tabindex, '0')
+  })
+})
+
 test('共享审核要求分类和原因，并提交本人当前技能的渠道申请', async () => {
   await withPanel({ shares: [] }, async ({ host, posted, published, tick }) => {
     const category = findAll(host, (item) => item.type === 'a-select' && item.props['aria-label'] === '技能方向')[0]

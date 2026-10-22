@@ -5,7 +5,8 @@
     :footer="null"
     :width="880"
     :destroy-on-close="true"
-    :body-style="{ maxHeight: 'calc(100vh - 170px)', overflowY: 'auto' }"
+    :style="{ top: '16px', paddingBottom: '16px' }"
+    :body-style="{ maxHeight: 'calc(100dvh - 112px)', overflowY: 'auto' }"
     @cancel="close"
   >
     <div v-if="!isOwnSkill" class="publish-unavailable" role="alert">只能发布自己的个人技能。</div>
@@ -87,7 +88,7 @@
           <div class="publish-file-list" aria-label="当前文件">
             <button v-for="entry in sourceFiles" :key="entry.path" type="button" :disabled="entry.is_dir" :class="{ active: sourcePath === entry.path }" :style="{ paddingLeft: `${10 + entry.depth * 14}px` }" @click="selectSourceFile(entry.path)">{{ entry.name }}</button>
           </div>
-          <pre class="publish-file-content">{{ sourceContent }}</pre>
+          <pre class="publish-file-content" tabindex="0">{{ sourceContent }}</pre>
         </div>
       </section>
 
@@ -102,7 +103,7 @@
           <div class="publish-file-list" aria-label="快照文件">
             <button v-for="entry in snapshotFiles" :key="entry.path" type="button" :disabled="entry.is_dir" :class="{ active: snapshotPath === entry.path }" :style="{ paddingLeft: `${10 + entry.depth * 14}px` }" @click="selectSnapshotFile(entry.path)">{{ entry.name }}</button>
           </div>
-          <pre class="publish-file-content">{{ snapshotContent }}</pre>
+          <pre class="publish-file-content" tabindex="0">{{ snapshotContent }}</pre>
         </div>
       </section>
     </div>
@@ -456,15 +457,16 @@ watch(() => [props.open, props.skill?.slug, props.skill?.owner_uid, props.skill?
 .publish-preview-heading strong { font-size: 13px; }
 .publish-preview-heading span { color: var(--gray-500); font-size: 12px; }
 .publish-preview-empty { padding: 20px; color: var(--gray-500); font-size: 13px; }
-.publish-file-layout { display: grid; grid-template-columns: minmax(130px, 28%) minmax(0, 1fr); min-height: 150px; max-height: 220px; }
-.publish-file-list { display: flex; flex-direction: column; overflow: auto; border-right: 1px solid var(--gray-150); }
+.publish-file-layout { display: grid; grid-template-columns: minmax(130px, 28%) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); height: min(32vh, 280px); min-height: 150px; }
+.publish-file-list { display: flex; flex-direction: column; min-height: 0; overflow: auto; border-right: 1px solid var(--gray-150); }
 .publish-file-list button { border: 0; padding: 7px 10px; background: transparent; color: var(--gray-700); text-align: left; font-size: 12px; cursor: pointer; }
 .publish-file-list button.active { background: var(--main-10); color: var(--main-700); }
 .publish-file-list button:disabled { color: var(--gray-500); cursor: default; }
-.publish-file-content { min-width: 0; overflow: auto; margin: 0; padding: 12px 14px; background: var(--gray-0); color: var(--gray-800); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.publish-file-content { min-width: 0; min-height: 0; overflow: auto; margin: 0; padding: 12px 14px; background: var(--gray-0); color: var(--gray-800); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .publish-snapshot { border-color: var(--main-color); }
 @media (max-width: 640px) {
   .publish-destinations, .publish-file-layout { grid-template-columns: 1fr; }
+  .publish-file-layout { grid-template-rows: auto minmax(0, 1fr); }
   .publish-file-list { max-height: 100px; border-right: 0; border-bottom: 1px solid var(--gray-150); }
   .publish-form-actions { align-items: stretch; flex-direction: column; }
 }
