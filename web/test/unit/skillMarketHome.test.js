@@ -58,7 +58,7 @@ const stub = (name) => ({
   }
 })
 
-async function withHome({ role = 'user', query = {}, shares = [], marketRequests = [], mineShares = [], mineMarket = [], extraPersonal = [], extraShared = [], extraInstalls = [], extraMarket = [], snapshots = {}, hiddenOwn = false, marketFailure = false, personalFailure = false, historyFailureOnce = false, skillPageOverride, skillSummaryOverride, installPageOverride, marketPageOverride } = {}, verify) {
+async function withHome({ role = 'user', query = {}, shares = [], marketRequests = [], reviewMarket = [], installedItems = null, managedMarket = [], managedDetails = {}, scopeConflictOnce = false, publicMarketDetail = null, managedListGate = null, managedListFailure = false, managedEmptyPageOnce = false, mineShares = [], mineMarket = [], extraPersonal = [], extraShared = [], extraInstalls = [], extraMarket = [], snapshots = {}, hiddenOwn = false, marketFailure = false, personalFailure = false, historyFailureOnce = false, skillPageOverride, skillSummaryOverride, installPageOverride, marketPageOverride } = {}, verify) {
   const componentDir = new URL('../../src/components/extensions/', import.meta.url)
   const sharedDir = new URL('../../src/components/shared/', import.meta.url)
   const compiledPath = fileURLToPath(new URL(`.skill-market-home-${pid}.mjs`, componentDir))
@@ -73,6 +73,16 @@ async function withHome({ role = 'user', query = {}, shares = [], marketRequests
   const originalMessages = Object.fromEntries(['success', 'info', 'error', 'warning'].map((name) => [name, message[name]]))
   const requested = []
   const confirms = []
+  const managedRows = managedMarket.map((item) => ({ ...item }))
+  const detailRows = Object.fromEntries(Object.entries(managedDetails).map(([slug, item]) => [slug, item]))
+  const catalogRow = {
+    slug: 'new-market', name: '市场新技能', owner_uid: 'bob', owner_name: 'Bob', latest_version: 1,
+    install_count: 4, likes_count: 2, category: 'other', scope: 'global', description: '市场展示条目',
+    tool_dependencies: [], mcp_dependencies: [], skill_dependencies: [],
+    ...publicMarketDetail
+  }
+  let conflictRemaining = scopeConflictOnce
+  let emptyPageRemaining = managedEmptyPageOnce
   let historyAttempts = 0
   let app, server
   try {
@@ -92,18 +102,18 @@ async function withHome({ role = 'user', query = {}, shares = [], marketRequests
     }
     Object.defineProperty(globalThis, 'localStorage', {
       configurable: true,
-      value: { getItem: () => null, setItem() {}, removeItem() {} }
+      value: { getItem: (key) => key === 'user_token' ? 'test-token' : null, setItem() {}, removeItem() {} }
     })
     Modal.confirm = (options) => { confirms.push(options) }
     for (const name of Object.keys(originalMessages)) message[name] = () => {}
     globalThis.fetch = async (url, options = {}) => {
       const path = String(url)
-      requested.push({ path, method: options.method || 'GET' })
+      requested.push({ path, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null })
       if (path.startsWith('/api/skill-market?')) {
         if (marketFailure) return Response.json({ detail: '市场暂不可用' }, { status: 503 })
         const params = new URL(path, 'http://yuxi.local').searchParams
         const market = [
-        { slug: 'new-market', name: '市场新技能', owner_uid: 'bob', owner_name: 'Bob', latest_version: 1, install_count: 4, likes_count: 2, category: 'other', scope: 'global', description: '市场展示条目' },
+        catalogRow,
         ...extraMarket
         ]
         const query = (params.get('query') || '').toLowerCase()
@@ -118,12 +128,59 @@ async function withHome({ role = 'user', query = {}, shares = [], marketRequests
         if (override) return Response.json(override)
         return Response.json({ data: matching.slice(offset, offset + limit), total: matching.length, limit, offset, has_more: offset + limit < matching.length })
       }
+      if (path === `/api/skill-market/${catalogRow.slug}`) return Response.json({ data: catalogRow })
+      if (path === '/api/skill-market/-/management' || path.startsWith('/api/skill-market/-/management?')) {
+        const params = new URL(path, 'http://yuxi.local').searchParams
+        if (managedListGate) await (typeof managedListGate === 'function' ? managedListGate(params) : managedListGate)
+        if (typeof managedListFailure === 'function' ? managedListFailure() : managedListFailure) return Response.json({ detail: '管理清单暂不可用' }, { status: 503 })
+        const search = (params.get('query') || '').toLowerCase()
+        const exactSlug = params.get('slug')
+        const status = params.get('status')
+        const scope = params.get('scope')
+        const offset = Number(params.get('offset') || 0)
+        const limit = Number(params.get('limit') || 20)
+        const matching = managedRows.filter((item) =>
+          (!search || `${item.name} ${item.slug}`.toLowerCase().includes(search)) &&
+          (!exactSlug || item.slug === exactSlug) &&
+          (!status || (item.is_published ? 'published' : 'withdrawn') === status) &&
+          (!scope || item.scope === scope)
+        )
+        if (emptyPageRemaining && offset > 0 && offset < matching.length) {
+          emptyPageRemaining = false
+          return Response.json({ data: [], total: matching.length, offset, limit, has_more: false })
+        }
+        return Response.json({ data: matching.slice(offset, offset + limit), total: matching.length, offset, limit, has_more: offset + limit < matching.length })
+      }
+      const managementSlug = path.match(/^\/api\/skill-market\/-\/management\/([^/]+)$/)?.[1]
+      if (managementSlug) {
+        const detail = detailRows[decodeURIComponent(managementSlug)] || managedRows.find((item) => item.slug === decodeURIComponent(managementSlug))
+        return Response.json({ data: await detail })
+      }
+      const managementAction = path.match(/^\/api\/skill-market\/([^/]+)\/(unpublish|scope)$/)
+      if (managementAction) {
+        const [, slug, action] = managementAction
+        const row = managedRows.find((item) => item.slug === slug)
+        if (conflictRemaining) {
+          conflictRemaining = false
+          row.state_revision += 1
+          if (detailRows[slug] && typeof detailRows[slug].then !== 'function') detailRows[slug].state_revision = row.state_revision
+          return Response.json({ detail: 'stale' }, { status: 409 })
+        }
+        if (action === 'unpublish') row.is_published = false
+        else {
+          row.scope = JSON.parse(options.body).scope
+          row.department_id = JSON.parse(options.body).department_id
+        }
+        row.state_revision += 1
+        if (detailRows[slug] && typeof detailRows[slug].then !== 'function') Object.assign(detailRows[slug], row)
+        return Response.json({ data: row })
+      }
       if (path.startsWith('/api/skill-market/-/installs')) {
         const params = new URL(path, 'http://yuxi.local').searchParams
         const offset = Number(params.get('offset') || 0)
         const limit = Number(params.get('limit') || 30)
         const catalogAll = params.get('catalog_all') === 'true'
-        const installs = [
+        const installs = installedItems || [
           { slug: 'installed-market', name: '已安装市场版', installed_version: 2, visible: true, category: 'other' },
           { slug: 'old-market', name: '不应显示的旧详情', description: '不应显示的描述', owner_uid: 'bob', installed_version: 1, visible: false },
           ...(hiddenOwn ? [{ slug: 'my-market-old', owner_uid: 'alice', own_personal_slug: 'my-skill', name: '不应显示的本人旧详情', installed_version: 1, visible: false }] : []),
@@ -199,7 +256,7 @@ async function withHome({ role = 'user', query = {}, shares = [], marketRequests
       if (path.startsWith('/api/skills/share-requests?') || path.startsWith('/api/skill-market/requests?')) {
         const params = new URL(path, 'http://yuxi.local').searchParams
         const source = path.startsWith('/api/skill-market')
-          ? params.get('mine_only') === 'true' ? mineMarket : marketRequests
+          ? params.get('mine_only') === 'true' ? mineMarket : [...marketRequests, ...reviewMarket]
           : params.get('mine_only') === 'true' ? mineShares : shares
         const filtered = source.filter((item) => (!params.get('slug') || item.personal_slug === params.get('slug')) && (!params.get('status') || item.status === params.get('status')))
           .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
@@ -218,7 +275,7 @@ async function withHome({ role = 'user', query = {}, shares = [], marketRequests
         { slug: 'my-skill', name: '我创建的技能', owner_uid: 'alice', category: 'other' },
         { slug: 'bob-skill', name: '他人个人技能', owner_uid: 'bob', category: 'other' }
       ], next_offset: null } })
-      if (path === '/api/departments') return Response.json({ departments: [{ id: 3, name: '设计部' }] })
+      if (path === '/api/departments') return Response.json({ departments: [{ id: 3, name: '设计部' }, { id: 4, name: '研发部' }] })
       return Response.json({ data: [] })
     }
 
@@ -258,7 +315,7 @@ async function withHome({ role = 'user', query = {}, shares = [], marketRequests
     app.use(pinia)
     app.use(router)
     app.provide(ssrContextKey, { modules: new Set() })
-    for (const name of ['a-button', 'a-spin', 'a-input', 'a-input-search', 'a-select', 'a-alert', 'a-empty', 'a-tag', 'a-textarea', 'a-radio', 'a-radio-group', 'a-upload', 'a-checkbox', 'a-switch', 'a-tabs', 'a-tab-pane', 'a-pagination']) app.component(name, stub(name))
+    for (const name of ['a-pagination', 'a-button', 'a-spin', 'a-input', 'a-input-search', 'a-select', 'a-alert', 'a-empty', 'a-tag', 'a-textarea', 'a-radio', 'a-radio-group', 'a-upload', 'a-checkbox', 'a-switch', 'a-tabs', 'a-tab-pane', 'a-dropdown', 'a-form', 'a-menu', 'a-menu-divider', 'a-menu-item', 'a-tooltip']) app.component(name, stub(name))
     for (const name of ['a-modal', 'a-drawer']) app.component(name, {
       props: { open: Boolean, title: String },
       setup: (props, { attrs, slots }) => () => props.open ? h(name, { ...attrs, title: props.title }, slots.default?.()) : null
@@ -983,12 +1040,13 @@ test('个人清单直接提供上传、发布及两种管理员审核入口', as
 })
 
 test('失去市场可见性的旧安装仍能从个人清单卸载', async () => {
-  await withHome({}, async ({ host, confirms, requested, tick }) => {
+  await withHome({ installedItems: [{ slug: 'old-market', installed_version: 1, visible: false, unavailable_reason: 'unpublished' }] }, async ({ host, confirms, requested, tick }) => {
     const home = findAll(host, (item) => item.props.id === 'skill-personal-view')[0]
     const oldRow = findAll(home, (item) => item.props.class === 'skill-row' && visibleText(item).includes('old-market'))[0]
     const uninstall = findAll(oldRow, (item) => item.type === 'a-button' && visibleText(item) === '卸载旧安装')[0]
     uninstall.props.onClick()
     assert.equal(confirms.length, 1)
+    assert.equal(confirms[0].title, '卸载 old-market？')
     await confirms[0].onOk()
     await tick()
     assert.ok(requested.some((request) => request.method === 'DELETE' && request.path === '/api/skill-market/old-market/install'))
@@ -1228,31 +1286,48 @@ test('共享副本和指定成员范围按每次批准分别显示，不误判�
     findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
     await tick()
     const row = findAll(host, (item) => item.props['data-skill-slug'] === 'my-skill')[0]
-    assert.match(visibleText(row), /最近发布副本已停用|指定成员（2 人）/)
+    assert.match(visibleText(row), /审核结果：已通过|当前共享副本：已停用|指定成员（2 人）/)
     assert.doesNotMatch(visibleText(row), /共享已停用/)
     findAll(row, (item) => item.type === 'a-button' && visibleText(item) === '查看记录')[0].props.onClick()
     await tick()
     const history = findAll(host, (item) => item.props['aria-label'] === '技能审核历程')[0]
-    assert.match(visibleText(history), /指定成员：bob、cara|指定成员：dana|共享副本当前已启用|共享副本当前已停用/)
+    assert.match(visibleText(history), /指定成员：bob、cara|指定成员：dana|当前共享副本：已启用|当前共享副本：已停用/)
   })
 })
 
-test('旧共享记录无法核对副本时，摘要仍显示审核结果，详情解释历史限制', async () => {
-  const mineShares = [{
-    id: 'share-legacy', owner_uid: 'alice', personal_slug: 'reading', name: '阅读技能',
-    status: 'approved', published_version: '2.0.0', published_copy_status: 'unknown',
-    created_at: '2026-10-15T08:00:00Z'
-  }]
+test('旧共享记录把审核、新申请和无法核对的副本情况分开显示', async () => {
+  const mineShares = [
+    { id: 'share-new', owner_uid: 'alice', personal_slug: 'reading', name: '阅读技能', status: 'pending', created_at: '2026-10-16T08:00:00Z' },
+    { id: 'share-legacy', owner_uid: 'alice', personal_slug: 'reading', name: '阅读技能', status: 'approved', published_version: '2.0.0', published_copy_status: 'unknown', created_at: '2026-10-15T08:00:00Z' }
+  ]
   await withHome({ mineShares }, async ({ host, tick }) => {
     findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
     await tick()
     const row = findAll(host, (item) => item.props['data-skill-slug'] === 'reading')[0]
-    assert.match(visibleText(row), /直接共享.*审核通过/s)
-    assert.doesNotMatch(visibleText(row), /状态未确认|已启用|已停用|已失效/)
+    assert.match(visibleText(row), /审核结果：已通过/)
+    assert.match(visibleText(row), /当前共享副本：无法核对/)
+    assert.match(visibleText(row), /这条历史记录没有保存对应的共享副本信息，因此无法判断它现在是否可用/)
+    assert.match(visibleText(row), /新申请：待审核/)
+    assert.doesNotMatch(visibleText(row), /已启用|已停用|已失效/)
     findAll(row, (item) => item.type === 'a-button' && visibleText(item) === '查看记录')[0].props.onClick()
     await tick()
     const history = findAll(host, (item) => item.props['aria-label'] === '技能审核历程')[0]
-    assert.match(visibleText(history), /旧发布记录无法核对当前共享副本/)
+    assert.match(visibleText(history), /当前共享副本：无法核对/)
+    assert.match(visibleText(history), /这条历史记录没有保存对应的共享副本信息，因此无法判断它现在是否可用/)
+  })
+})
+
+test('只有待审共享申请时只显示申请进度，不暗示已有共享副本', async () => {
+  const mineShares = [{
+    id: 'share-pending', owner_uid: 'alice', personal_slug: 'new-skill', name: '新技能',
+    status: 'pending', created_at: '2026-10-16T08:00:00Z'
+  }]
+  await withHome({ mineShares }, async ({ host, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
+    await tick()
+    const row = findAll(host, (item) => item.props['data-skill-slug'] === 'new-skill')[0]
+    assert.match(visibleText(row), /直接共享.*最新申请：待审核/s)
+    assert.doesNotMatch(visibleText(row), /审核结果：已通过|当前共享副本/)
   })
 })
 
@@ -1272,6 +1347,46 @@ test('市场历史按审核确定的部门范围展示，而非申请人后来�
     const history = findAll(host, (item) => item.props['aria-label'] === '技能审核历程')[0]
     assert.match(visibleText(history), /发布范围：本部门/)
     assert.doesNotMatch(visibleText(history), /部门 7/)
+  })
+})
+
+test('旧市场审核记录缺少 read_scope 时以提交时的 department_ids 显示历史范围', async () => {
+  const mineMarket = [{
+    id: 'market-legacy-dept', owner_uid: 'alice', personal_slug: 'my-skill', name: '我创建的技能', status: 'approved',
+    published_version: 2, current_market_version: 2, read_scope: null, department_ids: [3],
+    existing_market_scope: 'global', existing_market_department_id: null, owner_department_id: 4,
+    created_at: '2026-10-15T08:00:00Z'
+  }]
+  await withHome({ mineMarket }, async ({ host, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '查看发布记录')[0].props.onClick()
+    await tick()
+    const row = findAll(host, (item) => item.props['data-skill-slug'] === 'my-skill')[0]
+    assert.match(visibleText(row), /最近审核范围：本部门/)
+    assert.match(visibleText(row), /当前范围：全公司/)
+    findAll(row, (item) => item.type === 'a-button' && visibleText(item) === '查看记录')[0].props.onClick()
+    await tick()
+    const history = findAll(host, (item) => item.props['aria-label'] === '技能审核历程')[0]
+    assert.match(visibleText(history), /发布范围：本部门/)
+    assert.doesNotMatch(visibleText(history), /发布范围：全公司|发布范围未确认/)
+  })
+})
+
+test('管理员审核列表沿用申请当时的部门记录，不显示后来变更的市场范围', async () => {
+  const reviewMarket = [{
+    id: 'market-approved', name: '周报助手', owner_uid: 'bob', personal_slug: 'weekly-report', status: 'approved',
+    department_ids: [3], existing_market_scope: 'department', existing_market_department_id: 4,
+    created_at: '2026-10-12T08:00:00Z'
+  }]
+  await withHome({ role: 'admin', reviewMarket }, async ({ host, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item).includes('市场审核'))[0].props.onClick()
+    await tick()
+    const modal = findAll(host, (item) => item.type === 'a-modal' && item.props.title === '市场审核申请')[0]
+    const filter = findAll(modal, (item) => item.type === 'a-select')[0]
+    filter.props['onUpdate:value']('approved')
+    filter.props.onChange()
+    await tick()
+    assert.match(visibleText(modal), /设计部及超级管理员可见/)
+    assert.doesNotMatch(visibleText(modal), /研发部及超级管理员可见/)
   })
 })
 
@@ -1335,5 +1450,332 @@ test('市场链接可直接打开市场视图，技能详情返回仍打开我�
   })
   await withHome({ query: { tab: 'skills' } }, async ({ host }) => {
     assert.ok(findAll(host, (item) => item.props.id === 'skill-personal-view').length)
+  })
+})
+
+const managedPublished = { slug: 'weekly-report', name: '周报助手', is_published: true, scope: 'department', department_id: 3, latest_version: 3, publication_generation: 1, state_revision: 6 }
+const managedWithdrawn = { slug: 'withdrawn-report', name: '旧周报助手', is_published: false, scope: 'department', department_id: 3, latest_version: 2, publication_generation: 2, state_revision: 9 }
+
+test('市场管理清单每页20条，分页后只展示服务端当前页且清除旧详情', async () => {
+  const rows = Array.from({ length: 25 }, (_, index) => ({ ...managedPublished, slug: `report-${index}`, name: `周报 ${index}` }))
+  await withHome({ role: 'admin', managedMarket: rows }, async ({ host, requested, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理市场上架')[0].props.onClick()
+    await tick()
+    let drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    assert.equal(findAll(drawer, (item) => item.props['data-managed-slug']).length, 20)
+    assert.match(visibleText(drawer), /共 25 项/)
+    assert.ok(requested.some((item) => item.path === '/api/skill-market/-/management?offset=0&limit=20'))
+    findAll(drawer, (item) => item.props['data-managed-slug'] === 'report-0')[0].children.flatMap((child) => findAll(child, (item) => item.type === 'a-button' && visibleText(item) === '管理'))[0].props.onClick()
+    await tick()
+    findAll(drawer, (item) => item.type === 'a-pagination' && item.props['aria-label'] === '市场上架管理分页')[0].props.onChange(2)
+    await tick()
+    drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    assert.equal(findAll(drawer, (item) => item.props['data-managed-slug']).length, 5)
+    assert.equal(findAll(drawer, (item) => item.props['data-managed-slug'] === 'report-0').length, 0)
+    assert.equal(findAll(drawer, (item) => item.props['aria-label'] === '市场条目管理详情').length, 0)
+    assert.ok(requested.some((item) => item.path === '/api/skill-market/-/management?offset=20&limit=20'))
+  })
+})
+
+test('从市场详情直达管理时精确查找 slug，主动搜索恢复普通匹配', async () => {
+  const rows = [
+    ...Array.from({ length: 25 }, (_, index) => ({ ...managedPublished, slug: `new-market-${index}`, name: `市场新技能 ${index}`, scope: 'global' })),
+    { ...managedPublished, slug: 'new-market', name: '目标市场技能', scope: 'global' }
+  ]
+  await withHome({ role: 'superadmin', query: { tab: 'skills', view: 'market' }, managedMarket: rows }, async ({ host, requested, tick }) => {
+    await tick()
+    findAll(host, (item) => item.type === 'button' && item.props.class === 'market-card-title')[0].props.onClick()
+    await tick()
+    await tick()
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理上架')[0].props.onClick()
+    await tick()
+    let drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    assert.equal(findAll(drawer, (item) => item.props['data-managed-slug'] === 'new-market').length, 1)
+    assert.match(visibleText(findAll(drawer, (item) => item.props['aria-label'] === '市场条目管理详情')[0]), /目标市场技能/)
+    assert.ok(requested.some((item) => item.path.startsWith('/api/skill-market/-/management?') && new URL(item.path, 'http://yuxi.local').searchParams.get('slug') === 'new-market'))
+    findAll(drawer, (item) => item.type === 'a-input-search' && item.props['aria-label'] === '搜索市场管理技能')[0].props.onSearch()
+    await tick()
+    drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    assert.equal(findAll(drawer, (item) => item.props['data-managed-slug']).length, 20)
+    assert.equal(findAll(drawer, (item) => item.props['aria-label'] === '市场条目管理详情').length, 0)
+    const listRequests = requested.filter((item) => item.path.startsWith('/api/skill-market/-/management?'))
+    assert.equal(new URL(listRequests.at(-1).path, 'http://yuxi.local').searchParams.has('slug'), false)
+  })
+})
+
+test('从精确直达改状态或范围时恢复普通管理清单', async () => {
+  const rows = [
+    ...Array.from({ length: 25 }, (_, index) => ({ ...managedPublished, slug: `new-market-${index}`, name: `市场新技能 ${index}`, scope: 'global' })),
+    { ...managedPublished, slug: 'new-market', name: '目标市场技能', scope: 'global' }
+  ]
+  for (const filter of ['市场管理状态筛选', '市场管理范围筛选']) {
+    await withHome({ role: 'superadmin', query: { tab: 'skills', view: 'market' }, managedMarket: rows }, async ({ host, requested, tick }) => {
+      await tick()
+      findAll(host, (item) => item.type === 'button' && item.props.class === 'market-card-title')[0].props.onClick()
+      await tick()
+      await tick()
+      findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理上架')[0].props.onClick()
+      await tick()
+      assert.ok(requested.some((item) => item.path.startsWith('/api/skill-market/-/management?') && new URL(item.path, 'http://yuxi.local').searchParams.get('slug') === 'new-market'))
+      const drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+      findAll(drawer, (item) => item.type === 'a-select' && item.props['aria-label'] === filter)[0].props.onChange(filter === '市场管理状态筛选' ? 'published' : 'global')
+      await tick()
+      const listRequests = requested.filter((item) => item.path.startsWith('/api/skill-market/-/management?'))
+      assert.equal(new URL(listRequests.at(-1).path, 'http://yuxi.local').searchParams.has('slug'), false)
+      assert.match(visibleText(findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]), /共 26 项/)
+    })
+  }
+})
+
+test('总数尚未收敛但续页为空时回到第一页重新读取', async () => {
+  const rows = Array.from({ length: 21 }, (_, index) => ({ ...managedPublished, slug: `report-${index}` }))
+  await withHome({ role: 'admin', managedMarket: rows, managedEmptyPageOnce: true }, async ({ host, requested, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理市场上架')[0].props.onClick()
+    await tick()
+    const drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    findAll(drawer, (item) => item.type === 'a-pagination' && item.props['aria-label'] === '市场上架管理分页')[0].props.onChange(2)
+    await tick()
+    assert.equal(findAll(drawer, (item) => item.props['data-managed-slug']).length, 20)
+    const offsets = requested.filter((item) => item.path.startsWith('/api/skill-market/-/management?')).map((item) => new URL(item.path, 'http://yuxi.local').searchParams.get('offset'))
+    assert.deepEqual(offsets, ['0', '20', '0'])
+  })
+})
+
+test('市场管理搜索与状态筛选回第一页，非超管没有范围筛选', async () => {
+  const rows = [managedPublished, managedWithdrawn, ...Array.from({ length: 20 }, (_, index) => ({ ...managedPublished, slug: `other-${index}`, name: `其他 ${index}` }))]
+  await withHome({ role: 'admin', managedMarket: rows }, async ({ host, requested, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理市场上架')[0].props.onClick()
+    await tick()
+    let drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    assert.equal(findAll(drawer, (item) => item.type === 'a-select' && item.props['aria-label'] === '市场管理范围筛选').length, 0)
+    findAll(drawer, (item) => item.type === 'a-pagination' && item.props['aria-label'] === '市场上架管理分页')[0].props.onChange(2)
+    await tick()
+    findAll(drawer, (item) => item.type === 'a-input-search' && item.props['aria-label'] === '搜索市场管理技能')[0].props['onUpdate:value'](' withdrawn ')
+    findAll(drawer, (item) => item.type === 'a-select' && item.props['aria-label'] === '市场管理状态筛选')[0].props.onChange('withdrawn')
+    await tick()
+    drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    assert.equal(findAll(drawer, (item) => item.props['data-managed-slug']).length, 1)
+    assert.match(visibleText(drawer), /共 1 项/)
+    assert.ok(requested.some((item) => item.path === '/api/skill-market/-/management?offset=0&limit=20&query=withdrawn&status=withdrawn'))
+    const search = findAll(drawer, (item) => item.type === 'a-input-search' && item.props['aria-label'] === '搜索市场管理技能')[0]
+    search.props['onUpdate:value']('report')
+    search.props.onSearch()
+    await tick()
+    assert.ok(requested.some((item) => item.path.includes('query=report') && item.path.includes('status=withdrawn') && item.path.includes('offset=0')))
+  })
+})
+
+test('超级管理员可按全公司范围筛选并只保留当前条件内的详情', async () => {
+  await withHome({ role: 'superadmin', managedMarket: [managedPublished, { ...managedWithdrawn, scope: 'global' }] }, async ({ host, requested, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理市场上架')[0].props.onClick()
+    await tick()
+    let drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    findAll(drawer, (item) => item.props['data-managed-slug'] === 'weekly-report')[0].children.flatMap((child) => findAll(child, (item) => item.type === 'a-button' && visibleText(item) === '管理'))[0].props.onClick()
+    await tick()
+    findAll(drawer, (item) => item.type === 'a-select' && item.props['aria-label'] === '市场管理范围筛选')[0].props.onChange('global')
+    await tick()
+    drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    assert.equal(findAll(drawer, (item) => item.props['data-managed-slug'] === 'weekly-report').length, 0)
+    assert.equal(findAll(drawer, (item) => item.props['aria-label'] === '市场条目管理详情').length, 0)
+    assert.ok(requested.some((item) => item.path.includes('scope=global') && item.path.includes('offset=0')))
+  })
+})
+
+test('管理清单的迟到搜索响应不能覆盖较新的筛选结果', async () => {
+  let releaseOld
+  const oldGate = new Promise((resolve) => { releaseOld = resolve })
+  await withHome({ role: 'admin', managedMarket: [managedPublished, managedWithdrawn], managedListGate: (params) => params.get('query') === 'weekly' ? oldGate : undefined }, async ({ host, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理市场上架')[0].props.onClick()
+    await tick()
+    let drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    const search = findAll(drawer, (item) => item.type === 'a-input-search' && item.props['aria-label'] === '搜索市场管理技能')[0]
+    search.props['onUpdate:value']('weekly')
+    search.props.onSearch()
+    await tick()
+    search.props['onUpdate:value']('withdrawn')
+    search.props.onSearch()
+    await tick()
+    releaseOld()
+    await tick()
+    drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    assert.equal(findAll(drawer, (item) => item.props['data-managed-slug'] === 'weekly-report').length, 0)
+    assert.equal(findAll(drawer, (item) => item.props['data-managed-slug'] === 'withdrawn-report').length, 1)
+  })
+})
+
+test('下架使当前管理页变空时回退至有效页', async () => {
+  const rows = Array.from({ length: 21 }, (_, index) => ({ ...managedPublished, slug: `report-${index}`, name: `周报 ${index}` }))
+  await withHome({ role: 'admin', managedMarket: rows }, async ({ host, confirms, requested, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理市场上架')[0].props.onClick()
+    await tick()
+    let drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    findAll(drawer, (item) => item.type === 'a-select' && item.props['aria-label'] === '市场管理状态筛选')[0].props.onChange('published')
+    await tick()
+    findAll(drawer, (item) => item.type === 'a-pagination' && item.props['aria-label'] === '市场上架管理分页')[0].props.onChange(2)
+    await tick()
+    drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    findAll(drawer, (item) => item.props['data-managed-slug'] === 'report-20')[0].children.flatMap((child) => findAll(child, (item) => item.type === 'a-button' && visibleText(item) === '管理'))[0].props.onClick()
+    await tick()
+    findAll(drawer, (item) => item.type === 'a-button' && visibleText(item) === '下架技能')[0].props.onClick()
+    await confirms[0].onOk()
+    await tick()
+    drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    assert.equal(findAll(drawer, (item) => item.props['data-managed-slug']).length, 20)
+    assert.match(visibleText(drawer), /共 20 项/)
+    assert.ok(requested.some((item) => item.path.includes('status=published') && item.path.includes('offset=0')))
+    assert.equal(findAll(drawer, (item) => item.props['aria-label'] === '市场条目管理详情').length, 0)
+    assert.ok(requested.some((item) => item.path.includes('status=published') && item.path.includes('offset=20')))
+  })
+})
+
+test('市场管理入口仅向管理员开放，清单保留已下架条目且普通目录不展示', async () => {
+  await withHome({ managedMarket: [managedPublished, managedWithdrawn] }, async ({ host, requested }) => {
+    assert.equal(findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理市场上架').length, 0)
+    assert.equal(requested.some((item) => item.path.includes('/management')), false)
+  })
+  await withHome({ role: 'admin', managedMarket: [managedPublished, managedWithdrawn] }, async ({ host, requested, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理市场上架')[0].props.onClick()
+    await tick()
+    const drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    assert.ok(drawer)
+    assert.match(visibleText(drawer), /withdrawn-report|已下架|作者重新提交/)
+    assert.ok(requested.some((item) => item.path === '/api/skill-market/-/management?offset=0&limit=20'))
+    findAll(host, (item) => item.props.role === 'tab' && visibleText(item) === '技能市场')[0].props.onClick()
+    await tick()
+    const publicMarket = findAll(host, (item) => item.props.id === 'skill-market-view')[0]
+    assert.doesNotMatch(visibleText(publicMarket), /旧周报助手/)
+  })
+})
+
+test('市场详情仅向有权治理该条目的管理员显示管理上架', async () => {
+  const openListing = async (host, tick) => {
+    await tick()
+    const title = findAll(host, (item) => item.type === 'button' && item.props.class === 'market-card-title')[0]
+    assert.ok(title, visibleText(host))
+    title.props.onClick()
+    await tick()
+    await tick()
+    const detail = findAll(host, (item) => item.type === 'a-modal' && item.props.title === 'Skill 详情')[0]
+    assert.ok(detail, visibleText(host))
+    return detail
+  }
+  const controls = (detail) => findAll(detail, (item) => item.type === 'a-button' && visibleText(item) === '管理上架')
+  const marketQuery = { tab: 'skills', view: 'market' }
+  await withHome({ role: 'admin', query: marketQuery }, async ({ host, tick }) => {
+    assert.equal(controls(await openListing(host, tick)).length, 0, '部门管理员不能治理全公司条目')
+  })
+  await withHome({ role: 'superadmin', query: marketQuery }, async ({ host, tick, requested }) => {
+    const detail = await openListing(host, tick)
+    assert.equal(controls(detail).length, 1, `${visibleText(detail)} ${JSON.stringify(requested)}`)
+  })
+  const departmentListing = { slug: 'new-market', name: '市场新技能', owner_uid: 'bob', owner_name: 'Bob', latest_version: 1, install_count: 4, likes_count: 2, category: 'other', scope: 'department', department_id: 3, description: '市场展示条目' }
+  await withHome({ role: 'admin', query: marketQuery, publicMarketDetail: departmentListing }, async ({ host, tick }) => {
+    assert.equal(controls(await openListing(host, tick)).length, 1)
+  })
+  await withHome({ role: 'admin', query: marketQuery, publicMarketDetail: { ...departmentListing, department_id: 4 } }, async ({ host, tick }) => {
+    assert.equal(controls(await openListing(host, tick)).length, 0, '部门管理员不能治理其他部门条目')
+  })
+})
+
+test('部门管理员能下架本部门已上架条目，但看不到范围修改入口', async () => {
+  await withHome({ role: 'admin', managedMarket: [managedPublished, managedWithdrawn] }, async ({ host, requested, confirms, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理市场上架')[0].props.onClick()
+    await tick()
+    const row = findAll(host, (item) => item.props['data-managed-slug'] === 'weekly-report')[0]
+    findAll(row, (item) => item.type === 'a-button' && visibleText(item) === '管理')[0].props.onClick()
+    await tick()
+    const detail = findAll(host, (item) => item.props['aria-label'] === '市场条目管理详情')[0]
+    assert.ok(detail)
+    assert.equal(findAll(detail, (item) => item.type === 'a-select' && item.props['aria-label'] === '当前上架范围').length, 0)
+    findAll(detail, (item) => item.type === 'a-button' && visibleText(item) === '下架技能')[0].props.onClick()
+    assert.match(confirms[0].content, /不再供成员使用/)
+    await confirms[0].onOk()
+    await tick()
+    assert.ok(requested.some((item) => item.path === '/api/skill-market/weekly-report/unpublish' && item.method === 'POST' && item.body.expected_revision === 6))
+    assert.match(visibleText(host), /已下架/)
+  })
+})
+
+test('超级管理员改范围携带读取的版本，冲突后刷新详情而不覆盖先前决定', async () => {
+  await withHome({ role: 'superadmin', managedMarket: [managedPublished], scopeConflictOnce: true }, async ({ host, requested, confirms, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理市场上架')[0].props.onClick()
+    await tick()
+    findAll(host, (item) => item.props['data-managed-slug'] === 'weekly-report')[0].children.flatMap((child) => findAll(child, (item) => item.type === 'a-button' && visibleText(item) === '管理'))[0].props.onClick()
+    await tick()
+    const scope = findAll(host, (item) => item.type === 'a-select' && item.props['aria-label'] === '当前上架范围')[0]
+    scope.props['onUpdate:value']('department:4')
+    await tick()
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '保存范围')[0].props.onClick()
+    assert.match(confirms[0].content, /研发部/)
+    await confirms[0].onOk()
+    await tick()
+    assert.ok(requested.some((item) => item.path === '/api/skill-market/weekly-report/scope' && item.method === 'PUT' && item.body.expected_revision === 6 && item.body.scope === 'department' && item.body.department_id === 4))
+    assert.ok(requested.filter((item) => item.path === '/api/skill-market/-/management/weekly-report').length >= 2, '冲突后应重新读取管理详情')
+    assert.ok(requested.filter((item) => item.path.startsWith('/api/skill-market/-/management?')).length >= 2, '冲突后应重新读取清单')
+    assert.match(visibleText(host), /状态已变化|请重新确认/)
+  })
+})
+
+test('异步管理详情只显示最后选中的条目', async () => {
+  let resolveFirst
+  const first = new Promise((resolve) => { resolveFirst = resolve })
+  const second = { ...managedWithdrawn }
+  await withHome({ role: 'admin', managedMarket: [managedPublished, managedWithdrawn], managedDetails: { 'weekly-report': first, 'withdrawn-report': second } }, async ({ host, tick }) => {
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理市场上架')[0].props.onClick()
+    await tick()
+    const manage = (slug) => findAll(findAll(host, (item) => item.props['data-managed-slug'] === slug)[0], (item) => item.type === 'a-button' && visibleText(item) === '管理')[0]
+    manage('weekly-report').props.onClick()
+    manage('withdrawn-report').props.onClick()
+    await tick()
+    resolveFirst({ ...managedPublished })
+    await tick()
+    const detail = findAll(host, (item) => item.props['aria-label'] === '市场条目管理详情')[0]
+    assert.match(visibleText(detail), /withdrawn-report/)
+    assert.doesNotMatch(visibleText(detail), /weekly-report/)
+  })
+})
+
+test('管理清单加载中关闭抽屉后不再打开旧条目详情', async () => {
+  let finishList
+  const managedListGate = new Promise((resolve) => { finishList = resolve })
+  await withHome({
+    role: 'superadmin', query: { tab: 'skills', view: 'market' },
+    managedMarket: [{ ...managedPublished, slug: 'new-market' }], managedListGate
+  }, async ({ host, requested, tick }) => {
+    await tick()
+    findAll(host, (item) => item.type === 'button' && item.props.class === 'market-card-title')[0].props.onClick()
+    await tick()
+    await tick()
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理上架')[0].props.onClick()
+    await tick()
+    const drawer = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    assert.ok(drawer)
+    drawer.props.onClose()
+    await tick()
+    finishList()
+    await tick()
+    await tick()
+    assert.equal(findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理').length, 0)
+    assert.equal(requested.some((item) => item.path === '/api/skill-market/-/management/new-market'), false)
+    findAll(host, (item) => item.type === 'a-button' && visibleText(item) === '管理市场上架')[0].props.onClick()
+    await tick()
+    const reopened = findAll(host, (item) => item.type === 'a-drawer' && item.props.title === '市场上架管理')[0]
+    assert.match(visibleText(reopened), /选择一项查看当前状态/)
+    assert.equal(findAll(reopened, (item) => item.props['aria-label'] === '市场条目管理详情').length, 0)
+  })
+})
+
+test('重新上架且在范围内的旧安装保留卡片信息并提供本人显式确认升级', async () => {
+  await withHome({ installedItems: [
+    { slug: 'relisted', installed_version: 2, visible: true, unavailable_reason: 'needs_confirmation', name: '重新上架的周报', latest_version: 4, upgrade_available: true }
+  ] }, async ({ host, confirms, requested, tick }) => {
+    const row = findAll(host, (item) => item.props.class === 'skill-row' && visibleText(item).includes('relisted'))[0]
+    assert.match(visibleText(row), /需确认新版/)
+    assert.match(visibleText(row), /重新上架的周报/)
+    findAll(row, (item) => item.type === 'a-button' && visibleText(item) === '确认升级')[0].props.onClick()
+    assert.match(confirms[0].content, /新版本/)
+    await confirms[0].onOk()
+    await tick()
+    assert.ok(requested.some((item) => item.path === '/api/skill-market/relisted/upgrade' && item.method === 'POST'))
   })
 })

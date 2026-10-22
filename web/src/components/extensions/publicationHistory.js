@@ -63,6 +63,7 @@ export function buildPublicationGroups({ sharedRequests = [], marketRequests = [
       market: {
         ...market,
         version: currentMarketField(market.requests, 'current_market_version'),
+        isPublished: currentMarketField(market.requests, 'existing_market_is_published'),
         scope: currentMarketField(market.requests, 'existing_market_scope'),
         departmentId: currentMarketField(market.requests, 'existing_market_department_id')
       }

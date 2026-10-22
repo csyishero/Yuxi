@@ -357,6 +357,7 @@ class SkillRepository:
                 func.coalesce(matches_published_skill(request), false()),
                 ~conflicting_request,
                 MarketSkill.latest_release_id.is_not(None),
+                MarketSkill.is_published.is_(True),
                 market_visible,
             )
             .limit(1)

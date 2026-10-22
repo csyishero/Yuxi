@@ -14,7 +14,7 @@ Owner：web/src/components/extensions/PublicationRecords.vue
 
 共享摘要只描述最近一次批准生成的副本，不把该副本停用误写成整个共享渠道停用；历史明细保留每个副本自身的状态。指定成员范围在摘要显示人数，在历史明细显示实际 UID。市场历史使用审核确定的范围，不用申请人后来所属部门代替。
 
-旧共享申请缺少可核对的副本身份时，摘要只显示“审核通过”，历史明细再说明无法核对当前共享副本；不能把数据关联缺失写成新的业务状态，也不能由同名 Skill 猜测当前启停。
+共享摘要把最近一次批准的审核结果、对应副本的当前情况和后续新申请进度分开显示。旧申请缺少可核对的副本身份时，摘要与历史明细均显示“当前共享副本：无法核对”，并解释历史记录没有保存对应副本信息；审核通过仍是独立的历史结果。页面不由同名 Skill 猜测当前启停，也不把数据关联缺失当作副本已失效。
 
 个人原件清单只判断原件是否仍存在。原件已删除时，申请历史与快照仍可进入，并标注“原件已删除”；原件清单读取失败时不推断原件已删除。两个申请列表任一读取失败时显示可重试错误，不以空记录代替失败。
 
@@ -34,7 +34,7 @@ Owner：web/src/components/extensions/PublicationRecords.vue
 
 ## 验证
 
-- `cd web && node --test test/unit/skillMarketHome.test.js test/unit/publicationHistory.test.js test/unit/PersonalSkillPublish.test.js`：31 项通过。组件交互测试覆盖只有真实申请进入记录、同一原件双渠道合并、已删除原件保留审核历程和旧快照按申请 ID 读取、个人清单读取失败时不误标原件删除、最近共享副本的状态、旧记录缺少副本身份时只把审核结果放在摘要、指定成员范围、市场历史审核部门及旧申请不误用当前市场版本。
-- 组合逻辑测试覆盖作者过滤、未申请原件排除、最近申请与较早批准版本同时保留、时间排序及原件状态未知；既有发布窗口测试继续通过。
-- `cd web && ./node_modules/.bin/eslint . --max-warnings=0` 与 `./node_modules/.bin/vite build --configLoader runner` 通过。全量前端单测 470 项中 468 项通过；其余两项分别是未改动知识库视图的断言失败和本机端口权限错误。
-- 检查前端变更：读取现有 `mine_only` 申请与按申请 ID 读取快照的接口，未修改后端、Schema 或安装记录。定向测试使用模拟接口；真实后端快照读取未验证。本机浏览器安全策略拒绝打开临时验证页面，未完成真实页面截图。
+- `cd web && pnpm run test:unit`：510 项通过。组件测试覆盖共享审核结果、当前副本状态、后续新申请分别显示；缺少副本关联的历史记录在摘要、发布窗口和详情中解释无法核对的原因。既有的申请筛选、范围、版本、快照和市场状态测试继续通过。
+- `cd web && pnpm run lint:check` 与 `./node_modules/.bin/vite build --configLoader runner` 通过；`cd docs && ./node_modules/.bin/vitepress build` 通过。
+- `python3 -m unittest scripts.test_verify_engineering_contracts`：62 项通过。`python3 scripts/verify_engineering_contracts.py` 仍报告 4 项其他历史决策文档错误，不属于技能发布记录改动。
+- 状态展示测试使用模拟接口。本机服务已返回新版页面文件；浏览器安全校验未通过，真实页面与后端记录仍需单独核对。

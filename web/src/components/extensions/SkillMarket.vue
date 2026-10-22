@@ -21,6 +21,7 @@
           <div class="skill-page-actions">
             <a-button @click="selectView('market')">去市场找技能</a-button>
             <a-button v-if="userStore.isAdmin" @click="openRequests">市场审核<span v-if="pendingRequestCount"> ({{ pendingRequestCount }})</span></a-button>
+            <a-button v-if="userStore.isAdmin" @click="openMarketManagement">管理市场上架</a-button>
             <a-button v-if="userStore.isAdmin || hasManageableSharedSkills || legacyTotals.shared > legacySharedCards.length" @click="managementOpen = true">技能治理</a-button>
             <SkillCardList toolbar-only :market-installs="installedCards" @updated="refreshHome" />
           </div>
@@ -54,8 +55,8 @@
                 <div class="skill-row-origin">{{ personalItemOrigin(item) }}<small>{{ skillCategoryLabel(item.category) }}</small></div>
                 <div class="skill-row-status" :class="{ 'is-unavailable': item.visible === false || item.market_visible === false || item.shadowed_by_personal }">{{ personalItemStatus(item) }}</div>
                 <div class="skill-row-actions">
-                  <template v-if="item.kind === 'personal'"><a-button size="small" @click="openPersonalItem(item)">查看</a-button><a-button size="small" @click="openPublish(item)">发布技能</a-button><a-button v-if="item.market_installed_version" size="small" :danger="item.market_visible === false" @click="item.market_visible === false ? confirmUninstall(item.market_install) : openDetail(item.market_slug)">{{ item.market_visible === false ? '卸载旧安装' : '管理安装' }}</a-button></template>
-                  <template v-else-if="item.kind === 'market'"><a-button v-if="item.visible !== false" size="small" @click="openPersonalItem(item)">查看</a-button><a-button size="small" danger @click="confirmUninstall(item)">{{ item.visible === false ? '卸载旧安装' : '卸载' }}</a-button></template>
+                  <template v-if="item.kind === 'personal'"><a-button size="small" @click="openPersonalItem(item)">查看</a-button><a-button size="small" @click="openPublish(item)">发布技能</a-button><a-button v-if="item.market_install?.unavailable_reason === 'needs_confirmation'" size="small" :loading="busySlug === item.market_slug" @click="confirmUpgrade(item.market_install)">确认升级</a-button><a-button v-if="item.market_installed_version" size="small" :danger="item.market_visible === false" @click="item.market_visible === false || item.market_install?.unavailable_reason ? confirmUninstall(item.market_install) : openDetail(item.market_slug)">{{ item.market_visible === false || item.market_install?.unavailable_reason ? '卸载旧安装' : '管理安装' }}</a-button></template>
+                  <template v-else-if="item.kind === 'market'"><a-button v-if="item.unavailable_reason === 'needs_confirmation'" size="small" :loading="busySlug === item.slug" @click="confirmUpgrade(item)">确认升级</a-button><a-button v-else-if="item.visible !== false && !item.unavailable_reason" size="small" @click="openPersonalItem(item)">查看</a-button><a-button size="small" danger @click="confirmUninstall(item)">{{ item.visible === false || item.unavailable_reason ? '卸载旧安装' : '卸载' }}</a-button></template>
                   <a-button v-else size="small" @click="openPersonalItem(item)">{{ canManageSkillRecord(item) ? '管理技能' : '查看' }}</a-button>
                 </div>
               </div>
@@ -80,7 +81,7 @@
               </div>
             </div>
           </a-spin>
-          <p class="skill-list-hint">共享、系统和已安装的市场技能，可在智能体中选择使用。</p>
+          <p class="skill-list-hint">可用的共享、系统和市场技能，可在智能体中选择使用。</p>
         </template>
       </template>
     </section>
@@ -88,7 +89,7 @@
     <section v-else id="skill-market-view" role="tabpanel" class="skill-view-content">
       <div class="skill-page-heading">
         <div class="skill-page-title"><div class="skill-page-icon"><Sparkles :size="25" /></div><div><h2>技能市场</h2><p>发现已发布的技能，查看适用范围并安装到自己的空间。</p></div></div>
-        <a-button class="market-rankings-button" @click="openRankings"><ChartNoAxesColumn :size="16" /> 热门榜</a-button>
+        <div class="skill-page-actions"><a-button v-if="userStore.isAdmin" @click="openMarketManagement">管理市场上架</a-button><a-button class="market-rankings-button" @click="openRankings"><ChartNoAxesColumn :size="16" /> 热门榜</a-button></div>
       </div>
       <div class="market-toolbar"><a-input-search v-model:value="query" placeholder="搜索技能名称或用途" allow-clear class="market-search" @search="searchMarket" @pressEnter="searchMarket" /><span v-if="!marketError && !loading" class="market-result-count">共 {{ marketTotal }} 项</span></div>
       <nav class="market-categories" aria-label="技能方向筛选">
@@ -186,11 +187,62 @@
           </div>
           <div class="market-detail-actions">
             <a-button v-if="detail.installed_version" danger :loading="busySlug === detail.slug" @click="confirmUninstall(detail)">卸载</a-button>
+            <a-button v-if="canManageMarketListing(detail)" @click="openMarketManagement(detail.slug)">管理上架</a-button>
             <a-button v-if="detail.upgrade_available || (!detail.installed_version && (ownPersonalCandidate(detail) || detail.install_conflict !== 'reserved'))" type="primary" :loading="busySlug === detail.slug" @click="act(detail)">{{ detail.upgrade_available ? '升级到最新版本' : detail.install_conflict === 'personal' ? '查看已有技能' : ownPersonalCandidate(detail) ? '查看个人技能' : detail.shared_available_slug ? '安装市场版' : '安装 Skill' }}</a-button>
           </div>
         </div>
       </a-spin>
     </a-modal>
+
+    <a-drawer v-model:open="marketManagementOpen" title="市场上架管理" width="min(900px, 96vw)" @close="closeMarketManagement">
+      <p class="managed-market-intro">管理当前有权处理的市场条目。已下架技能保留原有版本和审核记录。</p>
+      <div class="managed-market-toolbar">
+        <a-input-search v-model:value="managedMarketQuery" allow-clear aria-label="搜索市场管理技能" placeholder="搜索名称或技能标识" class="managed-market-search" @search="searchManagedMarket" />
+        <div class="managed-market-filters">
+          <a-select :value="managedMarketStatus" aria-label="市场管理状态筛选" :options="managedMarketStatusOptions" @change="changeManagedMarketStatus" />
+          <a-select v-if="userStore.isSuperAdmin" :value="managedMarketScope" aria-label="市场管理范围筛选" :options="managedMarketScopeOptions" @change="changeManagedMarketScope" />
+        </div>
+        <span v-if="!managedMarketLoading && !managedMarketError" class="managed-market-count">共 {{ managedMarketTotal }} 项</span>
+      </div>
+      <a-alert v-if="managedMarketError" type="error" :message="managedMarketError" show-icon class="market-error"><template #action><a-button size="small" @click="fetchManagedMarket">重试</a-button></template></a-alert>
+      <a-alert v-if="managedActionError" type="warning" :message="managedActionError" show-icon class="market-error" />
+      <a-spin :spinning="managedMarketLoading">
+        <div v-if="!managedMarketLoading && !managedMarketError && !managedMarketItems.length" class="personal-empty">{{ managedMarketAppliedQuery || managedMarketStatus !== 'all' || managedMarketScope !== 'all' ? '没有符合条件的市场技能。' : '暂无可管理的市场技能。' }}</div>
+        <div v-else-if="!managedMarketError" class="managed-market-layout">
+          <div class="managed-market-list" aria-label="市场上架管理清单">
+            <article v-for="item in managedMarketItems" :key="item.slug" :data-managed-slug="item.slug" class="managed-market-row" :class="{ selected: selectedManagedSlug === item.slug }">
+              <div class="managed-market-row-copy"><strong>{{ item.name || item.slug }}</strong><small>{{ item.slug }} · v{{ item.latest_version || '—' }} · {{ managedScopeLabel(item) }}</small></div>
+              <span class="managed-market-status" :class="{ withdrawn: !item.is_published }">{{ item.is_published ? '已上架' : '已下架' }}</span>
+              <a-button size="small" @click="openManagedDetail(item.slug)">管理</a-button>
+            </article>
+          </div>
+          <section v-if="selectedManagedSlug" class="managed-market-detail" aria-label="市场条目管理详情">
+            <a-spin :spinning="managedDetailLoading">
+              <div v-if="managedDetailError" role="alert" class="managed-detail-feedback">{{ managedDetailError }} <a-button size="small" @click="openManagedDetail(selectedManagedSlug)">重试</a-button></div>
+              <template v-else-if="managedDetail">
+                <div class="managed-market-detail-heading"><h3>{{ managedDetail.name || managedDetail.slug }}</h3><span class="managed-market-status" :class="{ withdrawn: !managedDetail.is_published }">{{ managedDetail.is_published ? '已上架' : '已下架' }}</span></div>
+                <p class="managed-market-meta">{{ managedDetail.slug }} · 最新审核版本 v{{ managedDetail.latest_version || '—' }}</p>
+                <p>当前范围：{{ managedScopeLabel(managedDetail) }}</p>
+                <p v-if="!managedDetail.is_published" class="managed-market-notice">作者需从个人技能重新提交快照，审核通过后才会再次上架。</p>
+                <template v-else>
+                  <div v-if="userStore.isSuperAdmin" class="managed-market-scope">
+                    <label for="managed-market-scope">当前上架范围</label>
+                    <a-select id="managed-market-scope" v-model:value="managedScopeChoice" aria-label="当前上架范围" :options="managedScopeOptions" :loading="departmentLoading" />
+                    <span>调整后，范围外成员的旧安装将暂不可用；再次进入范围会自动恢复。</span>
+                    <a-button :disabled="!canSaveManagedScope" :loading="managedActionBusy" @click="confirmManagedScope">保存范围</a-button>
+                  </div>
+                  <div class="managed-market-danger"><a-button danger :loading="managedActionBusy" @click="confirmManagedUnpublish">下架技能</a-button></div>
+                </template>
+              </template>
+            </a-spin>
+          </section>
+          <div v-else class="managed-market-placeholder">选择一项查看当前状态和可用操作。</div>
+        </div>
+      </a-spin>
+      <div v-if="managedMarketTotal > managedMarketPageSize && !managedMarketLoading && !managedMarketError" class="managed-market-pages">
+        <a-pagination :current="managedMarketPage" :page-size="managedMarketPageSize" :total="managedMarketTotal" :show-size-changer="false" size="small" aria-label="市场上架管理分页" @change="changeManagedMarketPage" />
+      </div>
+    </a-drawer>
 
     <a-modal v-model:open="requestsOpen" title="市场审核申请" :footer="null" width="760px">
       <div class="market-request-toolbar">
@@ -254,7 +306,9 @@ import {
   getMarketSkillFile,
   getMarketSkillTree,
   getPersonalSkillSummary,
+  getManagedMarketSkill,
   installMarketSkill,
+  listManagedMarketSkills,
   listMarketInstalls,
   uninstallMarketSkill,
   listMarketRequests,
@@ -267,6 +321,8 @@ import {
   exportSkillShareSnapshot,
   reviewMarketSkill,
   toggleMarketSkillLike,
+  unpublishMarketSkill,
+  changeMarketSkillScope,
   upgradeMarketSkill
 } from '@/apis/skill_api'
 
@@ -376,6 +432,37 @@ const missingPersonalSlugs = ref(new Set())
 const marketError = ref('')
 const busySlug = ref('')
 const managementOpen = ref(false)
+const marketManagementOpen = ref(false)
+const managedMarketItems = ref([])
+const managedMarketLoading = ref(false)
+const managedMarketError = ref('')
+const managedMarketQuery = ref('')
+const managedMarketAppliedQuery = ref('')
+const managedMarketExactSlug = ref('')
+const managedMarketStatus = ref('all')
+const managedMarketScope = ref('all')
+const managedMarketPage = ref(1)
+const managedMarketPageSize = 20
+const managedMarketTotal = ref(0)
+const managedMarketStatusOptions = [
+  { value: 'all', label: '全部状态' },
+  { value: 'published', label: '已上架' },
+  { value: 'withdrawn', label: '已下架' }
+]
+const managedMarketScopeOptions = [
+  { value: 'all', label: '全部范围' },
+  { value: 'global', label: '全公司' },
+  { value: 'department', label: '部门' }
+]
+const managedActionError = ref('')
+const selectedManagedSlug = ref('')
+const managedDetail = ref(null)
+const managedDetailLoading = ref(false)
+const managedDetailError = ref('')
+const managedScopeChoice = ref('')
+const managedActionBusy = ref(false)
+let managedMarketSequence = 0
+let managedDetailSequence = 0
 const releaseView = ref(false)
 const publishOpen = ref(false)
 const publishSkill = ref(null)
@@ -489,6 +576,10 @@ const marketScopeLabel = (item) => {
   if (Number(item.department_id) === Number(userStore.departmentId)) return '本部门'
   return departmentNames.value[item.department_id] || `部门 ${item.department_id}`
 }
+const canManageMarketListing = (item) => userStore.isSuperAdmin || (
+  userStore.isAdmin && item?.scope === 'department' && item.department_id != null &&
+  Number(item.department_id) === Number(userStore.departmentId)
+)
 const sourceLabel = (item) => item.kind === 'market'
   ? `市场 · ${marketScopeLabel(item)}`
   : item.source_type === 'builtin' ? '系统内置' : '共享技能'
@@ -503,18 +594,22 @@ const personalItemStatus = (item) => {
     return `${source}${version}${item.shadowed_by_personal ? ' · 个人版本优先' : ''}`
   }
   if (item.kind === 'market') {
-    return item.visible === false
-      ? `市场已安装 · 当前不可用 · v${item.installed_version}`
+    return item.unavailable_reason || item.visible === false
+      ? `市场已安装 · ${marketInstallReason(item.unavailable_reason)} · v${item.installed_version}`
       : `市场已安装 · v${item.installed_version}`
   }
   if (!item.market_installed_version) return '个人技能'
-  return item.market_visible === false
-    ? `个人技能 · 市场安装已失效 v${item.market_installed_version}`
+  return item.market_visible === false || item.market_install?.unavailable_reason
+    ? `个人技能 · 市场安装${item.market_install?.unavailable_reason ? marketInstallReason(item.market_install.unavailable_reason) : '已失效'} v${item.market_installed_version}`
     : `个人技能 · 市场已安装 v${item.market_installed_version}`
+}
+/** 把旧安装的服务端不可用原因转为安全的行动提示。 */
+function marketInstallReason(reason) {
+  return { unpublished: '已下架', out_of_scope: '当前不在使用范围', needs_confirmation: '需确认新版' }[reason] || '当前不可用'
 }
 const requestScopeLabel = (request) => {
   if (request.read_scope?.access_level === 'global') return '全公司可见'
-  const departmentId = request.read_scope?.department_ids?.[0] ?? request.existing_market_department_id ?? request.owner_department_id
+  const departmentId = request.read_scope?.department_ids?.[0] ?? request.department_ids?.[0] ?? request.owner_department_id
   return `${departmentNames.value[departmentId] || `部门 ${departmentId || '未分配'}`}及超级管理员可见`
 }
 /** 已发布技能的新版本沿用原范围，跨部门及全公司续版由超级管理员审核。 */
@@ -535,6 +630,7 @@ const marketCardWithSharedStatus = (item) => combineSkillCards([item], legacyCar
 function selectView(view) {
   activeView.value = view
   managementOpen.value = false
+  closeMarketManagement()
   releaseView.value = false
   const nextQuery = { ...route.query, tab: 'skills' }
   if (view === 'market') nextQuery.view = 'market'
@@ -560,6 +656,222 @@ function openPersonalItem(item) {
 function openManagementMarket(slug) {
   managementOpen.value = false
   openDetail(slug)
+}
+
+/** 打开独立管理清单，已下架条目也只能从管理接口读取。 */
+async function openMarketManagement(slug) {
+  if (!userStore.isAdmin) return
+  marketManagementOpen.value = true
+  managedActionError.value = ''
+  managedMarketQuery.value = typeof slug === 'string' ? slug : ''
+  managedMarketAppliedQuery.value = managedMarketQuery.value
+  managedMarketExactSlug.value = typeof slug === 'string' ? slug : ''
+  managedMarketStatus.value = 'all'
+  managedMarketScope.value = 'all'
+  managedMarketPage.value = 1
+  clearManagedDetail()
+  const loading = fetchManagedMarket()
+  const sequence = managedMarketSequence
+  await loading
+  if (marketManagementOpen.value && sequence === managedMarketSequence && typeof slug === 'string' && managedMarketItems.value.some((item) => item.slug === slug)) {
+    await openManagedDetail(slug)
+  }
+}
+
+/** 使旧详情请求失效，避免筛选或翻页后重新显示范围外条目。 */
+function clearManagedDetail() {
+  managedDetailSequence++
+  selectedManagedSlug.value = ''
+  managedDetail.value = null
+  managedDetailError.value = ''
+  managedDetailLoading.value = false
+}
+
+/** 关闭管理面板并使旧列表、详情响应失效。 */
+function closeMarketManagement() {
+  marketManagementOpen.value = false
+  managedMarketSequence++
+  clearManagedDetail()
+}
+
+/** 搜索条件生效时从第一页重新读取清单。 */
+function searchManagedMarket() {
+  const query = managedMarketQuery.value.trim()
+  if (query === managedMarketAppliedQuery.value && !managedMarketExactSlug.value) return
+  managedMarketQuery.value = query
+  managedMarketAppliedQuery.value = query
+  managedMarketExactSlug.value = ''
+  managedMarketPage.value = 1
+  clearManagedDetail()
+  fetchManagedMarket()
+}
+
+/** 状态变化后丢弃旧页和详情。 */
+function changeManagedMarketStatus(status) {
+  if (status === managedMarketStatus.value) return
+  managedMarketAppliedQuery.value = managedMarketQuery.value.trim()
+  managedMarketQuery.value = managedMarketAppliedQuery.value
+  managedMarketExactSlug.value = ''
+  managedMarketStatus.value = status
+  managedMarketPage.value = 1
+  clearManagedDetail()
+  fetchManagedMarket()
+}
+
+/** 范围筛选仅由超级管理员使用。 */
+function changeManagedMarketScope(scope) {
+  if (!userStore.isSuperAdmin || scope === managedMarketScope.value) return
+  managedMarketAppliedQuery.value = managedMarketQuery.value.trim()
+  managedMarketQuery.value = managedMarketAppliedQuery.value
+  managedMarketExactSlug.value = ''
+  managedMarketScope.value = scope
+  managedMarketPage.value = 1
+  clearManagedDetail()
+  fetchManagedMarket()
+}
+
+/** 翻页时清除不在目标页的详情。 */
+function changeManagedMarketPage(page) {
+  if (page === managedMarketPage.value) return
+  managedMarketQuery.value = managedMarketAppliedQuery.value
+  managedMarketPage.value = page
+  clearManagedDetail()
+  fetchManagedMarket()
+}
+
+/** 管理清单仅使用管理员专用接口。 */
+async function fetchManagedMarket() {
+  if (!userStore.isAdmin) return
+  const sequence = ++managedMarketSequence
+  managedMarketLoading.value = true
+  managedMarketError.value = ''
+  managedMarketItems.value = []
+  try {
+    const result = await listManagedMarketSkills({
+      query: managedMarketAppliedQuery.value,
+      slug: managedMarketExactSlug.value,
+      status: managedMarketStatus.value,
+      scope: userStore.isSuperAdmin ? managedMarketScope.value : 'all',
+      offset: (managedMarketPage.value - 1) * managedMarketPageSize,
+      limit: managedMarketPageSize
+    })
+    if (sequence !== managedMarketSequence || !marketManagementOpen.value) return
+    const total = result.total ?? 0
+    const lastPage = Math.max(1, Math.ceil(total / managedMarketPageSize))
+    const rows = result.data || []
+    if (managedMarketPage.value > 1 && (managedMarketPage.value > lastPage || !rows.length)) {
+      managedMarketPage.value = rows.length ? lastPage : 1
+      clearManagedDetail()
+      return await fetchManagedMarket()
+    }
+    managedMarketItems.value = rows
+    managedMarketTotal.value = total
+    if (selectedManagedSlug.value && !managedMarketItems.value.some((item) => item.slug === selectedManagedSlug.value)) clearManagedDetail()
+  } catch (failure) {
+    if (sequence === managedMarketSequence) {
+      managedMarketError.value = errorText(failure)
+      managedMarketTotal.value = 0
+      clearManagedDetail()
+    }
+  } finally {
+    if (sequence === managedMarketSequence) managedMarketLoading.value = false
+  }
+}
+
+/** 切换管理详情时丢弃先前条目的迟到响应。 */
+async function openManagedDetail(slug) {
+  if (!marketManagementOpen.value || !userStore.isAdmin || !slug) return
+  const sequence = ++managedDetailSequence
+  selectedManagedSlug.value = slug
+  managedDetail.value = null
+  managedDetailError.value = ''
+  managedDetailLoading.value = true
+  try {
+    const item = (await getManagedMarketSkill(slug))?.data
+    if (sequence !== managedDetailSequence) return
+    managedDetail.value = item
+    managedScopeChoice.value = item?.scope === 'global' ? 'global' : `department:${item?.department_id}`
+  } catch (failure) {
+    if (sequence === managedDetailSequence) managedDetailError.value = errorText(failure)
+  } finally {
+    if (sequence === managedDetailSequence) managedDetailLoading.value = false
+  }
+}
+
+/** 管理页使用当前范围显示部门，不推断作者或历史审核范围。 */
+function managedScopeLabel(item) {
+  if (item.scope === 'global') return '全公司'
+  const id = item.department_id
+  return departmentNames.value[id] || (Number(id) === Number(userStore.departmentId) ? userStore.departmentName || '本部门' : `部门 ${id}`)
+}
+
+const managedScopeOptions = computed(() => {
+  const ids = new Set(Object.keys(departmentNames.value).map(Number))
+  if (managedDetail.value?.department_id != null) ids.add(Number(managedDetail.value.department_id))
+  return [
+    { value: 'global', label: '全公司' },
+    ...[...ids].sort((a, b) => a - b).map((id) => ({ value: `department:${id}`, label: departmentNames.value[id] || `部门 ${id}` }))
+  ]
+})
+const canSaveManagedScope = computed(() => {
+  if (!userStore.isSuperAdmin || !managedDetail.value?.is_published || managedActionBusy.value) return false
+  const current = managedDetail.value.scope === 'global' ? 'global' : `department:${managedDetail.value.department_id}`
+  return managedScopeChoice.value !== current && managedScopeOptions.value.some((item) => item.value === managedScopeChoice.value)
+})
+
+/** 写入后回读管理状态，冲突时丢弃页面里的旧修订号。 */
+async function runManagedAction(slug, write, success) {
+  if (managedActionBusy.value) return
+  managedActionBusy.value = true
+  managedActionError.value = ''
+  try {
+    await write()
+    if (selectedManagedSlug.value === slug) managedDetail.value = null
+    await Promise.all([fetchManagedMarket(), refresh()])
+    if (selectedManagedSlug.value === slug && managedMarketItems.value.some((item) => item.slug === slug)) await openManagedDetail(slug)
+    message.success(success)
+  } catch (failure) {
+    managedActionError.value = failure?.status === 409
+      ? '条目状态已变化，已刷新，请重新确认。'
+      : errorText(failure)
+    if (failure?.status === 409) {
+      await fetchManagedMarket()
+      if (selectedManagedSlug.value === slug && managedMarketItems.value.some((item) => item.slug === slug)) await openManagedDetail(slug)
+    }
+  } finally {
+    managedActionBusy.value = false
+  }
+}
+
+/** 下架前说明旧安装和再次上架的后果。 */
+function confirmManagedUnpublish() {
+  const item = managedDetail.value
+  if (!item?.is_published || managedActionBusy.value) return
+  Modal.confirm({
+    title: `下架 ${item.name || item.slug}？`,
+    content: '下架后不再供成员使用，旧安装保留但不可用。作者须重新提交快照并审核通过才能再次上架。',
+    okText: '确认下架',
+    okType: 'danger',
+    cancelText: '取消',
+    onOk: () => runManagedAction(item.slug, () => unpublishMarketSkill(item.slug, item.state_revision), '市场技能已下架')
+  })
+}
+
+/** 超级管理员确认目标受众后才修改当前市场范围。 */
+function confirmManagedScope() {
+  if (!canSaveManagedScope.value) return
+  const item = managedDetail.value
+  const choice = managedScopeChoice.value
+  const scope = choice === 'global' ? 'global' : 'department'
+  const departmentId = scope === 'global' ? null : Number(choice.split(':')[1])
+  const target = managedScopeOptions.value.find((option) => option.value === choice)?.label
+  Modal.confirm({
+    title: `调整 ${item.name || item.slug} 的上架范围？`,
+    content: `将当前范围改为${target}？范围外成员的旧安装将暂不可用。`,
+    okText: '确认调整',
+    cancelText: '取消',
+    onOk: () => runManagedAction(item.slug, () => changeMarketSkillScope(item.slug, scope, departmentId, item.state_revision), '市场范围已更新')
+  })
 }
 
 /** 切换方向并重新加载该方向的市场分页。 */
@@ -1017,11 +1329,36 @@ async function act(item) {
   }
 }
 
+/** 重新上架后只由安装者明确确认当前审核版本。 */
+function confirmUpgrade(item) {
+  if (item?.unavailable_reason !== 'needs_confirmation' || busySlug.value) return
+  Modal.confirm({
+    title: `确认升级 ${item.slug}？`,
+    content: '此市场技能已重新上架。确认新版本后，旧安装才会在新的 Agent 任务中恢复可用。',
+    okText: '确认升级',
+    cancelText: '取消',
+    async onOk() {
+      busySlug.value = item.slug
+      try {
+        await upgradeMarketSkill(item.slug)
+        await refresh()
+        message.success('已确认并升级到当前审核版本')
+      } catch (failure) {
+        await refresh()
+        message.error(errorText(failure))
+        throw failure
+      } finally {
+        busySlug.value = ''
+      }
+    }
+  })
+}
+
 /** 仅卸载当前用户的市场安装，个人原件和发布版本均保留。 */
 function confirmUninstall(item) {
   if (!item?.installed_version || busySlug.value) return
   Modal.confirm({
-    title: `卸载 ${item.name}？`,
+    title: `卸载 ${item.name || item.slug}？`,
     content: '只移除你安装的市场版本；市场发布和其他人的安装不受影响。固定选用此版本的 Agent 需要重新配置，正在使用该技能的任务可能受影响。',
     okText: '卸载',
     okType: 'danger',
@@ -1269,11 +1606,12 @@ defineExpose({ loading: computed(() => activeView.value === 'market' ? loading.v
 .market-card p { margin: 11px 0; color: var(--color-text-secondary); line-height: 1.55; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; font-size: 13px; }
 .market-card-author { margin-top: auto; }
 .market-shared-note { margin-top: 5px; color: var(--main-600); font-size: 12px; }
-.market-card-bottom { border-top: 1px solid var(--gray-100); margin-top: 13px; padding-top: 11px; }
-.market-like { display: flex; align-items: center; gap: 5px; border: 0; background: none; color: var(--color-text-secondary); cursor: pointer; }
+.market-card-bottom { flex-wrap: wrap; border-top: 1px solid var(--gray-100); margin-top: 13px; padding-top: 11px; }
+.market-card-bottom :deep(.ant-btn) { margin-left: auto; }
+.market-like { display: flex; flex: none; align-items: center; gap: 5px; border: 0; background: none; color: var(--color-text-secondary); cursor: pointer; }
 .market-like.liked { color: var(--color-error-500); }
-.market-install-count { display: flex; align-items: center; gap: 5px; color: var(--color-text-secondary); font-size: 12px; }
-.market-available { color: var(--color-text-tertiary); font-size: 12px; }
+.market-install-count { display: flex; flex: none; align-items: center; gap: 5px; color: var(--color-text-secondary); font-size: 12px; white-space: nowrap; }
+.market-available { flex: none; color: var(--color-text-tertiary); font-size: 12px; white-space: nowrap; }
 .market-empty { display: grid; justify-items: center; gap: 8px; padding: 80px 16px; color: var(--color-text-secondary); }
 .market-empty strong { color: var(--color-text); }
 .market-error { margin-bottom: 16px; }
@@ -1302,8 +1640,40 @@ defineExpose({ loading: computed(() => activeView.value === 'market' ? loading.v
 .market-request-actions { justify-content: flex-end; margin-top: 10px; }
 .market-request-review-reason { color: var(--color-warning-900); font-size: 12px; }
 .market-review-scope { display: block; margin: 18px 0; }
+.managed-market-intro { margin: 0 0 16px; color: var(--color-text-secondary); font-size: 13px; line-height: 1.6; }
+.managed-market-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 16px; }
+.managed-market-search { flex: 1 1 220px; max-width: 340px; }
+.managed-market-filters { display: flex; flex-wrap: wrap; gap: 10px; }
+.managed-market-filters :deep(.ant-select) { min-width: 120px; }
+.managed-market-count { margin-left: auto; color: var(--color-text-tertiary); font-size: 12px; white-space: nowrap; }
+.managed-market-pages { display: flex; justify-content: flex-end; margin-top: 16px; }
+.managed-market-layout { display: grid; grid-template-columns: minmax(250px, 36%) minmax(0, 1fr); min-height: 300px; border: 1px solid var(--gray-150); border-radius: 8px; overflow: hidden; }
+.managed-market-list { max-height: 65vh; overflow: auto; border-right: 1px solid var(--gray-150); }
+.managed-market-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 13px 14px; border-bottom: 1px solid var(--gray-150); }
+.managed-market-row:last-child { border-bottom: 0; }
+.managed-market-row.selected { background: var(--main-10); }
+.managed-market-row-copy { min-width: 0; }
+.managed-market-row-copy strong, .managed-market-row-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.managed-market-row-copy strong { color: var(--color-text); font-size: 13px; }
+.managed-market-row-copy small { margin-top: 4px; color: var(--color-text-tertiary); font-size: 11px; }
+.managed-market-status { display: inline-block; width: fit-content; padding: 2px 8px; border-radius: 999px; background: var(--color-success-50); color: var(--color-success-700); font-size: 12px; white-space: nowrap; }
+.managed-market-status.withdrawn { background: var(--color-warning-50); color: var(--color-warning-900); }
+.managed-market-detail, .managed-market-placeholder { min-width: 0; padding: 20px; }
+.managed-market-detail-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+.managed-market-detail-heading h3 { margin: 0; overflow-wrap: anywhere; font-size: 18px; }
+.managed-market-detail p { margin: 10px 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.6; }
+.managed-market-detail .managed-market-meta { color: var(--color-text-tertiary); overflow-wrap: anywhere; }
+.managed-market-detail .managed-market-notice { padding: 12px; border-radius: 6px; background: var(--color-warning-50); color: var(--color-warning-900); }
+.managed-market-scope { display: grid; gap: 9px; margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--gray-150); }
+.managed-market-scope label { font-size: 13px; font-weight: 600; }
+.managed-market-scope :deep(.ant-select) { width: 100%; }
+.managed-market-scope span { color: var(--color-text-tertiary); font-size: 12px; line-height: 1.5; }
+.managed-market-scope :deep(.ant-btn) { justify-self: start; }
+.managed-market-danger { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--gray-150); }
+.managed-market-placeholder, .managed-detail-feedback { color: var(--color-text-secondary); font-size: 13px; }
+.managed-detail-feedback { display: flex; align-items: center; gap: 8px; }
 @media (max-width: 1100px) { .skill-list-header, .skill-row { grid-template-columns: minmax(180px, 1.5fr) minmax(100px, 1fr) minmax(130px, 1fr); } .skill-list-header span:last-child { display: none; } .skill-row-actions { grid-column: 1 / -1; justify-content: flex-start; padding-left: 51px; } }
 @media (max-width: 760px) { .skill-list-header { display: none; } .skill-row { grid-template-columns: minmax(0, 1fr); row-gap: 5px; padding: 14px; } .skill-row-name, .skill-row-origin, .skill-row-status, .skill-row-actions { grid-column: 1; } .skill-row-origin, .skill-row-status, .skill-row-actions { padding-left: 51px; } .skill-row-actions { grid-row: auto; flex-direction: row; justify-content: flex-start; margin-top: 5px; } }
-@media (max-width: 680px) { .skill-view-tabs { margin-inline: 18px; } .skill-view-content { padding: 24px 18px 50px; } .skill-page-heading { align-items: stretch; flex-direction: column; } .skill-page-actions { justify-content: flex-start; } .skill-overview > div { padding-right: 14px; margin-right: 14px; } .skill-list-heading { align-items: flex-start; flex-direction: column; } .skill-list-toolbar { align-items: stretch; flex-direction: column-reverse; } .personal-search, .market-search { width: 100%; } .market-files { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); } .market-files-list { max-height: 120px; border-right: 0; border-bottom: 1px solid var(--gray-150); } .market-card-bottom { flex-wrap: wrap; } }
+@media (max-width: 680px) { .skill-view-tabs { margin-inline: 18px; } .skill-view-content { padding: 24px 18px 50px; } .skill-page-heading { align-items: stretch; flex-direction: column; } .skill-page-actions { justify-content: flex-start; } .skill-overview > div { padding-right: 14px; margin-right: 14px; } .skill-list-heading { align-items: flex-start; flex-direction: column; } .skill-list-toolbar { align-items: stretch; flex-direction: column-reverse; } .personal-search, .market-search { width: 100%; } .market-files { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); } .market-files-list { max-height: 120px; border-right: 0; border-bottom: 1px solid var(--gray-150); } .market-card-bottom { flex-wrap: wrap; } .managed-market-search { max-width: none; flex-basis: 100%; } .managed-market-count { margin-left: 0; } .managed-market-layout { grid-template-columns: 1fr; } .managed-market-list { max-height: 36vh; border-right: 0; border-bottom: 1px solid var(--gray-150); } }
 @media (max-width: 480px) { .ranking-audience { align-items: stretch; flex-direction: column; gap: 6px; } .ranking-audience :deep(.ant-select) { width: 100%; } .ranking-list li { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; } .ranking-position { grid-column: 1; grid-row: 1; } .ranking-copy { grid-column: 2 / 4; grid-row: 1; } .ranking-count { grid-column: 2; grid-row: 2; } .ranking-list li :deep(.ant-btn) { grid-column: 3; grid-row: 2; } }
 </style>

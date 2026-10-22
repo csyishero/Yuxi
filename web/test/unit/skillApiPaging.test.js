@@ -26,7 +26,7 @@ test('技能卡片与管理员个人目录请求都把搜索和续页条件传�
       appType: 'custom',
       optimizeDeps: { noDiscovery: true }
     })
-    const { listSkillCards, listPersonalSkillCatalog } = await server.ssrLoadModule('/src/apis/skill_api.js')
+    const { listSkillCards, listPersonalSkillCatalog, listManagedMarketSkills } = await server.ssrLoadModule('/src/apis/skill_api.js')
     const { useUserStore } = await server.ssrLoadModule('/src/stores/user.js')
     const user = useUserStore()
     user.token = 'test-token'
@@ -54,6 +54,26 @@ test('技能卡片与管理员个人目录请求都把搜索和续页条件传�
     assert.equal(catalogUrl.searchParams.get('department_id'), '3')
     assert.equal(catalogUrl.searchParams.get('exclude_own'), 'true')
     assert.equal(catalogUrl.searchParams.get('card_page'), 'true')
+
+    user.userRole = 'admin'
+    await listManagedMarketSkills()
+    await listManagedMarketSkills({ query: ' 周报 ', status: 'withdrawn', scope: 'department', offset: 20, limit: 20 })
+    const defaultManagementUrl = new URL(requested[2], 'http://local.test')
+    assert.equal(defaultManagementUrl.pathname, '/api/skill-market/-/management')
+    assert.equal(defaultManagementUrl.searchParams.get('offset'), '0')
+    assert.equal(defaultManagementUrl.searchParams.get('limit'), '20')
+    assert.equal(defaultManagementUrl.searchParams.has('query'), false)
+    assert.equal(defaultManagementUrl.searchParams.has('status'), false)
+    assert.equal(defaultManagementUrl.searchParams.has('scope'), false)
+    const filteredManagementUrl = new URL(requested[3], 'http://local.test')
+    assert.equal(filteredManagementUrl.searchParams.get('query'), '周报')
+    assert.equal(filteredManagementUrl.searchParams.get('status'), 'withdrawn')
+    assert.equal(filteredManagementUrl.searchParams.get('scope'), 'department')
+    assert.equal(filteredManagementUrl.searchParams.get('offset'), '20')
+    assert.equal(filteredManagementUrl.searchParams.get('limit'), '20')
+    await listManagedMarketSkills({ slug: 'weekly-report' })
+    const exactManagementUrl = new URL(requested[4], 'http://local.test')
+    assert.equal(exactManagementUrl.searchParams.get('slug'), 'weekly-report')
   } finally {
     await server?.close()
     globalThis.fetch = originalFetch

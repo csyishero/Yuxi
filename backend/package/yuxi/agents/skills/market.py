@@ -22,6 +22,7 @@ from yuxi.agents.skills.service import (
     is_skill_text_path,
     list_personal_skills,
     lock_skill_slug_allocation,
+    market_projection_slug,
     normalize_skill_category,
     parse_skill_dir_metadata,
     project_skill_markdown_mcp_dependencies,
@@ -51,17 +52,20 @@ from yuxi.storage.postgres.models_business import (
 from yuxi.utils.datetime_utils import format_utc_datetime, utc_now_naive
 
 
-def market_projection_slug(release_id: str) -> str:
-    """为不可变版本生成独立的沙盒目录名。"""
-    return f"market-release-{release_id.replace('-', '')}"
-
-
 def market_skill_visible(item: MarketSkill, user: User) -> bool:
-    """判断条目是否在用户当前组织范围内。"""
-    return (
+    """判断条目是否已上架且在用户当前组织范围内。"""
+    return bool(item.is_published) and (
         user.role == "superadmin"
         or item.scope == "global"
         or (item.scope == "department" and user.department_id is not None and item.department_id == user.department_id)
+    )
+
+
+def _installed_release_eligible(listing: MarketSkill, release: MarketSkillRelease, install: MarketSkillInstall) -> bool:
+    """仅允许用户确认过的当前上架批次版本进入新任务。"""
+    return (
+        install.confirmed_generation == listing.publication_generation
+        and release.version >= listing.active_from_version
     )
 
 
@@ -69,8 +73,15 @@ async def submit_market_skill(
     db: AsyncSession, *, slug: str, application_reason: str, operator: User, category: str | None = None
 ) -> SkillShareRequest:
     """把个人 Skill 的当前内容作为市场审核快照提交。"""
+    listing = await MarketSkillRepository(db).by_owner_source_for_update(str(operator.uid), slug)
     return await submit_skill_share_request(
-        db, slug=slug, application_reason=application_reason, operator=operator, channel="market", category=category
+        db,
+        slug=slug,
+        application_reason=application_reason,
+        operator=operator,
+        channel="market",
+        category=category,
+        market_generation=listing.publication_generation if listing is not None else 1,
     )
 
 
@@ -108,14 +119,15 @@ async def list_market_requests(
             MarketSkill.personal_slug,
             MarketSkill.scope,
             MarketSkill.department_id,
+            MarketSkill.is_published,
             MarketSkillRelease.version,
         )
         .outerjoin(MarketSkillRelease, MarketSkillRelease.id == MarketSkill.latest_release_id)
         .where(tuple_(MarketSkill.owner_uid, MarketSkill.personal_slug).in_(sources))
     )
     existing = {
-        (owner_uid, slug): (scope, department_id, version)
-        for owner_uid, slug, scope, department_id, version in rows.all()
+        (owner_uid, slug): (scope, department_id, is_published, version)
+        for owner_uid, slug, scope, department_id, is_published, version in rows.all()
     }
     published_rows = await db.execute(
         select(MarketSkillRelease.request_id, MarketSkillRelease.version).where(
@@ -124,11 +136,12 @@ async def list_market_requests(
     )
     published_versions = dict(published_rows.all())
     for item in requests:
-        scope, department_id, current_version = existing.get(
-            (item["owner_uid"], item["personal_slug"]), (None, None, None)
+        scope, department_id, is_published, current_version = existing.get(
+            (item["owner_uid"], item["personal_slug"]), (None, None, None, None)
         )
         item["existing_market_scope"] = scope
         item["existing_market_department_id"] = department_id
+        item["existing_market_is_published"] = is_published
         item["current_market_version"] = current_version
         item["published_version"] = published_versions.get(item["id"])
     return page
@@ -233,7 +246,26 @@ async def review_market_skill(
     """管理员验证快照后发布不可变版本或拒绝申请。"""
     if operator.role not in {"admin", "superadmin"}:
         raise ValueError("无权审核市场申请")
-    item = await db.scalar(select(SkillShareRequest).where(SkillShareRequest.id == request_id).with_for_update())
+    source = (
+        await db.execute(
+            select(SkillShareRequest.owner_uid, SkillShareRequest.personal_slug).where(
+                SkillShareRequest.id == request_id
+            )
+        )
+    ).one_or_none()
+    if source is None:
+        raise ValueError("市场申请不存在")
+
+    repo = MarketSkillRepository(db)
+    if approved:
+        await lock_skill_slug_allocation(db)
+    listing = await repo.by_owner_source_for_update(*source)
+    item = await db.scalar(
+        select(SkillShareRequest)
+        .where(SkillShareRequest.id == request_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if (
         item is None
         or item.channel != "market"
@@ -245,6 +277,8 @@ async def review_market_skill(
         raise ValueError("市场申请不存在")
     if item.status != "pending":
         raise ValueError("市场申请已审核")
+    if item.market_generation != (listing.publication_generation if listing is not None else 1):
+        raise ValueError("市场申请已过期，请重新提交")
 
     if not approved:
         item.status = "rejected"
@@ -263,9 +297,6 @@ async def review_market_skill(
     if parsed["slug"] != item.personal_slug:
         raise ValueError("审核快照的 Skill slug 已变化")
 
-    repo = MarketSkillRepository(db)
-    await lock_skill_slug_allocation(db)
-    listing = await repo.by_owner_source_for_update(item.owner_uid, item.personal_slug)
     if scope is None:
         scope = listing.scope if listing is not None else "department"
     if scope == "global" and operator.role != "superadmin":
@@ -338,6 +369,10 @@ async def review_market_skill(
                 personal_slug=item.personal_slug,
                 scope=scope,
                 department_id=expected_department,
+                is_published=True,
+                publication_generation=1,
+                active_from_version=1,
+                state_revision=1,
                 created_at=utc_now_naive(),
                 updated_at=utc_now_naive(),
             )
@@ -347,6 +382,10 @@ async def review_market_skill(
         else:
             latest = await repo.release(listing.latest_release_id)
             version = latest.version + 1
+            if not listing.is_published:
+                listing.active_from_version = version
+            listing.is_published = True
+            listing.state_revision += 1
         release = MarketSkillRelease(
             id=release_id,
             market_skill_id=listing.id,
@@ -456,7 +495,7 @@ async def page_market_skills(
 async def list_user_market_installs(db: AsyncSession, *, user: User, search: str = "") -> list[dict]:
     """列出本人已安装版本的安全摘要，包括现时可见状态。"""
     items = await MarketSkillRepository(db).installed_releases_for_user(str(user.uid), user=user, search=search)
-    return _market_install_summaries(items, user=user)
+    return await _market_install_summaries(db, items, user=user)
 
 
 async def personal_market_install_summaries(
@@ -466,8 +505,8 @@ async def personal_market_install_summaries(
     rows = await MarketSkillRepository(db).installed_releases_for_personal_slugs(str(user.uid), personal_slugs)
     return {
         card["own_personal_slug"]: card
-        for card in _market_install_summaries(rows, user=user)
-        if card["own_personal_slug"] is not None
+        for card in await _market_install_summaries(db, rows, user=user)
+        if card.get("own_personal_slug") is not None
     }
 
 
@@ -492,10 +531,12 @@ async def page_user_market_installs(
     items, total = await MarketSkillRepository(db).page_installed_releases_for_user(
         str(user.uid), user=user, offset=offset, limit=limit, search=search, **catalog_filters
     )
-    cards = _market_install_summaries(items, user=user)
+    cards = await _market_install_summaries(db, items, user=user)
     for card in cards:
+        if not card["visible"]:
+            continue
         card["own_personal"] = None
-        if personal_slug := card["own_personal_slug"]:
+        if personal_slug := card.get("own_personal_slug"):
             try:
                 personal = await get_personal_skill(str(user.uid), personal_slug)
             except ValueError:
@@ -513,26 +554,53 @@ async def page_user_market_installs(
     return cards, total
 
 
-def _market_install_summaries(items: list[tuple[MarketSkill, MarketSkillRelease]], *, user: User) -> list[dict]:
+async def _market_install_summaries(
+    db: AsyncSession, items: list[tuple[MarketSkill, MarketSkillRelease, MarketSkillInstall]], *, user: User
+) -> list[dict]:
     """将安装指针转为按当前可见范围裁剪的页面摘要。"""
+    repo = MarketSkillRepository(db)
     cards = []
-    for listing, release in items:
+    for listing, release, install in items:
         detail_available = bool(user.department_id) and listing.latest_release_id is not None
         visible = detail_available and market_skill_visible(listing, user)
+        if not listing.is_published:
+            unavailable_reason = "unpublished"
+        elif not visible:
+            unavailable_reason = "out_of_scope"
+        elif not _installed_release_eligible(listing, release, install):
+            unavailable_reason = "needs_confirmation"
+        else:
+            unavailable_reason = None
+        if not visible:
+            cards.append(
+                {
+                    "slug": listing.slug,
+                    "installed_version": release.version,
+                    "visible": False,
+                    "unavailable_reason": unavailable_reason,
+                }
+            )
+            continue
+
+        latest_release = await repo.release(listing.latest_release_id) if unavailable_reason else None
+        displayed_release = latest_release or release
         own_personal_slug = listing.personal_slug if listing.owner_uid == str(user.uid) else None
-        cards.append(
-            {
-                "slug": listing.slug,
-                "name": release.name if visible else listing.slug,
-                "description": release.description if visible else "",
-                "category": (release.category or "other") if visible else None,
-                "installed_version": release.version,
-                "owner_uid": listing.owner_uid if visible or own_personal_slug else None,
-                "personal_slug": listing.personal_slug if visible or own_personal_slug else None,
-                "own_personal_slug": own_personal_slug,
-                "visible": visible,
-            }
-        )
+        card = {
+            "slug": listing.slug,
+            "name": displayed_release.name,
+            "description": displayed_release.description,
+            "category": displayed_release.category or "other",
+            "installed_version": release.version,
+            "owner_uid": listing.owner_uid,
+            "personal_slug": listing.personal_slug,
+            "own_personal_slug": own_personal_slug,
+            "visible": True,
+            "unavailable_reason": unavailable_reason,
+        }
+        if latest_release is not None:
+            card["latest_version"] = latest_release.version
+            card["upgrade_available"] = True
+        cards.append(card)
     return cards
 
 
@@ -697,7 +765,11 @@ async def _market_card(
         "department_id": listing.department_id,
         "latest_version": release.version,
         "installed_version": installed_release.version if installed_release is not None else None,
-        "upgrade_available": installed_release is not None and installed_release.version < release.version,
+        "upgrade_available": installed_release is not None
+        and (
+            installed_release.version < release.version
+            or not _installed_release_eligible(listing, installed_release, install)
+        ),
         "install_count": install_count,
         "likes_count": like_count,
         "liked": await repo.liked(str(user.uid), listing.id),
@@ -711,10 +783,10 @@ async def _market_card(
 async def install_market_skill(db: AsyncSession, *, slug: str, user: User, upgrade: bool = False) -> dict:
     """安装或手动升级到条目当前审核版本。"""
     repo = MarketSkillRepository(db)
-    listing = await repo.visible_by_slug(user, slug)
+    listing = await repo.visible_by_slug_for_update(user, slug)
     if listing is None:
         raise ValueError("市场 Skill 不存在")
-    current = await repo.install(str(user.uid), listing.id)
+    current = await repo.install_for_update(str(user.uid), listing.id)
     if upgrade and current is None:
         raise ValueError("请先安装市场 Skill")
     if not upgrade and current is not None:
@@ -749,12 +821,14 @@ async def install_market_skill(db: AsyncSession, *, slug: str, user: User, upgra
             uid=str(user.uid),
             market_skill_id=listing.id,
             release_id=listing.latest_release_id,
+            confirmed_generation=listing.publication_generation,
             installed_at=utc_now_naive(),
             updated_at=utc_now_naive(),
         )
         db.add(current)
-    else:
+    elif upgrade:
         current.release_id = listing.latest_release_id
+        current.confirmed_generation = listing.publication_generation
         current.updated_at = utc_now_naive()
     await db.commit()
     return await get_market_skill(db, slug=slug, user=user)
@@ -784,7 +858,7 @@ async def toggle_market_like(db: AsyncSession, *, slug: str, user: User) -> dict
 
 
 async def list_installed_market_skills(db: AsyncSession, user: User) -> list[ResolvedSkill]:
-    """只把用户当前可见且已安装的版本提供给 Agent。"""
+    """只把可见且已确认当前批次的安装版本提供给 Agent。"""
     repo = MarketSkillRepository(db)
     result = []
     for install in await repo.installs_for_user(str(user.uid)):
@@ -792,7 +866,11 @@ async def list_installed_market_skills(db: AsyncSession, user: User) -> list[Res
         if listing is None or not market_skill_visible(listing, user):
             continue
         release = await repo.release(install.release_id)
-        if release is None or release.market_skill_id != listing.id:
+        if (
+            release is None
+            or release.market_skill_id != listing.id
+            or not _installed_release_eligible(listing, release, install)
+        ):
             continue
         result.append(
             ResolvedSkill(
@@ -827,7 +905,7 @@ async def list_installed_market_skills(db: AsyncSession, user: User) -> list[Res
 
 
 async def market_projection_sources(db: AsyncSession, user: User) -> dict[str, str]:
-    """保留已安装条目的历史版本目录供运行中的 Agent 使用。"""
+    """只投影当前上架批次内、不高于用户已安装版本的目录。"""
     repo = MarketSkillRepository(db)
     sources = {}
     for install in await repo.installs_for_user(str(user.uid)):
@@ -835,10 +913,14 @@ async def market_projection_sources(db: AsyncSession, user: User) -> dict[str, s
         if listing is None or not market_skill_visible(listing, user):
             continue
         installed_release = await repo.release(install.release_id)
-        if installed_release is None or installed_release.market_skill_id != listing.id:
+        if (
+            installed_release is None
+            or installed_release.market_skill_id != listing.id
+            or not _installed_release_eligible(listing, installed_release, install)
+        ):
             continue
         for release in await repo.releases(listing.id):
-            if release.version <= installed_release.version:
+            if listing.active_from_version <= release.version <= installed_release.version:
                 sources[market_projection_slug(release.id)] = str(get_skill_data_dir() / release.dir_path)
     return sources
 

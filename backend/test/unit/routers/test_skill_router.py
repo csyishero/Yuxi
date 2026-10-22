@@ -142,6 +142,11 @@ def test_list_skill_cards_route_scans_personal_source(monkeypatch):
         item = _skill(source_type="personal", created_by="user")
         return [item], 1, False
 
+    async def fake_installs(_db, *, user, personal_slugs):
+        assert personal_slugs == {"later-personal"}
+        return {}
+
+    monkeypatch.setattr("server.routers.skill_router.personal_market_install_summaries", fake_installs)
     monkeypatch.setattr("server.routers.skill_router.page_skill_cards_for_user", fake_page)
 
     client = TestClient(_build_app(role="user"))
@@ -179,6 +184,11 @@ def test_legacy_skill_cards_without_limit_keep_all_records(monkeypatch):
         return all_items[:30], 40, True
 
     monkeypatch.setattr("server.routers.skill_router.list_skill_cards_for_user", fake_full, raising=False)
+    async def fake_installs(_db, *, user, personal_slugs):
+        assert personal_slugs == {"later-personal"}
+        return {}
+
+    monkeypatch.setattr("server.routers.skill_router.personal_market_install_summaries", fake_installs)
     monkeypatch.setattr("server.routers.skill_router.page_skill_cards_for_user", fake_page)
 
     response = TestClient(_build_app()).get("/api/skills")

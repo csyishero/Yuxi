@@ -18,7 +18,7 @@
           <button type="button" class="publish-choice" :data-channel-choice="destination.key" :aria-pressed="channel === destination.key" @click="channel = destination.key">
             <span class="publish-choice-heading">
               <strong>{{ destination.label }}</strong>
-              <span :class="['publish-status', destination.history.latest?.status || 'empty']">{{ historyLoading ? '读取中' : statusLabel(destination.history.latest?.status) }}</span>
+              <span :class="['publish-status', destination.history.latest?.status || 'empty']">{{ historyLoading ? '读取中' : destination.history.latest ? `最新申请：${statusLabel(destination.history.latest.status)}` : '未提交' }}</span>
             </span>
             <span class="publish-choice-description">{{ destination.key === 'market' ? '审核通过后，成员可自行安装使用' : userStore.isAdmin ? '发布后，指定成员即可使用' : '审核通过后，获授权成员即可使用' }}</span>
           </button>
@@ -32,13 +32,16 @@
                 <button type="button" class="publish-link" :data-request-id="destination.history.latest.id" @click="openSnapshot(destination.history.latest)">查看提交快照</button>
               </p>
               <p v-if="destination.history.version" class="publish-history-detail">
-                {{ destination.key === 'shared' ? '最近发布' : '当前已上架' }} v{{ destination.history.version }} · {{ destination.key === 'shared' ? '审核发布时范围：' : '' }}{{ destination.history.audience }}
+                {{ destination.key === 'shared' ? '最近发布' : destination.history.isPublished === false ? '已下架 · 曾上架' : '当前已上架' }} v{{ destination.history.version }} · {{ destination.key === 'shared' ? '审核发布时范围：' : '当前范围：' }}{{ destination.history.audience }}
                 <button v-if="destination.history.released && destination.history.released.id !== destination.history.latest?.id" type="button" class="publish-link" :data-request-id="destination.history.released.id" @click="openSnapshot(destination.history.released)">查看已发布快照</button>
               </p>
               <p v-else class="publish-history-detail">{{ destination.history.released ? '曾通过审核，当前发布版本无法确认' : '尚无已发布版本' }}</p>
+              <p v-if="destination.key === 'shared' && destination.history.released" class="publish-history-detail">审核结果：已通过</p>
+              <p v-if="destination.key === 'market' && destination.history.released" class="publish-history-detail">最近审核范围：{{ destination.history.historicalAudience }}</p>
               <p v-if="destination.key === 'shared' && destination.history.released" class="publish-history-detail">
                 {{ sharedCopyStatusLabel(destination.history.released.published_copy_status) }}
               </p>
+              <p v-if="destination.key === 'shared' && destination.history.released && sharedCopyStatusNote(destination.history.released.published_copy_status)" class="publish-history-detail">{{ sharedCopyStatusNote(destination.history.released.published_copy_status) }}</p>
             </template>
           </div>
         </section>
@@ -117,7 +120,7 @@ import { skillApi, listMarketRequests, submitMarketSkill } from '@/apis/skill_ap
 import { useUserStore } from '@/stores/user'
 import { skillCategories, skillCategory } from './skillCategories.js'
 import { canPublishPersonalSkill } from './skillManagementAccess.js'
-import { sharedCopyStatusLabel } from './sharePublicationStatus.js'
+import { sharedCopyStatusLabel, sharedCopyStatusNote } from './sharePublicationStatus.js'
 
 const props = defineProps({
   skill: { type: Object, default: null },
@@ -218,7 +221,9 @@ const marketHistory = computed(() => {
   return {
     ...history,
     version: history.latest?.current_market_version,
-    audience: marketAudience(history.latest, history.released)
+    isPublished: [history.latest, history.released].find((request) => request?.existing_market_is_published != null)?.existing_market_is_published ?? null,
+    audience: marketAudience(history.latest, history.released),
+    historicalAudience: sharedAudience(history.released)
   }
 })
 const destinations = computed(() => [

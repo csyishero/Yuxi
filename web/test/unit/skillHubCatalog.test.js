@@ -185,7 +185,7 @@ test('个人空间搜索同步缩小所有来源分类的数量和列表', () =>
 test('旧市场安装仍可管理，但不冒充个人原件或公开详细信息', () => {
   const cards = marketInstallManagementItems([
     { slug: 'mine', installed_version: 1, visible: true, name: '简报' },
-    { slug: 'old', installed_version: 2, visible: false, name: '他人技能', description: '不应显示', owner_uid: 'bob', category: 'office_tools' },
+    { slug: 'old', installed_version: 2, visible: false, unavailable_reason: 'unpublished', name: '他人技能', description: '不应显示', owner_uid: 'bob', category: 'office_tools' },
     { slug: 'not-installed', installed_version: null }
   ])
   assert.deepEqual(cards.map((item) => item.slug), ['mine', 'old'])
@@ -193,8 +193,40 @@ test('旧市场安装仍可管理，但不冒充个人原件或公开详细信�
   assert.equal(cards[1].visible, false)
   assert.equal(cards[1].name, 'old')
   assert.equal(cards[1].description, '')
+  assert.equal(cards[1].unavailable_reason, 'unpublished')
   assert.equal(cards[1].owner_uid, undefined)
   assert.equal(cards[1].category, undefined)
+})
+
+test('重新上架但未确认的旧安装仅保留安全摘要和确认原因', () => {
+  const [item] = marketInstallManagementItems([
+    { slug: 'relisted', installed_version: 2, latest_version: 4, visible: false, unavailable_reason: 'needs_confirmation', name: '不应显示的名称', owner_name: '不应显示的作者' }
+  ])
+  assert.deepEqual({ slug: item.slug, version: item.installed_version, reason: item.unavailable_reason }, {
+    slug: 'relisted', version: 2, reason: 'needs_confirmation'
+  })
+  assert.equal(item.name, 'relisted')
+  assert.equal(item.owner_name, undefined)
+  assert.equal(item.latest_version, undefined)
+})
+
+test('范围内待确认新版的安装保留正常卡片信息和升级入口', () => {
+  const [item] = marketInstallManagementItems([
+    { slug: 'relisted', name: '重新上架的周报', installed_version: 2, latest_version: 4, upgrade_available: true, visible: true, unavailable_reason: 'needs_confirmation' }
+  ])
+  assert.equal(item.name, '重新上架的周报')
+  assert.equal(item.latest_version, 4)
+  assert.equal(item.upgrade_available, true)
+  assert.equal(item.unavailable_reason, 'needs_confirmation')
+})
+
+test('公开市场列表不显示服务端标记为下架或不可见的条目', () => {
+  const cards = combineSkillCards([
+    { slug: 'published', is_published: true, name: '可见' },
+    { slug: 'withdrawn', is_published: false, name: '已下架' },
+    { slug: 'elsewhere', visible: false, name: '范围外' }
+  ], [])
+  assert.deepEqual(filterSkillCards(cards, '', 'market').map((item) => item.slug), ['published'])
 })
 
 test('目录按方向筛选，历史未分类技能归入其它', () => {

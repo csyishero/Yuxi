@@ -159,13 +159,14 @@ test('打开后按作者和 slug 汇总两个渠道，同时保留最近申请�
     assert.ok(requested.some((path) => path.startsWith('/api/skill-market/requests?') && path.includes('slug=reporter') && path.includes('limit=1')))
     const shared = findAll(host, (item) => item.props['data-channel'] === 'shared')[0]
     const market = findAll(host, (item) => item.props['data-channel'] === 'market')[0]
-    assert.match(visibleText(shared), /已驳回/, requested.join(', '))
+    assert.match(visibleText(shared), /最新申请：已驳回/, requested.join(', '))
     assert.match(visibleText(shared), /最近发布 v2/)
-    assert.match(visibleText(shared), /共享副本当前已启用/)
+    assert.match(visibleText(shared), /审核结果：已通过/)
+    assert.match(visibleText(shared), /当前共享副本：已启用/)
     assert.doesNotMatch(visibleText(shared), /当前已发布/)
     assert.match(visibleText(shared), /设计部/)
     assert.doesNotMatch(visibleText(shared), /other-owner/)
-    assert.match(visibleText(market), /待审核/)
+    assert.match(visibleText(market), /最新申请：待审核/)
     assert.match(visibleText(market), /当前已上架 v4/)
     assert.match(visibleText(market), /全公司/)
     assert.doesNotMatch(visibleText(market), /当前发布版本无法确认/)
@@ -290,7 +291,7 @@ test('共享副本删除或替换后保留历史版本并显示当前失效状�
     const shared = findAll(host, (item) => item.props['data-channel'] === 'shared')[0]
     const market = findAll(host, (item) => item.props['data-channel'] === 'market')[0]
     assert.match(visibleText(shared), /最近发布 v2/)
-    assert.match(visibleText(shared), /共享副本已删除或被替换/)
+    assert.match(visibleText(shared), /当前共享副本：已删除或被替换/)
     assert.match(visibleText(market), /曾通过审核，当前发布版本无法确认/)
     assert.doesNotMatch(visibleText(shared), /当前已发布/)
   })
@@ -300,8 +301,23 @@ test('旧共享记录没有可核验副本身份时保留发布历史但不推�
   await withPanel({ shares: [{ ...shareRecords[1], published_copy_status: null, read_scope: null, department_ids: [] }], market: [] }, async ({ host }) => {
     const shared = findAll(host, (item) => item.props['data-channel'] === 'shared')[0]
     assert.match(visibleText(shared), /最近发布 v2/)
-    assert.match(visibleText(shared), /旧发布记录无法核对当前共享副本/)
+    assert.match(visibleText(shared), /审核结果：已通过/)
+    assert.match(visibleText(shared), /当前共享副本：无法核对/)
+    assert.match(visibleText(shared), /这条历史记录没有保存对应的共享副本信息，因此无法判断它现在是否可用/)
     assert.match(visibleText(shared), /审核发布时范围：范围未确认/)
-    assert.doesNotMatch(visibleText(shared), /共享副本当前已启用/)
+    assert.doesNotMatch(visibleText(shared), /当前共享副本：已启用/)
+  })
+})
+
+test('作者看到市场已下架状态，并区分当次审核与后来调整的范围', async () => {
+  await withPanel({ market: [
+    { id: 'market-latest', owner_uid: 'alice', personal_slug: 'reporter', status: 'rejected', created_at: '2026-10-12T08:00:00Z', current_market_version: 4, existing_market_is_published: false, existing_market_scope: 'global' },
+    { id: 'market-approved', owner_uid: 'alice', personal_slug: 'reporter', status: 'approved', published_version: 4, created_at: '2026-10-01T08:00:00Z', read_scope: { access_level: 'department', department_ids: [3] } }
+  ] }, async ({ host }) => {
+    const market = findAll(host, (item) => item.props['data-channel'] === 'market')[0]
+    assert.match(visibleText(market), /已下架/)
+    assert.match(visibleText(market), /最近审核范围：设计部/)
+    assert.match(visibleText(market), /当前范围：全公司/)
+    assert.doesNotMatch(visibleText(market), /当前已上架/)
   })
 })
