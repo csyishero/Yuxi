@@ -18,6 +18,9 @@
               <span class="publication-channel-name">直接共享</span>
               <template v-if="group.shared.latest">
                 <strong>{{ channelSummary(group.shared, 'shared') }}</strong>
+                <small v-if="group.shared.approved">{{ sharedCopyStatusLabel(group.shared.copyStatus) }}</small>
+                <small v-if="sharedCopyStatusNote(group.shared.copyStatus) && group.shared.approved">{{ sharedCopyStatusNote(group.shared.copyStatus) }}</small>
+                <small v-if="group.shared.approved && group.shared.latest.status !== 'approved'">新申请：{{ statusLabel(group.shared.latest.status) }}</small>
                 <small v-if="group.shared.approved">审核范围：{{ sharedScope(group.shared.approved, true) }}<span v-if="group.shared.version"> · v{{ group.shared.version }}</span></small>
               </template>
               <small v-else>未提交</small>
@@ -26,7 +29,8 @@
               <span class="publication-channel-name">上架市场</span>
               <template v-if="group.market.latest">
                 <strong>{{ channelSummary(group.market, 'market') }}</strong>
-                <small v-if="group.market.approved">{{ group.market.version ? '当前范围：' : '最近审核范围：' }}{{ marketScope(group.market) }}<span v-if="group.market.version"> · v{{ group.market.version }}</span></small>
+                <small v-if="group.market.approved">最近审核范围：{{ requestMarketScope(group.market.approved) }}<span v-if="group.market.approved.published_version"> · v{{ group.market.approved.published_version }}</span></small>
+                <small v-if="group.market.scope">当前条目：{{ group.market.isPublished === false ? '已下架' : '已上架' }} · 当前范围：{{ marketScope(group.market) }}<span v-if="group.market.version"> · v{{ group.market.version }}</span></small>
               </template>
               <small v-else>未提交</small>
             </div>
@@ -53,6 +57,7 @@
             <p v-if="request.reviewed_at">审核时间：{{ formatTime(request.reviewed_at) }}</p>
             <p v-if="request.status === 'approved'">发布范围：{{ channel.key === 'shared' ? sharedScope(request) : requestMarketScope(request) }}<span v-if="request.published_version"> · v{{ request.published_version }}</span></p>
             <p v-if="channel.key === 'shared' && request.status === 'approved'">{{ sharedCopyStatusLabel(request.published_copy_status) }}</p>
+            <p v-if="channel.key === 'shared' && request.status === 'approved' && sharedCopyStatusNote(request.published_copy_status)">{{ sharedCopyStatusNote(request.published_copy_status) }}</p>
             <a-button size="small" @click="openSnapshot(request)">查看提交快照</a-button>
           </article>
           <a-button v-if="channel.requests.length < channel.total" :loading="channel.loading" @click="loadHistory(channel.key)">加载更多记录</a-button>
@@ -81,7 +86,7 @@ import { Sparkles } from '@lucide/vue'
 import { listMarketRequests, listPersonalPublicationRecords, skillApi } from '@/apis/skill_api'
 import { useUserStore } from '@/stores/user'
 import { buildPublicationGroups } from './publicationHistory.js'
-import { sharedCopyStatusLabel } from './sharePublicationStatus.js'
+import { sharedCopyStatusLabel, sharedCopyStatusNote } from './sharePublicationStatus.js'
 
 const props = defineProps({ personalSkills: { type: Array, default: null } })
 const userStore = useUserStore()
@@ -180,10 +185,10 @@ async function loadHistory(channel) {
 /** 区分最近发布副本的状态与后续申请结果。 */
 function channelSummary(channel, key) {
   if (!channel.latest) return '未提交'
-  if (!channel.approved) return statusLabel(channel.latest.status)
+  if (!channel.approved) return key === 'shared' ? `最新申请：${statusLabel(channel.latest.status)}` : statusLabel(channel.latest.status)
   let current
-  if (key === 'market') current = channel.version ? '已上架' : channel.approved.published_version ? '曾上架 · 当前未上架' : '审核通过 · 当前未上架'
-  else current = { enabled: '最近发布副本已启用', disabled: '最近发布副本已停用', missing: '最近发布副本已失效' }[channel.copyStatus] || '审核通过'
+  if (key === 'market') current = channel.isPublished === false ? '已下架' : channel.version ? '已上架' : channel.approved.published_version ? '曾上架 · 当前未上架' : '审核通过 · 当前未上架'
+  else return '审核结果：已通过'
   return channel.latest.status === 'approved' ? current : `${current} · 新申请${statusLabel(channel.latest.status)}`
 }
 
@@ -222,10 +227,10 @@ function marketScope(channel) {
 
 /** 显示单次市场申请的审核范围。 */
 function requestMarketScope(request) {
-  const scope = request?.read_scope?.access_level || request?.existing_market_scope
+  const scope = request?.read_scope?.access_level || (request?.department_ids?.length ? 'department' : null)
   if (scope === 'global') return '全公司'
   if (scope === 'department') {
-    const id = request?.read_scope?.department_ids?.[0] || request?.existing_market_department_id || request?.owner_department_id
+    const id = request?.read_scope?.department_ids?.[0] || request?.department_ids?.[0] || request?.owner_department_id
     return Number(id) === Number(userStore.departmentId) ? '本部门' : id ? `部门 ${id}` : '所属部门'
   }
   return '发布范围未确认'

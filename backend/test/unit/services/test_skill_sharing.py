@@ -29,10 +29,11 @@ async def test_duplicate_pending_share_commit_removes_losing_snapshot(monkeypatc
         await connection.run_sync(lambda conn: Base.metadata.create_all(conn, tables=[SkillShareRequest.__table__]))
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     user = User(uid="owner", username="owner", password_hash="x", role="user")
+    request_options = {"market_generation": 1} if channel == "market" else {}
     try:
         async with sessions() as db:
             winner = await sharing.submit_skill_share_request(
-                db, slug="demo", application_reason="first", operator=user, channel=channel
+                db, slug="demo", application_reason="first", operator=user, channel=channel, **request_options
             )
             winner_id = winner.id
 
@@ -43,7 +44,7 @@ async def test_duplicate_pending_share_commit_removes_losing_snapshot(monkeypatc
             monkeypatch.setattr(db, "scalar", stale_pending_check)
             with pytest.raises(ValueError, match="已有待审核申请"):
                 await sharing.submit_skill_share_request(
-                    db, slug="demo", application_reason="second", operator=user, channel=channel
+                    db, slug="demo", application_reason="second", operator=user, channel=channel, **request_options
                 )
 
             assert (await db.scalars(select(SkillShareRequest.id))).all() == [winner_id]

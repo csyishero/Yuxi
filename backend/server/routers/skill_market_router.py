@@ -6,7 +6,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.utils.auth_middleware import get_admin_user, get_current_user, get_db, get_required_user
+from server.utils.auth_middleware import (
+    get_admin_user,
+    get_current_user,
+    get_db,
+    get_required_user,
+    get_superadmin_user,
+)
 from yuxi.agents.skills.market import (
     get_market_skill,
     install_market_skill,
@@ -23,6 +29,14 @@ from yuxi.agents.skills.market import (
     uninstall_market_skill,
 )
 from yuxi.storage.postgres.models_business import User
+from yuxi.services.skill_market_governance_service import (
+    MarketConflictError,
+    MarketScopeValidationError,
+    change_market_skill_scope,
+    get_manageable_market_skill,
+    list_manageable_market_skills,
+    unpublish_market_skill,
+)
 
 market_router = APIRouter(prefix="/skill-market", tags=["skill-market"])
 
@@ -41,11 +55,41 @@ class MarketReview(BaseModel):
     note: str = Field("", max_length=2000)
 
 
+class MarketUnpublish(BaseModel):
+    """下架时提交已读取的条目版本。"""
+
+    expected_revision: int
+
+
+class MarketScopeChange(BaseModel):
+    """超级管理员指定目标受众与已读取的条目版本。"""
+
+    scope: str
+    department_id: int | None = None
+    expected_revision: int
+
+
 def _raise_market_error(exc: ValueError) -> None:
     """将业务拒绝映射为稳定的 HTTP 状态。"""
     message = str(exc)
     status = 404 if "不存在" in message else 403 if "无权" in message or "仅超级管理员" in message else 400
     raise HTTPException(status_code=status, detail=message) from exc
+
+
+def _raise_governance_error(exc: ValueError | PermissionError) -> None:
+    """将治理拒绝映射到稳定状态码及受控范围错误字段。"""
+    if isinstance(exc, MarketConflictError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, MarketScopeValidationError):
+        detail = {"code": exc.code}
+        if exc.dependency_type is not None:
+            detail["dependency_type"] = exc.dependency_type
+        if exc.dependency_slug is not None:
+            detail["dependency_slug"] = exc.dependency_slug
+        raise HTTPException(status_code=400, detail=detail) from exc
+    if isinstance(exc, PermissionError):
+        raise HTTPException(status_code=403, detail="需要管理员权限") from exc
+    _raise_market_error(exc)
 
 
 async def get_market_install_user(user: User | None = Depends(get_current_user)) -> User:
@@ -163,6 +207,76 @@ async def list_market_rankings_route(
         }
     except ValueError as exc:
         _raise_market_error(exc)
+
+
+@market_router.get("/-/management")
+async def list_market_management_route(
+    query: str = Query("", max_length=128),
+    slug: str | None = Query(None, max_length=128),
+    status: Literal["published", "withdrawn"] | None = Query(None),
+    scope: Literal["global", "department"] | None = Query(None),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """筛选并分页列出当前管理员可治理的条目，包括已下架条目。"""
+    try:
+        items, total = await list_manageable_market_skills(
+            db, operator=user, query=query, slug=slug, status=status, scope=scope, offset=offset, limit=limit
+        )
+        return {
+            "success": True,
+            "data": items,
+            "total": total,
+            "has_more": offset + limit < total,
+            "limit": limit,
+            "offset": offset,
+        }
+    except (PermissionError, ValueError) as exc:
+        _raise_governance_error(exc)
+
+
+@market_router.get("/-/management/{slug}")
+async def market_management_detail_route(
+    slug: str, user: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)
+):
+    """读取当前管理员有权治理的条目详情。"""
+    try:
+        return {"success": True, "data": await get_manageable_market_skill(db, slug=slug, operator=user)}
+    except (PermissionError, ValueError) as exc:
+        _raise_governance_error(exc)
+
+
+@market_router.post("/{slug}/unpublish")
+async def unpublish_market_route(
+    slug: str, payload: MarketUnpublish, user: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)
+):
+    """下架当前管理范围内的已发布条目。"""
+    try:
+        data = await unpublish_market_skill(db, slug=slug, expected_revision=payload.expected_revision, operator=user)
+        return {"success": True, "data": data}
+    except (PermissionError, ValueError) as exc:
+        _raise_governance_error(exc)
+
+
+@market_router.put("/{slug}/scope")
+async def change_market_scope_route(
+    slug: str, payload: MarketScopeChange, user: User = Depends(get_superadmin_user), db: AsyncSession = Depends(get_db)
+):
+    """超级管理员直接调整当前上架范围。"""
+    try:
+        data = await change_market_skill_scope(
+            db,
+            slug=slug,
+            scope=payload.scope,
+            department_id=payload.department_id,
+            expected_revision=payload.expected_revision,
+            operator=user,
+        )
+        return {"success": True, "data": data}
+    except (PermissionError, ValueError) as exc:
+        _raise_governance_error(exc)
 
 
 @market_router.post("/personal/{slug}/submit")

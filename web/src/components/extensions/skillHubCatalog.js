@@ -17,7 +17,7 @@ export function combineSkillCards(marketCards, existingCards) {
     if (!current || Number(item.id) > Number(current.id)) sharedByMarketSlug.set(item.related_market_slug, item)
   }
   return [
-    ...marketCards.map((item) => ({
+    ...marketCards.filter((item) => item.visible !== false && item.is_published !== false).map((item) => ({
       ...item,
       kind: 'market',
       shared_available_slug: Object.hasOwn(item, 'shared_available_slug')
@@ -156,7 +156,7 @@ export function marketInstallManagementItems(marketCards) {
     .filter((item) => item.installed_version)
     .map((item) => ({
       ...(item.visible === false
-        ? { slug: item.slug, name: item.slug, description: '', installed_version: item.installed_version, visible: false }
+        ? { slug: item.slug, name: item.slug, description: '', installed_version: item.installed_version, visible: item.visible, unavailable_reason: item.unavailable_reason }
         : item),
       kind: 'market_install',
       sourceType: 'market_install',

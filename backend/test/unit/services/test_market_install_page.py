@@ -12,6 +12,7 @@ async def test_install_page_keeps_hidden_release_private(monkeypatch):
     """后续页仍只向失去可见权限的用户暴露安装标识和版本。"""
     listing = SimpleNamespace(
         slug="hidden-skill",
+        is_published=True,
         latest_release_id="release-1",
         scope="department",
         department_id=2,
@@ -26,7 +27,7 @@ async def test_install_page_keeps_hidden_release_private(monkeypatch):
 
         async def page_installed_releases_for_user(self, uid, *, user, offset, limit, search):
             assert (uid, user.uid, offset, limit, search) == ("viewer", "viewer", 30, 30, "")
-            return [(listing, release)], 31
+            return [(listing, release, SimpleNamespace(confirmed_generation=1))], 31
 
     monkeypatch.setattr(market, "MarketSkillRepository", FakeRepository)
     viewer = User(uid="viewer", username="viewer", password_hash="x", role="user", department_id=1)
@@ -37,14 +38,8 @@ async def test_install_page_keeps_hidden_release_private(monkeypatch):
     assert cards == [
         {
             "slug": "hidden-skill",
-            "name": "hidden-skill",
-            "description": "",
-            "category": None,
             "installed_version": 3,
-            "owner_uid": None,
-            "personal_slug": None,
-            "own_personal_slug": None,
             "visible": False,
-            "own_personal": None,
+            "unavailable_reason": "out_of_scope",
         }
     ]

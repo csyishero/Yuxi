@@ -120,6 +120,36 @@ const MARKET_INSTALL_ERRORS = new Set([
   '技能标识已被占用，无法安装市场版',
   '个人原件已可使用，无需安装自己发布的市场 Skill'
 ])
+const MARKET_SCOPE_FIXED_ERRORS = new Map([
+  ['invalid_scope', '上架范围无效，请选择全公司或部门'],
+  ['target_department_required', '请选择目标部门'],
+  ['target_department_not_found', '目标部门不存在，请重新选择']
+])
+const MARKET_DEPENDENCY_TYPES = new Map([
+  ['tool', '工具'],
+  ['mcp', 'MCP'],
+  ['skill', 'Skill']
+])
+const MARKET_DEPENDENCY_SLUG = /^[A-Za-z0-9_-]{1,100}$/
+
+/** 市场范围错误只按受控代码成文，绝不直接展示服务端任意 detail。 */
+function marketScopeErrorMessage(detail) {
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return null
+  const code = detail.code
+  const type = detail.dependency_type
+  const slug = detail.dependency_slug
+  if (type != null && !MARKET_DEPENDENCY_TYPES.has(type)) return null
+  if (slug != null && (typeof slug !== 'string' || !MARKET_DEPENDENCY_SLUG.test(slug))) return null
+  if (MARKET_SCOPE_FIXED_ERRORS.has(code)) return MARKET_SCOPE_FIXED_ERRORS.get(code)
+  if (code !== 'dependency_unavailable' && code !== 'dependency_scope') return null
+  const subject = type
+    ? slug ? `${MARKET_DEPENDENCY_TYPES.get(type)} ${slug}` : `${MARKET_DEPENDENCY_TYPES.get(type)}依赖`
+    : slug ? `依赖 ${slug}` : '依赖'
+  const separator = slug ? ' ' : ''
+  return code === 'dependency_unavailable'
+    ? `${subject}${separator}当前不可用，请检查依赖配置后重试`
+    : `${subject}${separator}的授权范围未覆盖目标范围，请调整依赖授权后重试`
+}
 
 function publicErrorMessage(url, status, headers, requiresAuth, options, errorData) {
   const path = safeRequestMetadata(url, {}).path
@@ -166,6 +196,12 @@ function publicErrorMessage(url, status, headers, requiresAuth, options, errorDa
     MARKET_INSTALL_ERRORS.has(errorData?.detail)
   )
     return errorData.detail
+  if (
+    options?.method?.toUpperCase() === 'PUT' &&
+    /^\/api\/skill-market\/[^/]+\/scope\/?$/.test(path) &&
+    status === 400
+  )
+    return marketScopeErrorMessage(errorData?.detail) || '请求参数错误'
   if (status === 400) return '请求参数错误'
   if (status === 401) {
     if (requiresAuth) return '登录已过期，请重新登录'

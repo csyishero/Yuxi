@@ -30,7 +30,7 @@ async def personal_space_skill_counts(db: AsyncSession, user: User, *, search: s
     # 全部视图仍用原件绑定的安装隐藏同源共享卡片。
     own_installs = await personal_market_install_summaries(db, user=user, personal_slugs=created_slugs)
     installed_market_slugs = {item["slug"] for item in [*installs, *own_installs.values()] if item["visible"]}
-    private_total = len(created) + sum(1 for item in installs if item["own_personal_slug"] not in created_slugs)
+    private_total = len(created) + sum(1 for item in installs if item.get("own_personal_slug") not in created_slugs)
 
     builtin_total = sum(
         1

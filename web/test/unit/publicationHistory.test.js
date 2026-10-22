@@ -84,3 +84,17 @@ test('keeps source availability unknown when the personal-skill list was not loa
   assert.equal(unknown[0].sourceAvailable, null)
   assert.equal(missing[0].sourceAvailable, false)
 })
+
+test('retains historical approval scope while reporting withdrawn current listing separately', () => {
+  const [group] = buildPublicationGroups({
+    ownerUid: 'alice',
+    marketRequests: [
+      { id: 'approved', owner_uid: 'alice', personal_slug: 'report', status: 'approved', created_at: '2026-10-01T10:00:00Z', published_version: 2, read_scope: { access_level: 'department', department_ids: [3] } },
+      { id: 'rejected', owner_uid: 'alice', personal_slug: 'report', status: 'rejected', created_at: '2026-10-12T10:00:00Z', current_market_version: 2, existing_market_is_published: false, existing_market_scope: 'global', existing_market_department_id: null }
+    ]
+  })
+  assert.equal(group.market.approved.read_scope.department_ids[0], 3)
+  assert.equal(group.market.version, 2)
+  assert.equal(group.market.scope, 'global')
+  assert.equal(group.market.isPublished, false)
+})

@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiPut, apiDelete, apiAdminGet, apiAdminPost } from './base'
+import { apiGet, apiPost, apiPut, apiDelete, apiAdminGet, apiAdminPost, apiSuperAdminPut } from './base'
 
 const BASE_URL = '/api/system/skills'
 const USER_BASE_URL = '/api/skills'
@@ -27,6 +27,27 @@ export const listMarketInstalls = async ({ limit, offset, search, catalogAll = f
   if (catalogAll) params.set('catalog_all', 'true')
   return apiGet(`${MARKET_BASE_URL}/-/installs${params.size ? `?${params}` : ''}`)
 }
+/** 按当前管理员权限搜索和分页读取市场治理条目。 */
+export const listManagedMarketSkills = async ({ query = '', slug = '', status = 'all', scope = 'all', offset = 0, limit = 20 } = {}) => {
+  const params = new URLSearchParams({ offset: String(offset), limit: String(limit) })
+  if (query.trim()) params.set('query', query.trim())
+  if (slug) params.set('slug', slug)
+  if (status !== 'all') params.set('status', status)
+  if (scope !== 'all') params.set('scope', scope)
+  return apiAdminGet(`${MARKET_BASE_URL}/-/management?${params}`)
+}
+/** 读取单条市场治理状态，不走公开详情接口。 */
+export const getManagedMarketSkill = async (slug) => apiAdminGet(`${MARKET_BASE_URL}/-/management/${encodeURIComponent(slug)}`)
+/** 以页面读取的状态修订号下架市场条目。 */
+export const unpublishMarketSkill = async (slug, expectedRevision) =>
+  apiAdminPost(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/unpublish`, { expected_revision: expectedRevision })
+/** 仅由超级管理员调整当前上架范围。 */
+export const changeMarketSkillScope = async (slug, scope, departmentId, expectedRevision) =>
+  apiSuperAdminPut(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/scope`, {
+    scope,
+    department_id: departmentId,
+    expected_revision: expectedRevision
+  })
 export const getMarketSkillTree = async (slug) => apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/tree`)
 export const getMarketSkillFile = async (slug, path = 'SKILL.md') =>
   apiGet(`${MARKET_BASE_URL}/${encodeURIComponent(slug)}/file?path=${encodeURIComponent(path)}`)

@@ -105,6 +105,193 @@ async def _drop_isolated_schema(schema: str, admin_engine, scoped_engine) -> Non
     await admin_engine.dispose()
 
 
+async def _seed_v14_skill_market(manager: PostgresManager, scoped_engine) -> None:
+    """在当前表结构中构造 v14 市场与共享申请的真实旧行。"""
+    await manager.create_business_tables()
+    await manager.create_schema_version_table()
+    await manager.record_schema_version("business", 14)
+    await manager.record_schema_version("knowledge", KNOWLEDGE_SCHEMA_VERSION)
+    async with scoped_engine.begin() as connection:
+        for table, columns in (
+            ("market_skills", ("is_published", "publication_generation", "active_from_version", "state_revision")),
+            ("market_skill_installs", ("confirmed_generation",)),
+            ("skill_share_requests", ("market_generation",)),
+        ):
+            for column in columns:
+                await connection.execute(text(f"ALTER TABLE {table} DROP COLUMN IF EXISTS {column}"))
+        await connection.execute(
+            text(
+                "INSERT INTO users (uid, username, password_hash, role, login_failed_count, is_deleted) "
+                "VALUES ('v14-user', 'v14-user', 'hash', 'user', 0, 0)"
+            )
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO skill_share_requests (id, owner_uid, personal_slug, name, description, category, "
+                "content_hash, channel, status, department_ids, created_at) VALUES "
+                "('v14-market-request', 'v14-owner', 'v14-market', 'Old Market', 'Old description', "
+                "'other', 'old-hash', 'market', 'approved', '[]'::jsonb, NOW()), "
+                "('v14-shared-request', 'v14-owner', 'v14-shared', 'Old Shared', 'Old description', "
+                "'other', 'shared-hash', 'shared', 'approved', '[]'::jsonb, NOW())"
+            )
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO market_skills (id, slug, owner_uid, personal_slug, scope, latest_release_id, "
+                "created_at, updated_at) VALUES "
+                "('v14-listing', 'v14-market', 'v14-owner', 'v14-market', 'global', 'v14-release', NOW(), NOW())"
+            )
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO market_skill_releases (id, market_skill_id, version, name, description, category, "
+                "dir_path, content_hash, tool_dependencies, mcp_dependencies, skill_dependencies, "
+                "request_id, created_at) "
+                "VALUES ('v14-release', 'v14-listing', 2, 'Old Market', 'Old description', 'other', "
+                "'market/releases/v14-release', 'old-hash', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, "
+                "'v14-market-request', NOW())"
+            )
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO market_skill_installs (uid, market_skill_id, release_id, installed_at, updated_at) "
+                "VALUES ('v14-user', 'v14-listing', 'v14-release', NOW(), NOW())"
+            )
+        )
+
+
+def _isolate_skill_market_migrator(monkeypatch, tmp_path, manager: PostgresManager, scoped_engine) -> None:
+    """让真实 Schema migrator 使用独立数据库并跳过非 Schema 外部副作用。"""
+    manager.AsyncSession = async_sessionmaker(scoped_engine, expire_on_commit=False)
+
+    async def no_effect(*_args, **_kwargs):
+        """隔离与本测试无关的运行时收敛。"""
+
+    async def read_empty_plan(_db):
+        """声明隔离数据库不含历史工作目录。"""
+        return V071WorkdirMigrationPlan(False, (), ())
+
+    monkeypatch.setattr(storage_migration, "pg_manager", manager)
+    monkeypatch.setattr(storage_migration, "read_v071_workdir_plan", read_empty_plan)
+    monkeypatch.setattr(storage_migration, "_legacy_skill_roots_exist", lambda: False)
+    monkeypatch.setattr(storage_migration, "_legacy_system_config_exists", lambda: False)
+    monkeypatch.setattr(storage_migration, "runtime_storage_requires_quiescence", lambda: False)
+    monkeypatch.setattr(storage_migration, "_converge_database_state", no_effect)
+    monkeypatch.setattr(storage_migration, "migrate_shared_skills", no_effect)
+    monkeypatch.setattr(storage_migration, "mark_v071_skills_migrated", lambda: None)
+    monkeypatch.setattr(storage_migration, "migrate_runtime_storage_identity", lambda: None)
+    monkeypatch.setattr(storage_migration, "get_legacy_storage_dir", lambda: tmp_path)
+    monkeypatch.setattr(manager, "close", no_effect)
+
+
+async def test_skill_market_v14_rows_backfill_first_generation(monkeypatch, tmp_path) -> None:
+    """现存发布、安装与共享申请迁入首批次，历史身份不变。"""
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_skill_market_v14")
+    try:
+        await _seed_v14_skill_market(manager, scoped_engine)
+        _isolate_skill_market_migrator(monkeypatch, tmp_path, manager, scoped_engine)
+
+        await storage_migration.main()
+
+        async with scoped_engine.connect() as connection:
+            listing = (
+                await connection.execute(
+                    text(
+                        "SELECT is_published, publication_generation, active_from_version, state_revision, "
+                        "latest_release_id FROM market_skills WHERE id = 'v14-listing'"
+                    )
+                )
+            ).one()
+            install = (
+                await connection.execute(
+                    text(
+                        "SELECT release_id, confirmed_generation FROM market_skill_installs "
+                        "WHERE uid = 'v14-user' AND market_skill_id = 'v14-listing'"
+                    )
+                )
+            ).one()
+            requests = (
+                await connection.execute(text("SELECT id, market_generation FROM skill_share_requests ORDER BY id"))
+            ).all()
+            release = (
+                await connection.execute(
+                    text("SELECT id, version, request_id FROM market_skill_releases WHERE id = 'v14-release'")
+                )
+            ).one()
+        assert listing == (True, 1, 1, 1, "v14-release")
+        assert install == ("v14-release", 1)
+        assert requests == [("v14-market-request", 1), ("v14-shared-request", None)]
+        assert release == ("v14-release", 2, "v14-market-request")
+        assert listing.is_published and install.confirmed_generation == listing.publication_generation
+        assert release.version >= listing.active_from_version
+        assert (await manager.get_schema_versions())["business"] == BUSINESS_SCHEMA_VERSION
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
+async def test_skill_market_v15_migration_is_idempotent(monkeypatch, tmp_path) -> None:
+    """失败不推进版本，重试及重复迁移保留发布与安装身份。"""
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_skill_market_v15")
+    try:
+        await _seed_v14_skill_market(manager, scoped_engine)
+        _isolate_skill_market_migrator(monkeypatch, tmp_path, manager, scoped_engine)
+        real_ensure = manager.ensure_skill_market_schema
+
+        async def fail_after_schema_change() -> None:
+            """模拟 Schema 已补齐但 migrator 尚未提交版本时失败。"""
+            await real_ensure()
+            raise RuntimeError("injected v15 migration failure")
+
+        monkeypatch.setattr(manager, "ensure_skill_market_schema", fail_after_schema_change)
+        with pytest.raises(RuntimeError, match="injected v15 migration failure"):
+            await storage_migration.main()
+        assert (await manager.get_schema_versions())["business"] == 14
+
+        monkeypatch.setattr(manager, "ensure_skill_market_schema", real_ensure)
+        await storage_migration.main()
+        async with scoped_engine.connect() as connection:
+            first_version = (
+                await connection.execute(
+                    text("SELECT version, applied_at FROM yuxi_schema_migrations WHERE domain = 'business'")
+                )
+            ).one()
+            first_rows = (
+                await connection.execute(
+                    text(
+                        "SELECT listing.latest_release_id, release.id, install.release_id, "
+                        "install.confirmed_generation FROM market_skills AS listing "
+                        "JOIN market_skill_releases AS release ON release.market_skill_id = listing.id "
+                        "JOIN market_skill_installs AS install ON install.market_skill_id = listing.id "
+                        "WHERE listing.id = 'v14-listing'"
+                    )
+                )
+            ).one()
+
+        await storage_migration.main()
+        async with scoped_engine.connect() as connection:
+            second_version = (
+                await connection.execute(
+                    text("SELECT version, applied_at FROM yuxi_schema_migrations WHERE domain = 'business'")
+                )
+            ).one()
+            second_rows = (
+                await connection.execute(
+                    text(
+                        "SELECT listing.latest_release_id, release.id, install.release_id, "
+                        "install.confirmed_generation FROM market_skills AS listing "
+                        "JOIN market_skill_releases AS release ON release.market_skill_id = listing.id "
+                        "JOIN market_skill_installs AS install ON install.market_skill_id = listing.id "
+                        "WHERE listing.id = 'v14-listing'"
+                    )
+                )
+            ).one()
+        assert first_version.version == BUSINESS_SCHEMA_VERSION
+        assert second_version == first_version
+        assert first_rows == second_rows == ("v14-release", "v14-release", "v14-release", 1)
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)
+
+
 async def test_schema_migration_lock_serializes_real_postgres_sessions() -> None:
     """两个 migrator 竞争同一 advisory lock 时只允许一个进入临界区。"""
     engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
@@ -295,7 +482,7 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
             "ix_scheduled_agent_runs_job_created",
             "ix_scheduled_agent_runs_dispatching",
         }.issubset(scheduled_indexes)
-        assert BUSINESS_SCHEMA_VERSION == 14
+        assert BUSINESS_SCHEMA_VERSION == 15
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 
@@ -380,7 +567,7 @@ async def test_skill_share_request_table_migrates_from_previous_business_schema(
         assert nullable == "YES"
         assert tuple(legacy) == ("approved", "credit-check", None)
         assert "uq_skill_share_requests_pending" in indexes
-        assert BUSINESS_SCHEMA_VERSION == 14
+        assert BUSINESS_SCHEMA_VERSION == 15
         assert (await manager.get_schema_versions())["business"] == 8
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
